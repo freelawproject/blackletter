@@ -73,14 +73,15 @@ def main():
         )
 
         pipeline = BlackletterPipeline(config)
-        redacted_pdf, opinions_dir = pipeline.process(
+        redacted_pdf, redacted_opinions, masked_opinions = pipeline.process(
             args.pdf,
             args.output,
             args.page
         )
 
         logger.info(f"✓ Redacted PDF: {redacted_pdf}")
-        logger.info(f"✓ Opinions extracted to: {opinions_dir}")
+        logger.info(f"✓ Opinions extracted to: {masked_opinions}")
+        logger.info(f"✓ Opinions extracted to: {redacted_opinions}")
         return 0
 
     except Exception as e:

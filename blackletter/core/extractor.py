@@ -2,7 +2,7 @@
 
 import logging
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Set
 
 import fitz
 
@@ -17,6 +17,66 @@ class OpinionExtractor:
     def __init__(self, config: RedactionConfig):
         self.config = config
 
+    def get_filler_pages(self, redaction_instructions: List[Dict]) -> Set[int]:
+        """Identify pages between caption and line/headmatter (filler pages)."""
+        filler_pages = set()
+
+        for instr in redaction_instructions:
+            start_pg = instr["start"]["page_index"]
+            end_pg = instr["end"]["page_index"]
+
+            # Pages strictly between caption and line/headmatter are filler
+            for pg in range(start_pg + 1, end_pg):
+                filler_pages.add(pg)
+
+        return filler_pages
+
+    def split_opinions(
+            self,
+            src_pdf_path: Path,
+            opinion_spans: List[Dict],
+    ) -> Path:
+        """Extract opinions into separate PDFs WITHOUT masking.
+
+        Creates redacted/ directory with individual opinions.
+        All pages from start to end included, no masking applied.
+
+        Args:
+            src_pdf_path: Path to the redacted source PDF
+            opinion_spans: List of opinion spans from planner
+
+        Returns:
+            Path to the redacted opinions directory
+        """
+        src_pdf_path = Path(src_pdf_path)
+        redacted_dir = src_pdf_path.parent / "redacted"
+        redacted_dir.mkdir(parents=True, exist_ok=True)
+
+        src = fitz.open(src_pdf_path)
+
+        logger.info(f"Extracting {len(opinion_spans)} opinions to redacted/")
+
+        for item in opinion_spans:
+            start_pg_idx = int(item["start"]["page_index"])
+            end_pg_idx = int(item["end"]["page_index"])
+            case_name = item.get("case_name", f"opinion_{item['n']:03d}")
+
+            redacted_fp = redacted_dir / f"{case_name}.pdf"
+
+            # Create PDF with only this opinion's pages (no masking)
+            doc_out = fitz.open()
+            doc_out.insert_pdf(src, from_page=start_pg_idx, to_page=end_pg_idx)
+
+            doc_out.save(str(redacted_fp), garbage=4, deflate=True)
+            doc_out.close()
+
+            logger.info(f"Extracted to redacted/: {case_name}")
+
+        src.close()
+        logger.info(f"Saved {len(opinion_spans)} opinions to {redacted_dir}")
+        return redacted_dir
+
+
     def split_and_mask_opinions(
             self,
             src_pdf_path: Path,
@@ -24,6 +84,7 @@ class OpinionExtractor:
             page_columns_px: Dict,
             page_headers: Dict,
             page_footers: Dict,
+            redaction_instructions: List[Dict],
     ) -> Path:
         """Extract opinions into separate PDFs with masking.
 
@@ -37,6 +98,7 @@ class OpinionExtractor:
         Returns:
             Path to the masked opinions directory
         """
+
         src_pdf_path = Path(src_pdf_path)
         masked_dir = src_pdf_path.parent / "masked"
         masked_dir.mkdir(parents=True, exist_ok=True)
@@ -71,6 +133,12 @@ class OpinionExtractor:
                 page_footers,
                 scale,
             )
+            filler_pages = self.get_filler_pages(redaction_instructions)
+            for pg_idx in sorted(filler_pages, reverse=True):
+                if start_pg_idx <= pg_idx <= end_pg_idx:
+                    # Convert global page index to local index in doc_out
+                    local_idx = pg_idx - start_pg_idx
+                    doc_out.delete_page(local_idx)
 
             doc_out.save(str(masked_fp), garbage=4, deflate=True)
             doc_out.close()
@@ -138,8 +206,6 @@ class OpinionExtractor:
                 p_start,
                 fitz.Rect(0, hy_start, split_start, min(sy_pt, fy_start))
             )
-            safe_redact(p_start,
-                        fitz.Rect(split_start, hy_start, W_start, fy_start))
         elif start_col == "RIGHT":
             # Mask left column and everything above opinion on right
             safe_redact(p_start, fitz.Rect(0, hy_start, split_start, fy_start))

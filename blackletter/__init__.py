@@ -33,7 +33,7 @@ class BlackletterPipeline:
 
     def process(
         self, pdf_path: Path, output_folder: Path = None, first_page: int = 1
-    ) -> Tuple[Path, Path]:
+    ) -> Tuple[Path, Path, Path]:
         """Execute complete redaction pipeline.
 
         Args:
@@ -42,7 +42,7 @@ class BlackletterPipeline:
             first_page: First page number for case naming
 
         Returns:
-            (redacted_pdf_path, opinions_dir)
+            (redacted_pdf_path, redacted_opinions_dir, masked_opinions_dir)
         """
         pdf_path = Path(pdf_path)
         if output_folder is None:
@@ -76,20 +76,27 @@ class BlackletterPipeline:
 
         # Post-processing: Extract opinions
         extractor = OpinionExtractor(self.config)
-        opinions_dir = extractor.split_and_mask_opinions(
+
+        redacted_opinions_dir = extractor.split_opinions(
+            src_pdf_path=redacted_pdf,
+            opinion_spans=opinion_spans,
+        )
+
+        masked_opinions_dir = extractor.split_and_mask_opinions(
             src_pdf_path=redacted_pdf,
             opinion_spans=opinion_spans,
             page_columns_px=page_columns_px,
             page_headers=page_headers,
             page_footers=page_footers,
+            redaction_instructions=redaction_instructions,
         )
 
         logger.info("Pipeline completed successfully")
-        return redacted_pdf, opinions_dir
+        return redacted_pdf, redacted_opinions_dir, masked_opinions_dir
 
 
 # Convenience functions
-def redact_pdf(pdf_path: Path, output_folder: Path = None) -> Tuple[Path, Path]:
+def redact_pdf(pdf_path: Path, output_folder: Path = None) -> Tuple[Path, Path, Path]:
     """Simple interface: redact a PDF with default configuration."""
     pipeline = BlackletterPipeline()
     return pipeline.process(pdf_path, output_folder)
