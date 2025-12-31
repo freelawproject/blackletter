@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "blackletter"
-version = "0.1.0"
+version = "0.0.1"
 description = "Remove copyrighted material from legal case law PDFs"
 readme = "README.md"
 requires-python = ">=3.8"
@@ -38,7 +38,7 @@ include = ["blackletter*"]
 
 [tool.black]
 line-length = 100
-target-version = ['py38', 'py39', 'py310', 'py311']
+target-version = ['py38', 'py39', 'py310', 'py311', 'py312']
 
 [tool.ruff]
 line-length = 100

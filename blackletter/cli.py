@@ -32,6 +32,20 @@ def main():
     )
 
     parser.add_argument(
+        "-v", "--volume",
+        type=str,
+        default=None,
+        help="The volume to redact"
+    )
+
+    parser.add_argument(
+        "-r", "--reporter",
+        type=str,
+        default=None,
+        help="The reporter to extract out."
+    )
+
+    parser.add_argument(
         "-p", "--page",
         type=int,
         default=1,

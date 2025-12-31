@@ -10,7 +10,7 @@ import pdfplumber
 from ultralytics import YOLO
 
 from blackletter.config import RedactionConfig
-from blackletter.utils import processing, filtering
+from blackletter.utils import processing
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +51,6 @@ class PDFScanner:
             for page_idx, page in enumerate(pdf.pages):
                 logger.info(f"Scanning page {page_idx + 1}/{len(pdf.pages)}")
 
-                if page_idx > 41:
-                    break
                 pil_img = page.to_image(resolution=self.config.dpi).original
                 img = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
                 h_img, w_img = img.shape[:2]
@@ -105,7 +103,7 @@ class PDFScanner:
             columns: Tuple,
     ) -> List[Dict]:
         """Detect objects on a single page using YOLO."""
-        LEFT_X1, LEFT_X2, RIGHT_X1, RIGHT_X2, split_x = columns
+        # LEFT_X1, LEFT_X2, RIGHT_X1, RIGHT_X2, split_x = columns
         results = self.model(
             img, conf=self.config.low_confidence_threshold, verbose=False
         )

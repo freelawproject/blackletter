@@ -17,33 +17,6 @@ class RedactionConfig:
         self.MODEL_PATH: str = str(root / "models" / "best.pt")
 
 
-    @staticmethod
-    def _resolve_model_path() -> str:
-        """Resolve the model path, checking multiple locations."""
-        # Try 1: models/best.pt relative to package root
-        config_dir = Path(__file__).parent
-        candidate = config_dir.parent / "models" / "best.pt"
-        if candidate.exists():
-            return str(candidate.resolve())
-
-        # Try 2: best.pt at package root
-        candidate = config_dir.parent / "best.pt"
-        if candidate.exists():
-            return str(candidate.resolve())
-
-        # Try 3: Current working directory - models/best.pt
-        candidate = Path.cwd() / "models" / "best.pt"
-        if candidate.exists():
-            return str(candidate.resolve())
-
-        # Try 4: Current working directory - best.pt
-        candidate = Path.cwd() / "best.pt"
-        if candidate.exists():
-            return str(candidate.resolve())
-
-        # Fall back to models/best.pt
-        return str((Path.cwd() / "models" / "best.pt").resolve())
-
     # Image processing
     dpi: int = 200
     confidence_threshold: float = 0.20

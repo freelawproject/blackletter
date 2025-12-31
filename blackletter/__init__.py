@@ -17,8 +17,7 @@ from blackletter.core.planner import OpinionPlanner
 from blackletter.core.redactor import PDFRedactor
 from blackletter.core.extractor import OpinionExtractor
 
-__version__ = "0.1.0"
-__author__ = "Your Name"
+__version__ = "0.0.1"
 
 logger = logging.getLogger(__name__)
 

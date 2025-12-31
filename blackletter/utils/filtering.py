@@ -1,6 +1,6 @@
 """Box filtering and deduplication utilities."""
 
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict
 
 
 class BoxFilter:
@@ -106,26 +106,3 @@ class BoxFilter:
         """
         x1, y1, x2, y2 = box
         return (x2 - x1) * (y2 - y1)
-
-    @staticmethod
-    def clamp_lr_margin_xyxy(
-            coords: List[float], W: int, left_margin: int = 40,
-            right_margin: int = 120
-    ) -> List[float]:
-        """Clamp bbox to left/right margins.
-
-        Args:
-            coords: [x1, y1, x2, y2] in pixels
-            W: Image width
-            left_margin: Minimum x distance from left edge
-            right_margin: Minimum x distance from right edge
-
-        Returns:
-            Clamped coordinates
-        """
-        x1, y1, x2, y2 = coords
-        x1 = max(x1, left_margin)
-        x2 = min(x2, W - right_margin)
-        if x2 < x1:
-            x2 = x1
-        return [x1, y1, x2, y2]
