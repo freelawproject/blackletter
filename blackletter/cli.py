@@ -26,7 +26,14 @@ def main():
         help="Output folder (default: pdf_parent/redactions)",
     )
 
-    parser.add_argument("-v", "--volume", type=str, default=None, help="The volume to redact")
+    # To be used for naming conventions
+    parser.add_argument(
+        "-v",
+        "--volume",
+        type=str,
+        default=None,
+        help="The volume to redact useful for naming in the future",
+    )
 
     parser.add_argument(
         "-r", "--reporter", type=str, default=None, help="The reporter to extract out."
@@ -60,6 +67,12 @@ def main():
         "--reduce",
         action="store_true",
         help="Remove pages that are fully redacted from mask",
+    )
+
+    parser.add_argument(
+        "--combine",
+        action="store_true",
+        help="Combine simple dispositions",
     )
 
     args = parser.parse_args()

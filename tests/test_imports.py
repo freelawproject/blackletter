@@ -66,16 +66,11 @@ def test_config_customization():
     """Test that config can be customized."""
     from blackletter.config import RedactionConfig
 
-    config = RedactionConfig(
-        dpi=150,
-        confidence_threshold=0.25,
-        MODEL_PATH="custom.pt"
-    )
+    config = RedactionConfig(dpi=150, confidence_threshold=0.25, MODEL_PATH="custom.pt")
 
     assert config.dpi == 150
     assert config.confidence_threshold == 0.25
     assert config.MODEL_PATH == "custom.pt"
-
 
 
 def test_column_for_coords():

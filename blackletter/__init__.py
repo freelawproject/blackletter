@@ -1,8 +1,8 @@
 """Blackletter: Remove copyrighted material from case law PDFs.
 
 A reference to blackletter law, this module removes proprietary annotations
-from legal documents—specifically Westlaw key citations, headnotes, and other
-copyrighted judicial materials—while preserving the authentic opinion text.
+from legal documents—specifically key citations, headnotes, and other
+copyrighted non-judicial materials—while preserving the authentic opinion text.
 """
 
 import logging
@@ -16,6 +16,7 @@ from blackletter.core.scanner import PDFScanner, Document
 from blackletter.core.planner import OpinionPlanner
 from blackletter.core.redactor import PDFRedactor
 from blackletter.core.extractor import OpinionExtractor
+from blackletter.core.advance_sheet import scan_splitter
 
 __version__ = "0.0.1"
 

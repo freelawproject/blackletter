@@ -2,13 +2,16 @@ from setuptools import setup, find_packages
 
 setup(
     name="blackletter",
-    version="0.1.0",
+    version="0.0.1",
     description="Remove copyrighted material from legal case law PDFs",
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="William E. Palin",
+    author_email="bill@free.law",
     url="https://github.com/yourusername/blackletter",
     license="MIT",
     packages=find_packages(),
+    package_data={
+        "blackletter": ["models/best.pt", "prompts/advance_sheet.txt"],
+    },
     python_requires=">=3.8",
     install_requires=[
         "ultralytics>=8.0.0",
@@ -16,6 +19,7 @@ setup(
         "pdfplumber>=0.10.0",
         "pymupdf>=1.23.0",
         "numpy>=1.20.0",
+        "google-generativeai>=0.3.0",
     ],
     extras_require={
         "dev": [
@@ -39,5 +43,6 @@ setup(
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
     ],
 )

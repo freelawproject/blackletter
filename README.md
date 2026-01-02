@@ -2,7 +2,7 @@
 
 Remove copyrighted material from legal case law PDFs.
 
-A reference to blackletter law, this tool removes proprietary annotations from judicial opinions—specifically Westlaw key citations, headnotes, and other copyrighted materials—while preserving the authentic opinion text.
+A reference to blackletter law, this tool removes proprietary annotations from judicial opinions—specifically, headnotes, and other copyrighted materials—while preserving the authentic opinion text.
 
 ## Installation
 
@@ -21,11 +21,64 @@ blackletter path/to/opinion.pdf -o output/folder -p 737
 
 **Python:**
 ```python
+from pathlib import Path
 from blackletter import BlackletterPipeline
 
 pipeline = BlackletterPipeline()
-redacted_pdf, redacted_opinions, masked_opinions = pipeline.process("opinion.pdf")
+redacted_pdf, redacted_opinions, masked_opinions = pipeline.process(
+    path_to_file,
+    output_folder=Path("output"),
+    first_page=1,
+    redact=True,
+    mask=True,
+)
 ```
+
+Or use the convenience function:
+```python
+from pathlib import Path
+from blackletter import redact_pdf
+
+redacted_pdf, redacted_opinions, masked_opinions = redact_pdf(path_to_file)
+```
+
+Another example, that takes the raw scan and isolates the opinion context before splitting 
+```
+from pathlib import Path
+from blackletter import BlackletterPipeline, scan_splitter
+
+pipeline = BlackletterPipeline()
+raw_scan = "/filepath/to/scan.pdf"
+
+# you can give it manual metadata if you dont want to use the LLM
+metadata = [{"id": 0, "volume": 536, "reporter": "P.3d", "pages": {"start": 737, "end": 1213}}]
+
+OR 
+
+use an env variable LLM_API_KEY for gemini
+
+# Identify the opinion content and separate into volume reporter pages
+results = scan_splitter(
+    target_file=Path(raw_scan),
+    model=pipeline.model,
+    output_dir="/output/directory/here/",
+    metadata=metadata,
+)
+
+# Process each individual volume into its redacted opinions
+for result in results:
+    opinions_filepath = Path(result['opinion_pdf'])
+    parts = Path(opinions_filepath).parts 
+    redacted_pdf, _, _ = pipeline.process(
+        pdf_path=filepath,
+        first_page=int(parts[-2]),
+        redact=True,
+        mask=True,
+        reduce=True,
+    )
+
+```
+
 
 ## How It Works
 
@@ -52,8 +105,8 @@ Optional Arguments:
   -m, --model PATH      Path to YOLO model (default: best.pt)
   -c, --confidence FLOAT Confidence threshold (default: 0.20)
   -d, --dpi INT         DPI for PDF rendering (default: 200)
-  --redact              Only redact PDF without masking
-  --mask                Only mask opinions (extract without redacting PDF)
+  --redact              Generate unique redacted PDFs
+  --mask                Generate unique masked opinions
   --reduce              Remove fully redacted pages from masked output
 ```
 

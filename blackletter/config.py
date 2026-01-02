@@ -13,7 +13,8 @@ class RedactionConfig:
 
     def __post_init__(self):
         """Resolve model path after initialization."""
-        root = Path(__file__).parent.parent
+
+        root = Path(__file__).parent
         self.MODEL_PATH: str = str(root / "models" / "best.pt")
 
     # Image processing

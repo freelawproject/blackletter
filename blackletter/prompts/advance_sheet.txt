@@ -1,0 +1,57 @@
+Extract the Volume and Repoter and Page ranges contained in the first page
+
+Ex. 1
+
+Input
+
+536 P.3d No. 4          Pages 1214-1292
+537 P.3d No. 1          Pages 1-337
+
+Expected Output
+
+[
+  {
+    "id": 0,
+    "volume": "536",
+    "reporter": "P.3d",
+    "issue_no": "4",
+    "pages": {
+      "start": 1214,
+      "end": 1292
+    }
+  },
+  {
+    "id": 1,
+    "volume": "537",
+    "reporter": "P.3d",
+    "issue_no": "1",
+    "pages": {
+      "start": 1,
+      "end": 337
+    }
+  }
+]
+
+or
+
+Ex. 2
+
+537 P.3d No. 2          Pages 338-769
+
+Expected Output
+
+[
+  {
+    "id": 0,
+    "volume": 537,
+    "reporter": "P.3d",
+    "issue_no": 2,
+    "pages": {
+      "start": 338,
+      "end": 769
+    }
+  }
+]
+
+Return ONLY valid JSON.
+Extract volume reporter and page ranges please
