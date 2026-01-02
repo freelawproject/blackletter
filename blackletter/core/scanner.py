@@ -193,8 +193,6 @@ class PDFScanner:
 
         with pdfplumber.open(document.pdf_path) as pdf:
             for page_idx, page in enumerate(pdf.pages):
-                if page_idx > 25:
-                    break
                 logger.info(f"Scanning page {page_idx + 1}/{len(pdf.pages)}")
 
                 pil_img = page.to_image(resolution=self.config.dpi).original
