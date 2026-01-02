@@ -101,11 +101,11 @@ def test_column_for_coords():
     from blackletter.utils.processing import column_for_coords
 
     # Left column
-    col = column_for_coords([10, 10, 50, 50], split_x=100)
+    col = column_for_coords([10, 10, 50, 50], center_X=100)
     assert col == "LEFT"
 
     # Right column
-    col = column_for_coords([150, 10, 190, 50], split_x=100)
+    col = column_for_coords([150, 10, 190, 50], center_X=100)
     assert col == "RIGHT"
 
 

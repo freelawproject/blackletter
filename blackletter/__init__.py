@@ -12,7 +12,7 @@ from typing import Tuple
 from ultralytics import YOLO
 
 from blackletter.config import RedactionConfig
-from blackletter.core.scanner import PDFScanner
+from blackletter.core.scanner import PDFScanner, Document
 from blackletter.core.planner import OpinionPlanner
 from blackletter.core.redactor import PDFRedactor
 from blackletter.core.extractor import OpinionExtractor
@@ -31,7 +31,13 @@ class BlackletterPipeline:
         self.model = YOLO(self.config.MODEL_PATH)
 
     def process(
-        self, pdf_path: Path, output_folder: Path = None, first_page: int = 1
+        self,
+        pdf_path: Path,
+        output_folder: Path = None,
+        first_page: int = 1,
+        mask: bool = False,
+        redact: bool = False,
+        reduce: bool = False,
     ) -> Tuple[Path, Path, Path]:
         """Execute complete redaction pipeline.
 
@@ -43,7 +49,8 @@ class BlackletterPipeline:
         Returns:
             (redacted_pdf_path, redacted_opinions_dir, masked_opinions_dir)
         """
-        pdf_path = Path(pdf_path)
+        document = Document(pages=[], first_page=first_page, pdf_path=pdf_path)
+
         if output_folder is None:
             output_folder = pdf_path.parent / "redactions"
 
@@ -51,47 +58,28 @@ class BlackletterPipeline:
 
         # Phase 1: Scan
         scanner = PDFScanner(self.config, self.model)
-        global_objects, page_dimensions, page_columns_px = scanner.scan(pdf_path)
+        document = scanner.scan(document)
 
         # Phase 2: Plan
         planner = OpinionPlanner(self.config)
-        (
-            redaction_instructions,
-            opinion_spans,
-            page_headers,
-            page_footers,
-        ) = planner.plan(global_objects, first_page)
+        document = planner.plan(document)
 
         # Phase 3: Execute
         redactor = PDFRedactor(self.config)
-        redacted_pdf = redactor.redact(
-            pdf_path,
-            redaction_instructions,
-            global_objects,
-            page_dimensions,
-            page_columns_px,
-            output_folder,
-        )
+        redactor.redact(document, output_folder)
 
+        redacted_opinions_dir, masked_opinions_dir = None, None
         # Post-processing: Extract opinions
         extractor = OpinionExtractor(self.config)
-
-        redacted_opinions_dir = extractor.split_opinions(
-            src_pdf_path=redacted_pdf,
-            opinion_spans=opinion_spans,
-        )
-
-        masked_opinions_dir = extractor.split_and_mask_opinions(
-            src_pdf_path=redacted_pdf,
-            opinion_spans=opinion_spans,
-            page_columns_px=page_columns_px,
-            page_headers=page_headers,
-            page_footers=page_footers,
-            redaction_instructions=redaction_instructions,
-        )
+        if redact == True:
+            redacted_opinions_dir = extractor.split_opinions(document=document)
+        if mask == True:
+            masked_opinions_dir = extractor.split_and_mask_opinions(
+                document=document, reduce=reduce
+            )
 
         logger.info("Pipeline completed successfully")
-        return redacted_pdf, redacted_opinions_dir, masked_opinions_dir
+        return Path(document.redacted_pdf_path), redacted_opinions_dir, masked_opinions_dir
 
 
 # Convenience functions

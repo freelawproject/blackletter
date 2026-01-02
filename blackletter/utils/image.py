@@ -11,14 +11,14 @@ class ImageProcessor:
 
     @staticmethod
     def tighten_bbox_px(
-            img_bgr: np.ndarray,
-            coords: List[float],
-            kind: str = "key",
-            expand: int = 12,
-            pad: int = 2,
-            min_area: int = 40,
-            min_rel_w: float = 0.45,
-            min_rel_h: float = 0.45,
+        img_bgr: np.ndarray,
+        coords: List[float],
+        kind: str = "key",
+        expand: int = 12,
+        pad: int = 2,
+        min_area: int = 40,
+        min_rel_w: float = 0.45,
+        min_rel_h: float = 0.45,
     ) -> List[float]:
         """Tighten bounding box using image content analysis.
 
@@ -41,9 +41,7 @@ class ImageProcessor:
         orig_h = max(1, y2 - y1)
 
         # Expand ROI
-        ex1, ey1, ex2, ey2 = _clip_rect(
-            x1 - expand, y1 - expand, x2 + expand, y2 + expand, W, H
-        )
+        ex1, ey1, ex2, ey2 = _clip_rect(x1 - expand, y1 - expand, x2 + expand, y2 + expand, W, H)
         if ex1 is None:
             return coords
 
@@ -55,8 +53,7 @@ class ImageProcessor:
 
         # Choose detection method
         if kind in ("key", "textline", "hline"):
-            _, th = cv2.threshold(gray, 0, 255,
-                                  cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            _, th = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
             if th.mean() > 127:
                 th = cv2.bitwise_not(th)
 
@@ -64,14 +61,12 @@ class ImageProcessor:
                 k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
                 th = cv2.morphologyEx(th, cv2.MORPH_OPEN, k, iterations=1)
                 th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=1)
-                rr = ImageProcessor._finish_from_mask(th, pick="largest",
-                                                      min_area=min_area)
+                rr = ImageProcessor._finish_from_mask(th, pick="largest", min_area=min_area)
 
             elif kind == "textline":
                 k = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
                 th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, k, iterations=2)
-                rr = ImageProcessor._finish_from_mask(th, pick="union",
-                                                      min_area=min_area)
+                rr = ImageProcessor._finish_from_mask(th, pick="union", min_area=min_area)
 
             elif kind == "hline":
                 kw = max(25, int(th.shape[1] * 0.25))
@@ -80,16 +75,14 @@ class ImageProcessor:
                 dk = cv2.getStructuringElement(cv2.MORPH_RECT, (7, 3))
                 only_h = cv2.dilate(only_h, dk, iterations=1)
                 rr = ImageProcessor._finish_from_mask(
-                    only_h, pick="best_aspect", aspect_pref=lambda a: a,
-                    min_area=min_area
+                    only_h, pick="best_aspect", aspect_pref=lambda a: a, min_area=min_area
                 )
 
         elif kind == "edges":
             edges = cv2.Canny(gray, 60, 180)
             dk = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
             edges = cv2.dilate(edges, dk, iterations=2)
-            rr = ImageProcessor._finish_from_mask(edges, pick="union",
-                                                  min_area=min_area)
+            rr = ImageProcessor._finish_from_mask(edges, pick="union", min_area=min_area)
 
         if rr is None:
             return coords
@@ -116,10 +109,10 @@ class ImageProcessor:
 
     @staticmethod
     def _finish_from_mask(
-            mask: np.ndarray,
-            pick: str = "union",
-            aspect_pref: Optional[Callable] = None,
-            min_area: int = 40,
+        mask: np.ndarray,
+        pick: str = "union",
+        aspect_pref: Optional[Callable] = None,
+        min_area: int = 40,
     ) -> Optional[Tuple[int, int, int, int]]:
         """Find bounding box from binary mask.
 
@@ -132,8 +125,7 @@ class ImageProcessor:
         Returns:
             (x, y, width, height) or None
         """
-        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
+        cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if not cnts:
             return None
 
@@ -171,7 +163,7 @@ class ImageProcessor:
 
 
 def _clip_rect(
-        x1: float, y1: float, x2: float, y2: float, W: int, H: int
+    x1: float, y1: float, x2: float, y2: float, W: int, H: int
 ) -> Optional[Tuple[int, int, int, int]]:
     """Clip rectangle to image bounds."""
     x1 = max(0, min(W, int(x1)))

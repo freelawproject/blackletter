@@ -1,23 +1,24 @@
 """Text extraction and redaction utilities."""
 
 import logging
-from typing import List, Dict, Tuple, Optional
+from typing import List, Dict, Tuple
+from blackletter.config import RedactionConfig
 
 import fitz
 
 logger = logging.getLogger(__name__)
 
-REDACTION_FILL = (0.2, 0.2, 0.2)  # Dark gray
+config = RedactionConfig()
 
 
 def redact_text_lines_in_window(
-        page_pl,
-        page_fitz,
-        win_pdf: Tuple[float, float, float, float],
-        pad: float = 1.5,
-        y_tol: float = 3.0,
-        merge_gap: float = 2.5,
-        min_h: float = 6.0,
+    page_pl,
+    page_fitz,
+    win_pdf: Tuple[float, float, float, float],
+    pad: float = 1.5,
+    y_tol: float = 3.0,
+    merge_gap: float = 2.5,
+    min_h: float = 6.0,
 ):
     """Redact text lines within a window using pdfplumber.
 
@@ -69,13 +70,10 @@ def redact_text_lines_in_window(
 
     # Apply redactions
     for rx0, ry0, rx1, ry1 in rects:
-        page_fitz.add_redact_annot(fitz.Rect(rx0, ry0, rx1, ry1),
-                                   fill=REDACTION_FILL)
+        page_fitz.add_redact_annot(fitz.Rect(rx0, ry0, rx1, ry1), fill=config.redaction_fill)
 
 
-def _cluster_words_into_lines(
-        words: List[Dict], y_tol: float = 3.0
-) -> List[List[Dict]]:
+def _cluster_words_into_lines(words: List[Dict], y_tol: float = 3.0) -> List[List[Dict]]:
     """Group words into horizontal lines using top coordinate.
 
     Args:
@@ -105,9 +103,7 @@ def _cluster_words_into_lines(
     return lines
 
 
-def _merge_close_rects(
-        rects: List[Tuple], gap_tol: float = 2.5
-) -> List[Tuple]:
+def _merge_close_rects(rects: List[Tuple], gap_tol: float = 2.5) -> List[Tuple]:
     """Merge vertically-close rectangles to reduce redaction count.
 
     Args:

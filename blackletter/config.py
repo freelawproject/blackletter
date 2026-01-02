@@ -16,7 +16,6 @@ class RedactionConfig:
         root = Path(__file__).parent.parent
         self.MODEL_PATH: str = str(root / "models" / "best.pt")
 
-
     # Image processing
     dpi: int = 200
     confidence_threshold: float = 0.20

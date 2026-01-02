@@ -5,16 +5,20 @@ from typing import List, Tuple, Optional
 
 import cv2
 import numpy as np
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from blackletter.core.scanner import Detection, PageContext
+
 
 logger = logging.getLogger(__name__)
 
 
-def detect_columns_from_image(img_bgr: np.ndarray) -> Tuple[
-    int, int, int, int, int]:
+def detect_columns_from_image(img_bgr: np.ndarray) -> Tuple[int, int, int, int, int]:
     """Detect left/right column boundaries from image using projection analysis.
 
     Returns:
-        (LEFT_X1, LEFT_X2, RIGHT_X1, RIGHT_X2, split_x)
+        (LEFT_X1, LEFT_X2, RIGHT_X1, RIGHT_X2, center_X)
     """
     h, w = img_bgr.shape[:2]
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
@@ -68,7 +72,7 @@ def detect_columns_from_image(img_bgr: np.ndarray) -> Tuple[
         vx1 = max(0, valley_center - half)
         vx2 = min(w, valley_center + half)
 
-    split_x = (vx1 + vx2) // 2
+    center_X = (vx1 + vx2) // 2
 
     # Determine where text exists on each side
     text_thr = max(1.0, 0.20 * float(np.mean(proj_smooth)))
@@ -79,8 +83,8 @@ def detect_columns_from_image(img_bgr: np.ndarray) -> Tuple[
             return None
         return int(idx[0] + offset), int(idx[-1] + offset)
 
-    left_bounds = first_last_above(proj_smooth[:split_x], 0)
-    right_bounds = first_last_above(proj_smooth[split_x:], split_x)
+    left_bounds = first_last_above(proj_smooth[:center_X], 0)
+    right_bounds = first_last_above(proj_smooth[center_X:], center_X)
 
     if left_bounds is None or right_bounds is None:
         raise ValueError("Image-based column detection found empty side")
@@ -88,57 +92,46 @@ def detect_columns_from_image(img_bgr: np.ndarray) -> Tuple[
     left_x1, left_x2 = left_bounds
     right_x1, right_x2 = right_bounds
 
-    if not (0 <= left_x1 < left_x2 < split_x < right_x1 < right_x2 <= w):
+    if not (0 <= left_x1 < left_x2 < center_X < right_x1 < right_x2 <= w):
         raise ValueError(
-            f"Image-based bounds look wrong: {(left_x1, left_x2, split_x, right_x1, right_x2)}"
+            f"Image-based bounds look wrong: {(left_x1, left_x2, center_X, right_x1, right_x2)}"
         )
 
-    return (left_x1, left_x2, right_x1, right_x2, split_x)
+    return (left_x1, left_x2, right_x1, right_x2, center_X)
 
 
 def fallback_column_detection(w_img: int) -> Tuple[int, int, int, int, int]:
     """Fallback 50/50 column split when image detection fails."""
     side_pad = max(20, int(w_img * 0.03))
     gutter = max(10, int(w_img * 0.02))
-    split_x = w_img // 2
+    center_X = w_img // 2
     left_x1 = side_pad
-    left_x2 = max(left_x1 + 10, split_x - gutter)
-    right_x1 = min(w_img - side_pad - 10, split_x + gutter)
+    left_x2 = max(left_x1 + 10, center_X - gutter)
+    right_x1 = min(w_img - side_pad - 10, center_X + gutter)
     right_x2 = w_img - side_pad
-    return (left_x1, left_x2, right_x1, right_x2, split_x)
+    return (left_x1, left_x2, right_x1, right_x2, center_X)
 
 
-def column_for_coords(coords: List[float], split_x: int) -> str:
+def column_for_coords(coords: List[float], center_X: int) -> str:
     """Determine if coordinates are in LEFT or RIGHT column.
 
     Args:
         coords: [x1, y1, x2, y2]
-        split_x: x-coordinate of column split
+        center_X: x-coordinate of column split
 
     Returns:
         "LEFT" or "RIGHT"
     """
     x1, _, x2, _ = coords
     center_x = (x1 + x2) / 2
-    return "LEFT" if center_x < split_x else "RIGHT"
+    return "LEFT" if center_x < center_X else "RIGHT"
 
 
 def process_brackets(
-        page,
-        img,
-        coords: List[float],
-        conf: float,
-        pdf_w: float,
-        pdf_h: float,
-        img_w: int,
-        img_h: int,
-        split_x: int,
-        page_brackets: List,
-        LEFT_X1: int,
-        LEFT_X2: int,
-        RIGHT_X1: int,
-        RIGHT_X2: int,
-) -> Optional[Tuple[List[float], str]]:
+    page,
+    bracket: "Detection",
+    page_context: "PageContext",
+) -> Optional[tuple[list[float], str]]:
     """Process bracket detections and assign to columns.
 
     Brackets are editorial marks (e.g., [sic], [note]) that should be
@@ -149,46 +142,45 @@ def process_brackets(
         img: cv2 image
         coords: [x1, y1, x2, y2] in image pixels
         conf: confidence score
-        pdf_w, pdf_h: PDF dimensions
-        img_w, img_h: Image dimensions
-        split_x: Column split x-coordinate
-        page_brackets: List to accumulate brackets on this page
-        LEFT_X1, LEFT_X2, RIGHT_X1, RIGHT_X2: Column boundaries
+        page_dimension:
+        columns:
 
     Returns:
         (coords, col) tuple or None if bracket should be filtered
     """
-    from blackletter.utils.image import ImageProcessor
+
+    page_dimension = page_context.page_dimensions
+    columns = page_context.columns
 
     # Extract text from bracket region
-    pdf_bbox = _yolo_to_pdf_bbox(coords, pdf_w, pdf_h, img_w, img_h)
+    pdf_bbox = _yolo_to_pdf_bbox(bracket.coords, *page_dimension)
     box_text = _extract_bracket_text(page, pdf_bbox)
 
     # Validate text content
-    if not _passes_bracket_text_filters(box_text, int(conf * 1000)):
+    if not _passes_bracket_text_filters(box_text, int(bracket.confidence * 1000)):
         return None
-
-    # Check for duplicates on this page
-    if _intersects_any(coords, page_brackets):
-        return None
-
-    page_brackets.append(coords)
 
     # Determine column
-    col = column_for_coords(coords, split_x)
+    col = column_for_coords(bracket.coords, columns[-1])
 
     # Clamp bracket to column bounds
-    clamped = _clamp_bracket_to_column(coords, col, LEFT_X1, LEFT_X2, RIGHT_X1,
-                                       RIGHT_X2)
+    clamped = _clamp_bracket_to_column(bracket.coords, col, columns)
+
     if clamped is None:
         return None
 
     # Tighten bbox using image content
     from blackletter.utils.image import ImageProcessor
+
     tightened = ImageProcessor.tighten_bbox_px(
-        img, clamped, kind="textline",
-        expand=0, pad=0, min_area=10,
-        min_rel_w=0.45, min_rel_h=0.15,
+        page_context.img,
+        clamped,
+        kind="textline",
+        expand=0,
+        pad=0,
+        min_area=10,
+        min_rel_w=0.45,
+        min_rel_h=0.15,
     )
 
     return (tightened, col)
@@ -200,16 +192,18 @@ BRACKET_CHARS = set("[]0123456789")
 BRACKETS_ONLY = set("[]")
 
 
-def _extract_bracket_text(page,
-                          pdf_bbox: Tuple[float, float, float, float]) -> str:
+def _extract_bracket_text(page, pdf_bbox: Tuple[float, float, float, float]) -> str:
     """Extract text from a bracket region in PDF coordinates."""
     cropped = page.crop(pdf_bbox, strict=False)
     try:
-        return cropped.extract_text(
-            x_tolerance=1,
-            y_tolerance=2,
-            layout=False,
-        ) or ""
+        return (
+            cropped.extract_text(
+                x_tolerance=1,
+                y_tolerance=2,
+                layout=False,
+            )
+            or ""
+        )
     except Exception:
         return ""
 
@@ -247,7 +241,7 @@ def _passes_bracket_text_filters(text: str, fc: int) -> bool:
 
 
 def _yolo_to_pdf_bbox(
-        coords: List[float], pdf_w: float, pdf_h: float, img_w: int, img_h: int
+    coords: List[float], pdf_w: float, pdf_h: float, img_w: int, img_h: int
 ) -> Tuple[float, float, float, float]:
     """Convert YOLO coords (pixels) to PDF coords."""
     scale_x = pdf_w / img_w
@@ -257,11 +251,13 @@ def _yolo_to_pdf_bbox(
 
 
 def _clamp_bracket_to_column(
-        coords: List[float], col: str, LEFT_X1: int, LEFT_X2: int,
-        RIGHT_X1: int, RIGHT_X2: int
+    coords: List[float],
+    col: str,
+    columns: tuple,
 ) -> Optional[List[float]]:
     """Clamp bracket coordinates to its column boundaries."""
     x1, y1, x2, y2 = coords
+    LEFT_X1, LEFT_X2, RIGHT_X1, RIGHT_X2, _ = columns
 
     col_x1 = LEFT_X1 if col == "LEFT" else RIGHT_X1
     col_x2 = LEFT_X2 if col == "LEFT" else RIGHT_X2
@@ -274,15 +270,3 @@ def _clamp_bracket_to_column(
         return None
 
     return [x1, y1, x2, y2]
-
-
-def _intersects(a: List[float], b: List[float]) -> bool:
-    """Check if two boxes intersect."""
-    ax1, ay1, ax2, ay2 = a
-    bx1, by1, bx2, by2 = b
-    return not (ax2 <= bx1 or bx2 <= ax1 or ay2 <= by1 or by2 <= ay1)
-
-
-def _intersects_any(coords: List[float], existing: List[List[float]]) -> bool:
-    """Check if coords intersect with any existing box."""
-    return any(_intersects(coords, item) for item in existing)

@@ -10,9 +10,7 @@ class HeaderProcessor:
     """Processes and detects header regions in PDFs."""
 
     @staticmethod
-    def extract_header_words(
-            page_pl, top_pts: float, gap_pts: float, y_tol: float
-    ) -> List[Dict]:
+    def extract_header_words(page_pl, top_pts: float, gap_pts: float, y_tol: float) -> List[Dict]:
         """Extract and group words from header region.
 
         Args:
@@ -24,10 +22,7 @@ class HeaderProcessor:
         Returns:
             List of word dictionaries with position info
         """
-        chars = [
-            c for c in page_pl.chars
-            if c.get("top", 1e9) < top_pts and c.get("text")
-        ]
+        chars = [c for c in page_pl.chars if c.get("top", 1e9) < top_pts and c.get("text")]
         if not chars:
             return []
 
@@ -85,13 +80,13 @@ class HeaderProcessor:
 
     @staticmethod
     def redaction_bbox_for_header(
-            page_pl,
-            top_pts: float = 40.0,
-            gap_pts: float = 2.0,
-            y_tol: float = 3.0,
-            margin_pts: float = 120.0,
-            pad_x: float = 2.0,
-            pad_y: float = 1.0,
+        page_pl,
+        top_pts: float = 40.0,
+        gap_pts: float = 2.0,
+        y_tol: float = 3.0,
+        margin_pts: float = 120.0,
+        pad_x: float = 2.0,
+        pad_y: float = 1.0,
     ) -> Optional[Tuple[float, float, float, float]]:
         """Calculate header redaction bbox, preserving page numbers at margins.
 
@@ -110,8 +105,7 @@ class HeaderProcessor:
         Returns:
             (x0, y0, x1, y1) redaction box in points, or None
         """
-        words = HeaderProcessor.extract_header_words(page_pl, top_pts, gap_pts,
-                                                     y_tol)
+        words = HeaderProcessor.extract_header_words(page_pl, top_pts, gap_pts, y_tol)
         if not words:
             return None
 

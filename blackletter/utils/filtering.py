@@ -7,9 +7,7 @@ class BoxFilter:
     """Filter and manage bounding boxes."""
 
     @staticmethod
-    def filter_overlapping_boxes(
-            objects: List[Dict], overlap_threshold: float = 0.6
-    ) -> List[Dict]:
+    def filter_overlapping_boxes(objects: List[Dict], overlap_threshold: float = 0.6) -> List[Dict]:
         """Remove overlapping boxes on same page based on priority rules.
 
         Keeps higher-confidence or larger boxes depending on label type.
@@ -40,9 +38,7 @@ class BoxFilter:
                     if obj_a["label"] != obj_b["label"]:
                         continue
 
-                    overlap = BoxFilter.calculate_iou(
-                        obj_a["coords"], obj_b["coords"]
-                    )
+                    overlap = BoxFilter.calculate_iou(obj_a["coords"], obj_b["coords"])
 
                     if overlap > overlap_threshold:
                         label = obj_a["label"]
