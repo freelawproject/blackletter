@@ -6,9 +6,8 @@ from typing import List
 
 import fitz
 
-from blackletter import Document
 from blackletter.config import RedactionConfig
-from blackletter.core.scanner import Opinion
+from blackletter.core.scanner import Opinion, Document
 
 logger = logging.getLogger(__name__)
 
