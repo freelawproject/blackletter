@@ -72,7 +72,14 @@ def main():
     parser.add_argument(
         "--combine",
         action="store_true",
-        help="Combine simple dispositions",
+        help="Combine consecutive short opinions into grouped PDFs",
+    )
+
+    parser.add_argument(
+        "--combine-threshold",
+        type=int,
+        default=2,
+        help="Max page span for 'short' opinion (default: 2)",
     )
 
     args = parser.parse_args()
@@ -86,6 +93,8 @@ def main():
             MODEL_PATH=args.model,
             confidence_threshold=args.confidence,
             dpi=args.dpi,
+            combine_short_opinions=args.combine,
+            short_opinion_threshold=args.combine_threshold,
         )
 
         pipeline = BlackletterPipeline(config)

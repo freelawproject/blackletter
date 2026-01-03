@@ -54,3 +54,7 @@ class RedactionConfig:
     header_pad_x: float = 2.0
     header_pad_y: float = 1.0
     header_y_tol: float = 3.0
+
+    # Opinion combining (extraction phase)
+    combine_short_opinions: bool = False  # Enable grouping of short opinions
+    short_opinion_threshold: int = 2  # Max page span to consider "short"

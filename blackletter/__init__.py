@@ -73,10 +73,14 @@ class BlackletterPipeline:
         # Post-processing: Extract opinions
         extractor = OpinionExtractor(self.config)
         if redact == True:
-            redacted_opinions_dir = extractor.split_opinions(document=document)
+            redacted_opinions_dir = extractor.split_opinions(
+                document=document, combine_short=self.config.combine_short_opinions
+            )
         if mask == True:
             masked_opinions_dir = extractor.split_and_mask_opinions(
-                document=document, reduce=reduce
+                document=document,
+                reduce=reduce,
+                combine_short=self.config.combine_short_opinions,
             )
 
         logger.info("Pipeline completed successfully")
