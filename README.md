@@ -55,36 +55,35 @@ from blackletter import BlackletterPipeline, scan_splitter
 pipeline = BlackletterPipeline()
 raw_scan = Path("/filepath/to/advance_sheet.pdf")
 
-# Manual metadata (skips Gemini API)
+# Manual metadata (skips LLM API)
 metadata = [
     {
-        "id": 0,
         "volume": 536,
         "reporter": "P.3d",
-        "issue_no": 3,
-        "pages": {"start": 737, "end": 1213}
+        "first_page": 737,
+        "last_page": 1213,
     }
 ]
 
 # Identify opinion boundaries and separate by volume/reporter
-results = scan_splitter(
+extracted_filepaths = scan_splitter(
     target_file=raw_scan,
-    model=pipeline.model,
     output_dir=Path("./output"),
     metadata=metadata,
 )
 
 # Process each opinion into redacted versions
-for result in results:
+for filepath in extracted_filepaths:
     opinions_filepath = Path(result['opinion_pdf'])
-    parts = opinions_filepath.parts
+    parts = filepath.parts
     
-    redacted_pdf, _, _ = pipeline.process(
-        pdf_path=opinions_filepath,
+    document = pipeline.process(
+        pdf_path=filepath,
         first_page=int(parts[-2]),
         redact=True,
         mask=True,
         reduce=True,
+        combine_short=True
     )
 ```
 
@@ -103,18 +102,16 @@ raw_scan = Path("/filepath/to/advance_sheet.pdf")
 os.environ["LLM_API_KEY"] = "your-api-key"
 
 # scan_splitter will automatically call gemini to extract metadata
-results = scan_splitter(
+extracted_filepaths = scan_splitter(
     target_file=raw_scan,
-    model=pipeline.model,
     output_dir=Path("./output"),
     # metadata parameter is optional - omit it to use Gemini
 )
 
 # Process results as above...
-for result in results:
-    opinions_filepath = Path(result['opinion_pdf'])
+for filepath in extracted_filepaths:
     redacted_pdf, _, _ = pipeline.process(
-        pdf_path=opinions_filepath,
+        pdf_path=filepath,
         redact=True,
         mask=True,
         reduce=True,
@@ -150,16 +147,18 @@ Positional Arguments:
   pdf                   Path to PDF file
 
 Optional Arguments:
-  -o, --output PATH     Output folder (default: pdf_parent/redactions)
-  -v, --volume STR      The volume to redact
-  -r, --reporter STR    The reporter to extract out
-  -p, --page INT        First page number for case naming (default: 1)
-  -m, --model PATH      Path to YOLO model (default: best.pt)
-  -c, --confidence FLOAT Confidence threshold (default: 0.20)
-  -d, --dpi INT         DPI for PDF rendering (default: 200)
-  --redact              Generate unique redacted PDFs
-  --mask                Generate unique masked opinions
-  --reduce              Remove fully redacted pages from masked output
+  -o, --output PATH         Output folder (default: pdf_parent/redactions)
+  -v, --volume STR          The volume to redact
+  -r, --reporter STR        The reporter to extract out
+  -p, --page INT            First page number for case naming (default: 1)
+  -m, --model PATH          Path to YOLO model (default: best.pt)
+  -c, --confidence FLOAT    Confidence threshold (default: 0.20)
+  -d, --dpi INT             DPI for PDF rendering (default: 200)
+  --redact                  Generate unique redacted PDFs
+  --mask                    Generate unique masked opinions
+  --reduce                  Remove fully redacted pages from output
+  --combine BOOL            Combine short opinion into single PDFs
+  --combine-threshold INT   Threshold for combining short opinions
 ```
 
 ## Output
@@ -174,7 +173,7 @@ When processing advance sheets, each identified opinion is extracted and process
 
 ### Folders
 
-Blackletter will generate the following folder strtucture and outputs
+Blackletter will generate the following folder structure and outputs
 
     /reporter/volume/page/opinion.pdf
     /reporter/volume/page/redactions/opinion_redacted.pdf

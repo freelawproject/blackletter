@@ -219,20 +219,21 @@ class SectionScanner:
 
                 has_header = False
 
-                # Identify TOC pages
-                if (lines := page.extract_text_lines()) and (lines[-1].get("text", "")).startswith(
-                    "CR"
-                ):
-                    if "Cases in bold" in lines[2]["text"]:
-                        if toc_section != []:
-                            toc_spans.append(toc_section)
-                            toc_section = []
-                        toc_section.append(i)
-                    else:
-                        toc_section.append(i)
-                elif len(toc_section) != 0:
-                    toc_spans.append(toc_section)
-                    toc_section = []
+                if i < 50:
+                    # Identify TOC pages
+                    if (lines := page.extract_text_lines()) and (
+                        lines[-1].get("text", "")
+                    ).startswith("CR"):
+                        if "Cases in bold" in lines[2]["text"]:
+                            if toc_section != []:
+                                toc_spans.append(toc_section)
+                                toc_section = []
+                            toc_section.append(i)
+                        else:
+                            toc_section.append(i)
+                    elif len(toc_section) != 0:
+                        toc_spans.append(toc_section)
+                        toc_section = []
 
                 # Identify Opinion Pages
                 for r in results:
@@ -371,8 +372,6 @@ def scan_splitter(
 
     if not target_file.exists():
         raise FileNotFoundError(f"Input PDF not found: {target_file}")
-
-    # this is optional i guess.  but we probably want it
 
     # Phase 0: Extract metadata
     extractor = AdvanceSheetExtractor(cfg)
