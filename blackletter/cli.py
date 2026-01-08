@@ -4,9 +4,6 @@ import argparse
 import logging
 from pathlib import Path
 
-from blackletter import BlackletterPipeline
-from blackletter.config import RedactionConfig
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
@@ -89,6 +86,9 @@ def main():
         return 1
 
     try:
+        from blackletter import BlackletterPipeline
+        from blackletter.config import RedactionConfig
+
         config = RedactionConfig(
             MODEL_PATH=args.model,
             confidence_threshold=args.confidence,

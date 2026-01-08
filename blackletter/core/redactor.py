@@ -7,9 +7,8 @@ from typing import Tuple
 import fitz
 import pdfplumber
 
-from blackletter import Document
 from blackletter.config import RedactionConfig
-from blackletter.core.scanner import PageContext, Opinion
+from blackletter.core.scanner import PageContext, Opinion, Document
 from blackletter.utils.text import redact_text_lines_in_window
 
 logger = logging.getLogger(__name__)

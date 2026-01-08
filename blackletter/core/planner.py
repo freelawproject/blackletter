@@ -4,9 +4,8 @@ import logging
 from enum import Enum
 from typing import Dict, List
 
-from blackletter import Document
 from blackletter.config import RedactionConfig
-from blackletter.core.scanner import Detection, Opinion
+from blackletter.core.scanner import Detection, Opinion, Document
 
 logger = logging.getLogger(__name__)
 
