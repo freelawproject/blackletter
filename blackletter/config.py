@@ -13,9 +13,9 @@ class RedactionConfig:
 
     def __post_init__(self):
         """Resolve model path after initialization."""
-
-        root = Path(__file__).parent
-        self.MODEL_PATH: str = str(root / "models" / "best.pt")
+        if self.MODEL_PATH is None:
+            root = Path(__file__).parent
+            self.MODEL_PATH = str(root / "models" / "best.pt")
 
     # Image processing
     dpi: int = 200
