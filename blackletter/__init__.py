@@ -39,16 +39,21 @@ class BlackletterPipeline:
         mask: bool = False,
         redact: bool = False,
         reduce: bool = False,
-    ) -> Tuple[Path, Path, Path]:
+        combine_short: bool = False,
+    ) -> Document:
         """Execute complete redaction pipeline.
 
-        Args:
-            pdf_path: Path to input PDF
-            output_folder: Where to save redacted PDFs (default: pdf_path.parent/redactions)
-            first_page: First page number for case naming
+        :param document: The document to scan.
 
-        Returns:
-            (redacted_pdf_path, redacted_opinions_dir, masked_opinions_dir)
+        :param pdf_path: Path to input PDF
+        :param output_folder: Where to save redacted PDFs
+        :param first_page: First page number for case naming
+        :param mask: Whether to generate masked versions of opinions
+        :param redact: Whether to perform redaction on detected elements
+        :param reduce: Whether to remove fully redacted pages
+        :param combine_short: Whether to combine opinions into a single page
+
+        :return Document: The docuemnt object
         """
         document = Document(pages=[], first_page=first_page, pdf_path=pdf_path)
 
@@ -73,22 +78,26 @@ class BlackletterPipeline:
         # Post-processing: Extract opinions
         extractor = OpinionExtractor(self.config)
         if redact == True:
-            redacted_opinions_dir = extractor.split_opinions(
-                document=document, combine_short=self.config.combine_short_opinions
+            extractor.split_opinions(
+                document=document,
+                combine_short=combine_short,
             )
         if mask == True:
-            masked_opinions_dir = extractor.split_and_mask_opinions(
+            extractor.split_and_mask_opinions(
                 document=document,
                 reduce=reduce,
-                combine_short=self.config.combine_short_opinions,
+                combine_short=combine_short,
             )
 
         logger.info("Pipeline completed successfully")
-        return Path(document.redacted_pdf_path), redacted_opinions_dir, masked_opinions_dir
+        return document
 
 
 # Convenience functions
-def redact_pdf(pdf_path: Path, output_folder: Path = None) -> Tuple[Path, Path, Path]:
+def redact_pdf(
+    pdf_path: Path,
+    output_folder: Path = None,
+) -> Document:
     """Simple interface: redact a PDF with default configuration."""
     pipeline = BlackletterPipeline()
     return pipeline.process(pdf_path, output_folder)

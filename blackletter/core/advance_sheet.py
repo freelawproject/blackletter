@@ -28,10 +28,9 @@ class AdvanceSheetConfig:
     """Configuration for advance sheet processing."""
 
     base_dir: Path = Path(__file__).parent.parent
-    model_path: Path = Path(__file__).parent.parent / "models" / "best.pt"
-    input_dir: Path = Path(__file__).parent.parent / "scans"
-    output_dir: Path = Path(__file__).parent.parent / "output"
-    prompt_path: Path = Path(__file__).parent.parent / "prompts" / "advance_sheet.txt"
+    model_path: Path = base_dir / "models" / "best.pt"
+    output_dir: Path = base_dir / "output"
+    prompt_path: Path = base_dir / "prompts" / "advance_sheet.txt"
 
     dpi: int = 200
     conf_default: float = 0.25
@@ -195,49 +194,67 @@ class SectionScanner:
         self.model = model
 
     def scan(
-        self, pdf_path: Path
-    ) -> Tuple[List[bool], List[bool], Optional[Tuple[int, int]], Optional[Tuple[int, int]]]:
+        self,
+        pdf_path: Path,
+    ) -> Tuple[List[List[int]], Optional[Tuple[int, int]]]:
         """Scan PDF for TOC and header sections.
 
         :param pdf_path: path to PDF to scan
         :return: (toc_flags, header_flags, toc_span, header_span)
         """
-        toc_flags: List[bool] = []
-        header_flags: List[bool] = []
-
+        toc_spans: List[List[int]] = []
+        opinion_pages: List[bool] = []
+        toc_section = []
         with pdfplumber.open(pdf_path) as pdf:
             total = len(pdf.pages)
             logger.info("Scanning %d pages for toc/header…", total)
 
             for i, page in enumerate(pdf.pages):
                 img = convert_page_to_cv2(page, dpi=self.config.dpi)
-                results = self.model(img, conf=self.config.conf_default, verbose=False)
+                results = self.model(
+                    img,
+                    conf=self.config.conf_default,
+                    verbose=False,
+                )
 
-                has_toc = False
                 has_header = False
 
+                if i < 50:
+                    # Identify TOC pages
+                    if (lines := page.extract_text_lines()) and (
+                        lines[-1].get("text", "")
+                    ).startswith("CR"):
+                        if "Cases in bold" in lines[2]["text"]:
+                            if toc_section != []:
+                                toc_spans.append(toc_section)
+                                toc_section = []
+                            toc_section.append(i)
+                        else:
+                            toc_section.append(i)
+                    elif len(toc_section) != 0:
+                        toc_spans.append(toc_section)
+                        toc_section = []
+
+                # Identify Opinion Pages
                 for r in results:
                     for box in r.boxes:
                         conf = float(box.conf[0].item())
-                        cls_id = int(box.cls[0].item())
-                        label = self.model.names[cls_id]
-
-                        if label == "toc" and conf >= self.config.toc_min_conf:
-                            has_toc = True
-                        elif label == "header" and conf >= self.config.header_min_conf:
+                        label = self.model.names[int(box.cls[0].item())]
+                        if label == "header" and conf >= self.config.header_min_conf:
                             has_header = True
-
-                toc_flags.append(has_toc)
-                header_flags.append(has_header)
+                opinion_pages.append(has_header)
 
                 if (i + 1) % 10 == 0 or (i + 1) == total:
                     logger.info("  scanned %d/%d", i + 1, total)
 
-        toc_span = find_longest_run(toc_flags, max_missing=self.config.max_missing_gap)
-        header_span = find_longest_run(header_flags, max_missing=self.config.max_missing_gap)
+        # Merge any misses
+        header_span = find_longest_run(
+            opinion_pages,
+            max_missing=self.config.max_missing_gap,
+        )
 
-        logger.info("toc_span=%s header_span=%s", toc_span, header_span)
-        return toc_flags, header_flags, toc_span, header_span
+        logger.info("toc_span=%s header_span=%s", toc_spans, header_span)
+        return toc_spans, header_span
 
 
 # ================= PHASE 2: PLANNING =================
@@ -250,50 +267,45 @@ class AdvanceSheetPlanner:
     def plan_jobs(
         self,
         metadata: List[Dict],
-        header_span: Optional[Tuple[int, int]],
-        toc_span: Optional[Tuple[int, int]],
+        opinion_span: Optional[Tuple[int, int]],
+        toc_spans: Optional[List[List[int]]],
     ) -> List[Dict]:
         """Plan extraction jobs from metadata and detected spans.
 
         :param metadata: list of metadata dictionaries from Gemini
-        :param header_span: detected header span (start, end)
-        :param toc_span: detected TOC span (start, end)
+        :param opinion_span: detected header span (start, end)
+        :param toc_spans: detected TOC span (start, end)
         :return: list of extraction jobs
         """
-        if not header_span:
-            return []
+        metadata = sorted(metadata, key=lambda x: x.get("volume", 0))
 
-        metadata = sorted(metadata, key=lambda x: x.get("id", 0))
+        extraction_specs: List[Dict] = []
+        pdf_start_index = opinion_span[0]
+        page_shift = 0
 
-        s_header, _ = header_span
-        jobs: List[Dict] = []
+        for idx, item in enumerate(metadata):
+            first_page = int(item["first_page"])
+            last_page = int(item["last_page"])
+            page_count = last_page - first_page
 
-        count = 0
-        for item in metadata:
-            start = int(item["pages"]["start"])
-            end = int(item["pages"]["end"])
-            volume = item["volume"]
-            reporter = item["reporter"]
+            pdf_start_idx = pdf_start_index + page_shift
+            pdf_end_idx = pdf_start_idx + page_count
 
-            addon = end - start
-            start_page = s_header + count
-            end_page = start_page + addon
-
-            jobs.append(
+            extraction_specs.append(
                 {
-                    "volume": volume,
-                    "reporter": str(reporter).lower(),
-                    "start_page_key": start,
-                    "pdf_start_idx": start_page,
-                    "pdf_end_idx": end_page,
-                    "toc_span": toc_span,
+                    "volume": item["volume"],
+                    "reporter": str(item["reporter"]).lower(),
+                    "first_page": first_page,
+                    "last_page": last_page,
+                    "pdf_start_idx": pdf_start_idx,
+                    "pdf_end_idx": pdf_end_idx,
+                    "toc_span": toc_spans[idx],
                 }
             )
 
-            count += addon
-            count += 1
+            page_shift += page_count + 1
 
-        return jobs
+        return extraction_specs
 
 
 # ================= PHASE 3: EXECUTION =================
@@ -303,7 +315,7 @@ class PDFExtractor:
     def __init__(self, config: AdvanceSheetConfig):
         self.config = config
 
-    def execute(self, src_pdf: Path, jobs: List[Dict]) -> List[Dict]:
+    def execute(self, src_pdf: Path, jobs: List[Dict]) -> List[Path]:
         """Execute extraction jobs and return list of output file paths.
 
         :param src_pdf: source PDF path
@@ -315,32 +327,22 @@ class PDFExtractor:
         for job in jobs:
             volume = job["volume"]
             reporter = job["reporter"]
-            start_key = job["start_page_key"]
+            first_page = job["first_page"]
 
-            out_dir = self.config.output_dir / reporter / str(volume) / str(start_key)
+            out_dir = self.config.output_dir / reporter / str(volume) / str(first_page)
             out_dir.mkdir(parents=True, exist_ok=True)
 
-            opinion_fp = out_dir / "opinion.pdf"
-            extract_pdf_span(src_pdf, job["pdf_start_idx"], job["pdf_end_idx"], opinion_fp)
-            logger.info("Saved opinion: %s", opinion_fp)
-
-            job_result = {
-                "volume": volume,
-                "reporter": reporter,
-                "start_page": start_key,
-                "opinion_pdf": opinion_fp,
-                "toc_pdf": None,
-            }
+            opinion_file_path = out_dir / "opinion.pdf"
+            extract_pdf_span(src_pdf, job["pdf_start_idx"], job["pdf_end_idx"], opinion_file_path)
+            logger.info("Saved opinion: %s", opinion_file_path)
 
             toc_span = job.get("toc_span")
             if toc_span:
                 toc_fp = out_dir / "toc.pdf"
-                extract_pdf_span(src_pdf, toc_span[0], toc_span[1], toc_fp)
+                extract_pdf_span(src_pdf, toc_span[0], toc_span[-1], toc_fp)
                 logger.info("Saved toc: %s", toc_fp)
-                job_result["toc_pdf"] = toc_fp
 
-            results.append(job_result)
-
+            results.append(opinion_file_path)
         return results
 
 
@@ -351,7 +353,7 @@ def scan_splitter(
     output_dir: Path | str,
     base_dir: Optional[Path] = None,
     metadata: Optional[List[Dict]] = None,
-) -> List[Dict]:
+) -> List[Path]:
     """Execute complete advance sheet splitter pipeline.
 
     :param target_file: path to advance sheet PDF
@@ -371,8 +373,6 @@ def scan_splitter(
     if not target_file.exists():
         raise FileNotFoundError(f"Input PDF not found: {target_file}")
 
-    # this is optional i guess.  but we probably want it
-
     # Phase 0: Extract metadata
     extractor = AdvanceSheetExtractor(cfg)
     if metadata == None:
@@ -382,15 +382,19 @@ def scan_splitter(
 
     # Phase 1: Scan for sections
     scanner = SectionScanner(cfg, model)
-    _, _, toc_span, header_span = scanner.scan(target_file)
+    toc_spans, opinion_span = scanner.scan(target_file)
 
-    if not header_span:
+    if not opinion_span:
         logger.warning("No OPINION section found (header_span missing).")
         return []
 
     # Phase 2: Plan jobs
     planner = AdvanceSheetPlanner(cfg)
-    jobs = planner.plan_jobs(metadata=metadata, header_span=header_span, toc_span=toc_span)
+    jobs = planner.plan_jobs(
+        metadata=metadata,
+        opinion_span=opinion_span,
+        toc_spans=toc_spans,
+    )
     logger.info("Planned %d extraction jobs", len(jobs))
 
     # Phase 3: Execute extraction

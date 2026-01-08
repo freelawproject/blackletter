@@ -191,6 +191,7 @@ class PDFScanner:
         """
         logger.info("Starting PHASE 1: Scanning all pages")
 
+        total_detections = 0
         with pdfplumber.open(document.pdf_path) as pdf:
             for page_idx, page in enumerate(pdf.pages):
                 logger.info(f"Scanning page {page_idx + 1}/{len(pdf.pages)}")
@@ -217,10 +218,9 @@ class PDFScanner:
 
                 page_context = self._detect_objects(page_context)
                 document.pages.append(page_context)
+                total_detections += len(page_context.page_objects)
 
-        # logger.info(f"Detected {len(global_objects)} total objects")
-        logger.info(f"Detected XXXX total objects")
-
+        logger.info(f"Detected {total_detections} total objects")
         return document
 
     def _detect_columns(

@@ -93,7 +93,6 @@ def main():
             MODEL_PATH=args.model,
             confidence_threshold=args.confidence,
             dpi=args.dpi,
-            combine_short_opinions=args.combine,
             short_opinion_threshold=args.combine_threshold,
         )
 
@@ -105,6 +104,7 @@ def main():
             mask=args.mask,
             redact=args.redact,
             reduce=args.reduce,
+            combine_short=args.combine,
         )
 
         logger.info(f"✓ Redacted PDF: {redacted_pdf}")
