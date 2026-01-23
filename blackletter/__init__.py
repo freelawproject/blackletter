@@ -10,10 +10,10 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 from pathlib import Path
-from typing import Tuple
 
 if TYPE_CHECKING:
     from blackletter.config import RedactionConfig
+    from blackletter.core.scanner import Document
 
 __version__ = "0.0.1"
 
@@ -79,15 +79,14 @@ class BlackletterPipeline:
         redactor = PDFRedactor(self.config)
         redactor.redact(document, output_folder)
 
-        redacted_opinions_dir, masked_opinions_dir = None, None
         # Post-processing: Extract opinions
         extractor = OpinionExtractor(self.config)
-        if redact == True:
+        if redact:
             extractor.split_opinions(
                 document=document,
                 combine_short=combine_short,
             )
-        if mask == True:
+        if mask:
             extractor.split_and_mask_opinions(
                 document=document,
                 reduce=reduce,

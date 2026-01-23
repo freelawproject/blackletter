@@ -363,7 +363,7 @@ def scan_splitter(
 
     :return: list of extracted file results
     """
-    if type(output_dir) == str:
+    if isinstance(output_dir, str):
         output_dir = Path(output_dir)
     cfg = build_config(base_dir=base_dir, output_dir=output_dir)
 
@@ -375,7 +375,7 @@ def scan_splitter(
 
     # Phase 0: Extract metadata
     extractor = AdvanceSheetExtractor(cfg)
-    if metadata == None:
+    if metadata is None:
         metadata = extractor.extract_ranges(target_file)
 
     logger.info("Gemini returned %d metadata items", len(metadata))
