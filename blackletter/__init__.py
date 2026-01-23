@@ -5,18 +5,15 @@ from legal documents—specifically key citations, headnotes, and other
 copyrighted non-judicial materials—while preserving the authentic opinion text.
 """
 
+from __future__ import annotations
+
 import logging
+from typing import TYPE_CHECKING
 from pathlib import Path
 from typing import Tuple
 
-from ultralytics import YOLO
-
-from blackletter.config import RedactionConfig
-from blackletter.core.scanner import PDFScanner, Document
-from blackletter.core.planner import OpinionPlanner
-from blackletter.core.redactor import PDFRedactor
-from blackletter.core.extractor import OpinionExtractor
-from blackletter.core.advance_sheet import scan_splitter
+if TYPE_CHECKING:
+    from blackletter.config import RedactionConfig
 
 __version__ = "0.0.1"
 
@@ -26,7 +23,10 @@ logger = logging.getLogger(__name__)
 class BlackletterPipeline:
     """Complete redaction pipeline: scan -> plan -> execute -> extract."""
 
-    def __init__(self, config: RedactionConfig = None):
+    def __init__(self, config: RedactionConfig | None = None):
+        from ultralytics import YOLO
+        from blackletter.config import RedactionConfig
+
         self.config = config or RedactionConfig()
         logger.info(f"Using model: {self.config.MODEL_PATH}")
         self.model = YOLO(self.config.MODEL_PATH)
@@ -55,6 +55,11 @@ class BlackletterPipeline:
 
         :return Document: The docuemnt object
         """
+        from blackletter.core.scanner import PDFScanner, Document
+        from blackletter.core.planner import OpinionPlanner
+        from blackletter.core.redactor import PDFRedactor
+        from blackletter.core.extractor import OpinionExtractor
+
         document = Document(pages=[], first_page=first_page, pdf_path=pdf_path)
 
         if output_folder is None:
