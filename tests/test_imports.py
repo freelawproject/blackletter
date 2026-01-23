@@ -10,7 +10,7 @@ def test_config_imports():
     config = RedactionConfig()
     assert config.dpi == 200
     assert config.confidence_threshold == 0.20
-    assert config.MODEL_PATH == "best.pt"
+    assert config.MODEL_PATH.endswith("models/best.pt")
 
 
 def test_core_imports():
