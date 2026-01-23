@@ -1,6 +1,6 @@
 """Test that all modules import correctly."""
 
-import pytest
+import unittest
 
 
 def test_config_imports():
@@ -87,4 +87,4 @@ def test_column_for_coords():
 
 
 if __name__ == "__main__":
-    pytest.main([__file__, "-v"])
+    unittest.main()

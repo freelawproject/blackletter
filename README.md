@@ -76,7 +76,7 @@ extracted_filepaths = scan_splitter(
 for filepath in extracted_filepaths:
     opinions_filepath = Path(result['opinion_pdf'])
     parts = filepath.parts
-    
+
     document = pipeline.process(
         pdf_path=filepath,
         first_page=int(parts[-2]),
@@ -192,4 +192,4 @@ GNU Affero General Public License v3
 
 ## Contributing
 
-Contributions welcome! 
+Contributions welcome!
