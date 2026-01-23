@@ -2,11 +2,9 @@
 
 import logging
 from enum import Enum
-from typing import Dict, List
 
-from blackletter import Document
 from blackletter.config import RedactionConfig
-from blackletter.core.scanner import Detection, Opinion
+from blackletter.core.scanner import Document, Opinion
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +74,7 @@ class OpinionPlanner:
                         current_opinion.line = obj
 
                     elif label == "headmatter":
-                        if current_opinion.headmatter == None:
+                        if current_opinion.headmatter is None:
                             current_opinion.headmatter = obj
 
                         if candidate_end_node is None:

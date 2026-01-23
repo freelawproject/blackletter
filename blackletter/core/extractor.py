@@ -6,9 +6,8 @@ from typing import List
 
 import fitz
 
-from blackletter import Document
 from blackletter.config import RedactionConfig
-from blackletter.core.scanner import Opinion
+from blackletter.core.scanner import Opinion, Document
 
 logger = logging.getLogger(__name__)
 
@@ -176,7 +175,7 @@ class OpinionExtractor:
             else:
                 self._apply_group_masking(doc_out, group, document)
 
-            if reduce == True:
+            if reduce:
                 # Remove pages that are fully redacted to shrink file size
                 filler_pages = document.get_filler_pages()
                 for pg_idx in sorted(filler_pages, reverse=True):
