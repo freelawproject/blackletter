@@ -158,3 +158,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 /secrets.env
+
+# IDE
+.idea/
+
+# Project output
+output/

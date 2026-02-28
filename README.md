@@ -5,6 +5,12 @@ Remove copyrighted material from legal case law PDFs.
 A reference to blackletter law, this tool removes proprietary annotations from judicial opinions—specifically, headnotes, captions, key cites, and other copyrighted materials—while preserving the authentic opinion text.
 
 ## Installation
+
+```bash
+pip install blackletter
+```
+
+Or install from source:
 ```bash
 git clone https://github.com/freelawproject/blackletter
 cd blackletter
@@ -15,176 +21,115 @@ pip install -e .
 
 **Command line:**
 ```bash
-blackletter path/to/opinion.pdf -o output/folder -p 737
+blackletter process path/to/volume.pdf --reporter f3d --volume 952 --first-page 1 --output output/
 ```
 
 **Python:**
 ```python
-from pathlib import Path
-from blackletter import BlackletterPipeline
+from blackletter import process
 
-pipeline = BlackletterPipeline()
-redacted_pdf, redacted_opinions, masked_opinions = pipeline.process(
-    path_to_file,
-    output_folder=Path("output"),
+process(
+    "path/to/volume.pdf",
+    "output/",
+    reporter="f3d",
+    volume="952",
     first_page=1,
-    redact=True,
-    mask=True,
 )
 ```
 
-Or use the convenience function:
-```python
-from pathlib import Path
-from blackletter import redact_pdf
-
-redacted_pdf, redacted_opinions, masked_opinions = redact_pdf(path_to_file)
-```
-
-## Splitting Advance Sheets
-
-An "advance sheet" is a legal reporter volume containing multiple judicial opinions. This tool can automatically split an advance sheet into individual opinion PDFs, identifying volume, reporter, and page ranges either through the Gemini API or manual metadata.
-
-### Example: Split with known Metadata
-
-If you already have metadata about the advance sheet (volume number, reporter, page ranges), provide it directly to skip the API call:
-```python
-from pathlib import Path
-from blackletter import BlackletterPipeline, scan_splitter
-
-pipeline = BlackletterPipeline()
-raw_scan = Path("/filepath/to/advance_sheet.pdf")
-
-# Manual metadata (skips LLM API)
-metadata = [
-    {
-        "volume": 536,
-        "reporter": "P.3d",
-        "first_page": 737,
-        "last_page": 1213,
-    }
-]
-
-# Identify opinion boundaries and separate by volume/reporter
-extracted_filepaths = scan_splitter(
-    target_file=raw_scan,
-    output_dir=Path("./output"),
-    metadata=metadata,
-)
-
-# Process each opinion into redacted versions
-for filepath in extracted_filepaths:
-    opinions_filepath = Path(result['opinion_pdf'])
-    parts = filepath.parts
-
-    document = pipeline.process(
-        pdf_path=filepath,
-        first_page=int(parts[-2]),
-        redact=True,
-        mask=True,
-        reduce=True,
-        combine_short=True
-    )
-```
-
-### Example: Split with Gemini API
-
-If you don't have metadata, the tool can extract it automatically using the Gemini API: use `LLM_API_KEY`
-```python
-from pathlib import Path
-from blackletter import BlackletterPipeline, scan_splitter
-import os
-
-pipeline = BlackletterPipeline()
-raw_scan = Path("/filepath/to/advance_sheet.pdf")
-
-# Set your Gemini API key
-os.environ["LLM_API_KEY"] = "your-api-key"
-
-# scan_splitter will automatically call gemini to extract metadata
-extracted_filepaths = scan_splitter(
-    target_file=raw_scan,
-    output_dir=Path("./output"),
-    # metadata parameter is optional - omit it to use Gemini
-)
-
-# Process results as above...
-for filepath in extracted_filepaths:
-    redacted_pdf, _, _ = pipeline.process(
-        pdf_path=filepath,
-        redact=True,
-        mask=True,
-        reduce=True,
-    )
-```
+This runs the full pipeline: OCR (if needed), YOLO detection, page number extraction, opinion splitting, and redaction — all in one pass.
 
 ## How It Works
 
-### Single Opinion Processing
+The `process` command runs a single-pass pipeline:
 
-The pipeline operates in four phases:
+1. **OCR** (if needed): Detects image-only PDFs, downsamples pages, and adds a text layer via ocrmypdf/tesseract
+2. **Detection**: Runs a YOLO model to identify copyrighted elements (headnotes, captions, key cites, brackets, etc.) and structural elements (page numbers, dividers, footnotes)
+3. **Page Numbers**: Extracts and validates page numbers using OCR on detected regions
+4. **Opinion Pairing**: Matches case captions to key icons to identify opinion boundaries
+5. **Splitting & Redaction**: Produces three output variants per opinion:
+   - **Unredacted**: Raw opinion pages extracted from the source
+   - **Redacted**: Copyrighted content (headnotes, brackets, key icons) blacked out; non-opinion content whited out
+   - **Masked**: Optimized for LLM ingestion — only the opinion text is visible
 
-1. **Scanning (Phase 1)**: Uses YOLO to detect copyrighted elements (captions, key cites, headnotes, etc.)
-2. **Planning (Phase 2)**: State machine determines which text spans to redact
-3. **Execution (Phase 3)**: Applies redactions and masks to the PDF
-4. **Extraction (Phase 4)**: Splits opinions into individual files (redacted and masked versions)
-
-### Advance Sheet Splitting
-
-For raw book scan splitting:
-
-1. **Metadata Extraction**: Gemini API (or manual metadata) identifies opinion boundaries, volume numbers, and reporter information
-2. **Section Detection**: YOLO finds the start of the opinion section (OPINION header)
-3. **Job Planning**: Maps metadata to physical page locations and plans extraction jobs
-4. **PDF Splitting**: Extracts individual opinions based on page ranges
-5. **Individual Processing**: Each extracted opinion is processed through the single opinion pipeline (see above)
+Additionally produces:
+- A full redacted copy of the entire document
+- A verification report with detection stats and page number mappings
+- Extracted case law images (charts, photos, etc.) as PNGs
 
 ## Command Line Options
-```bash
-blackletter PDF [OPTIONS]
+
+```
+blackletter process PDF [OPTIONS]
 
 Positional Arguments:
-  pdf                   Path to PDF file
+  pdf                       Path to the source PDF
 
-Optional Arguments:
-  -o, --output PATH         Output folder (default: pdf_parent/redactions)
-  -v, --volume STR          The volume to redact
-  -r, --reporter STR        The reporter to extract out
-  -p, --page INT            First page number for case naming (default: 1)
-  -m, --model PATH          Path to YOLO model (default: best.pt)
-  -c, --confidence FLOAT    Confidence threshold (default: 0.20)
-  -d, --dpi INT             DPI for PDF rendering (default: 200)
-  --redact                  Generate unique redacted PDFs
-  --mask                    Generate unique masked opinions
-  --reduce                  Remove fully redacted pages from output
-  --combine BOOL            Combine short opinion into single PDFs
-  --combine-threshold INT   Threshold for combining short opinions
+Options:
+  --reporter STR            Reporter abbreviation (e.g. f3d, a3d)
+  --volume STR              Volume number
+  --first-page INT          Page number of the first page in the PDF (default: 1)
+  -o, --output PATH         Base output directory (required)
+  --model PATH              Path to YOLO model weights (default: bundled run_9.pt)
+  --footnotes               Extract footnotes into separate PDFs
+  --no-unredacted           Skip generating unredacted opinion PDFs
+  --no-shrink               Skip downsampling (default: shrink to ~148 KB/page)
+  --optimize {0,1,2,3}      ocrmypdf optimization level (default: 1)
 ```
 
-## Output
+### Draw Command
 
-The pipeline produces three types of outputs:
+For debugging YOLO detections:
+```bash
+blackletter draw path/to/volume.pdf --output annotated.pdf
+blackletter draw path/to/volume.pdf --output annotated.pdf --labels CASE_CAPTION KEY_ICON HEADNOTE
+```
 
-1. **Redacted PDF**: Original PDF with copyrighted content marked for redaction
-2. **Redacted Opinions**: Individual opinion PDFs extracted from the redacted document
-3. **Masked Opinions**: Individual opinion PDFs with non-opinion content masked out
+## Output Structure
 
-When processing advance sheets, each identified opinion is extracted and processed separately, producing all three output types for each opinion.
+```
+output/<reporter>/<volume>/<first-page>/
+    verify.txt                          # Detection stats and page number report
+    <reporter>.<volume>.redacted.pdf    # Full redacted document
+    images/                             # Extracted images (PNGs)
+    unredacted/                         # Individual opinion PDFs (raw)
+    redacted/                           # Individual opinion PDFs (copyrighted content redacted)
+    masked/                             # Individual opinion PDFs (for LLM ingestion)
+```
 
-### Folders
+## Detection Labels
 
-Blackletter will generate the following folder structure and outputs
+The YOLO model detects 13 element types:
 
-    /reporter/volume/page/opinion.pdf
-    /reporter/volume/page/redactions/opinion_redacted.pdf
-    /reporter/volume/page/redactions/masked/ [SEPARATE MASKED OPINIONS]
-    /reporter/volume/page/redactions/redacted/ [SEPARATE REDACTED OPINIONS]
-
+| Label | Description |
+|-------|-------------|
+| KEY_ICON | West key cite icons (copyrighted) |
+| DIVIDER | Opinion section dividers |
+| PAGE_HEADER | Running headers (copyrighted) |
+| CASE_CAPTION | Opinion title/parties |
+| FOOTNOTES | Footnote sections |
+| HEADNOTE_BRACKET | Bracketed headnote markers (copyrighted) |
+| CASE_METADATA | Court, date, counsel info |
+| CASE_SEQUENCE | Docket/case sequence numbers |
+| PAGE_NUMBER | Page numbers |
+| STATE_ABBREVIATION | State abbreviation markers |
+| IMAGE | Photos, charts, diagrams |
+| HEADNOTE | Headnote text (copyrighted) |
+| BACKGROUND | Background/procedural history |
 
 ## Requirements
 
-- Python 3.9+
-- Gemini API key (for automatic metadata extraction; optional if using manual metadata)
+- Python 3.12+
+- Tesseract OCR (for image-only PDFs)
+
+Install tesseract:
+```bash
+# macOS
+brew install tesseract
+
+# Ubuntu/Debian
+sudo apt install tesseract-ocr
+```
 
 ## License
 
