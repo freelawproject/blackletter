@@ -41,6 +41,7 @@ def opinions(document):
 
 # ── Structure ────────────────────────────────────────────────────────────
 
+
 class TestDocumentStructure:
     def test_page_count(self, document):
         assert len(document.pages) == 3
@@ -60,7 +61,8 @@ class TestDocumentStructure:
 
     def test_case_caption_detected(self, document):
         captions = [
-            d for d in document.by_label(Label.CASE_CAPTION)
+            d
+            for d in document.by_label(Label.CASE_CAPTION)
             if d.confidence >= LABEL_CONFIDENCE.get(Label.CASE_CAPTION, CONFIDENCE_THRESHOLD)
         ]
         assert len(captions) == 1
@@ -68,7 +70,8 @@ class TestDocumentStructure:
 
     def test_divider_detected(self, document):
         dividers = [
-            d for d in document.by_label(Label.DIVIDER)
+            d
+            for d in document.by_label(Label.DIVIDER)
             if d.confidence >= LABEL_CONFIDENCE.get(Label.DIVIDER, CONFIDENCE_THRESHOLD)
         ]
         assert len(dividers) >= 1
@@ -76,7 +79,8 @@ class TestDocumentStructure:
 
     def test_key_icon_detected(self, document):
         keys = [
-            d for d in document.by_label(Label.KEY_ICON)
+            d
+            for d in document.by_label(Label.KEY_ICON)
             if d.confidence >= LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
         ]
         assert len(keys) == 1
@@ -84,6 +88,7 @@ class TestDocumentStructure:
 
 
 # ── Headnote redaction ───────────────────────────────────────────────────
+
 
 class TestHeadnoteRedaction:
     """The most important redaction: caption → divider blackout."""
@@ -200,7 +205,9 @@ class TestHeadnoteRedaction:
         _, left_rect = rects[0]
         assert left_rect.x0 < 100, f"Left rect x0 too far right: {left_rect.x0:.1f}"
         assert left_rect.y0 < 200, f"Left rect y0 too low: {left_rect.y0:.1f}"
-        assert left_rect.y1 > 500, f"Left rect y1 too high (should reach divider): {left_rect.y1:.1f}"
+        assert left_rect.y1 > 500, (
+            f"Left rect y1 too high (should reach divider): {left_rect.y1:.1f}"
+        )
 
         # Right-column rect: covers top of right column to divider
         _, right_rect = rects[1]
@@ -211,13 +218,13 @@ class TestHeadnoteRedaction:
 
 # ── Recompress safety ────────────────────────────────────────────────────
 
+
 class TestRecompressDoesNotCorrupt:
     """Verify recompress_images doesn't destroy redacted pages."""
 
     def test_recompress_preserves_rendering(self):
         import fitz
         import io
-        from PIL import Image
         from blackletter.scanner import recompress_images
 
         pdf = fitz.open(str(PDF_PATH))
@@ -245,8 +252,9 @@ class TestRecompressDoesNotCorrupt:
 
         dark_pct = dark / total
         assert dark_pct < 0.5, (
-            f"Page is {100*dark_pct:.1f}% dark after recompress — likely corrupted"
+            f"Page is {100 * dark_pct:.1f}% dark after recompress — likely corrupted"
         )
+
 
 # (blackletter-redux) Palin@mac blackletter-redux % python3 -m blackletter process --reporter mj --volume 85 --first-page 640 --output output/ --no-unredacted ~/Desktop/vflatscansfromdc/mj.85.640.642.pdf
 # Scanning mj.85.640.642.pdf (3 pages, 1.5 MB)...
