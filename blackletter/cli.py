@@ -1,123 +1,116 @@
 """Command-line interface for blackletter."""
 
+from __future__ import annotations
+
 import argparse
 import logging
+import sys
 from pathlib import Path
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger(__name__)
+from ultralytics import YOLO
+
+from blackletter.models import Label
+from blackletter.scanner import (
+    scan,
+    draw_detections,
+)
+
+logger = logging.getLogger("blackletter")
 
 
-def main():
+DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "run_9.pt"
+
+
+def _add_common_args(parser: argparse.ArgumentParser) -> None:
+    """Add arguments shared by all subcommands."""
+    parser.add_argument("pdf", type=Path, help="Path to the source PDF")
+    parser.add_argument(
+        "--model", type=Path, default=DEFAULT_MODEL,
+        help=f"Path to the YOLO model weights (.pt) (default: {DEFAULT_MODEL.name})",
+    )
+    parser.add_argument(
+        "--reporter", type=str, default=None,
+        help="Reporter abbreviation (e.g. f3d, a3d)",
+    )
+    parser.add_argument(
+        "--volume", type=str, default=None,
+        help="Volume number",
+    )
+    parser.add_argument(
+        "--first-page", type=int, default=1,
+        help="Page number of the first page in the PDF (default: 1)",
+    )
+
+
+def cmd_draw(args: argparse.Namespace) -> None:
+    """Scan and draw bounding boxes on the full PDF."""
+    model = YOLO(str(args.model))
+
+    print(f"Scanning {args.pdf}...")
+    document = scan(args.pdf, model, first_page=args.first_page)
+
+    # Parse label names
+    if args.labels:
+        label_set = set()
+        for name in args.labels:
+            try:
+                label_set.add(Label[name.upper()])
+            except KeyError:
+                print(f"Unknown label: {name}")
+                print(f"Available: {', '.join(l.name for l in Label)}")
+                sys.exit(1)
+    else:
+        label_set = None  # draw all
+
+    output_path = args.output
+    print(f"Drawing boxes to {output_path}...")
+    draw_detections(args.pdf, document, output_path, labels=label_set)
+    print("Done")
+
+
+def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Blackletter: Remove copyrighted material from legal PDFs"
+        prog="blackletter",
+        description="Process scanned legal PDFs with YOLO detection",
     )
-
-    parser.add_argument("pdf", type=Path, help="Path to PDF file")
-
     parser.add_argument(
-        "-o",
-        "--output",
-        type=Path,
-        default=None,
-        help="Output folder (default: pdf_parent/redactions)",
+        "-v", "--verbose", action="store_true",
+        help="Enable verbose logging",
     )
+    sub = parser.add_subparsers(dest="command", required=True)
 
-    # To be used for naming conventions
-    parser.add_argument(
-        "-v",
-        "--volume",
-        type=str,
-        default=None,
-        help="The volume to redact useful for naming in the future",
+    # ── process ──
+    from blackletter.process import build_parser as _build_process_parser
+    _build_process_parser(sub)
+
+    # ── draw ──
+    p_draw = sub.add_parser(
+        "draw",
+        help="Draw bounding boxes on the full PDF for review",
     )
-
-    parser.add_argument(
-        "-r", "--reporter", type=str, default=None, help="The reporter to extract out."
+    _add_common_args(p_draw)
+    p_draw.add_argument(
+        "--output", "-o", type=Path, required=True,
+        help="Output PDF path",
     )
-
-    parser.add_argument(
-        "-p", "--page", type=int, default=1, help="First page number for case naming (default: 1)"
-    )
-
-    parser.add_argument(
-        "-m", "--model", type=str, default="best.pt", help="Path to YOLO model (default: best.pt)"
-    )
-
-    parser.add_argument(
-        "-c", "--confidence", type=float, default=0.20, help="Confidence threshold (default: 0.20)"
-    )
-
-    parser.add_argument(
-        "-d", "--dpi", type=int, default=200, help="DPI for PDF rendering (default: 200)"
-    )
-
-    parser.add_argument("--redact", action="store_true", help="Only redact PDF without masking")
-
-    parser.add_argument(
-        "--mask",
-        action="store_true",
-        help="Only mask opinions (extract to file without redacting PDF)",
-    )
-
-    parser.add_argument(
-        "--reduce",
-        action="store_true",
-        help="Remove pages that are fully redacted from mask",
-    )
-
-    parser.add_argument(
-        "--combine",
-        action="store_true",
-        help="Combine consecutive short opinions into grouped PDFs",
-    )
-
-    parser.add_argument(
-        "--combine-threshold",
-        type=int,
-        default=2,
-        help="Max page span for 'short' opinion (default: 2)",
+    p_draw.add_argument(
+        "--labels", nargs="+", default=None,
+        help="Labels to draw (e.g. CASE_CAPTION KEY_ICON BACKGROUND). Default: all",
     )
 
     args = parser.parse_args()
 
-    if not args.pdf.exists():
-        logger.error(f"PDF not found: {args.pdf}")
-        return 1
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING,
+        format="%(message)s",
+    )
 
-    try:
-        from blackletter import BlackletterPipeline
-        from blackletter.config import RedactionConfig
-
-        config = RedactionConfig(
-            MODEL_PATH=args.model,
-            confidence_threshold=args.confidence,
-            dpi=args.dpi,
-            short_opinion_threshold=args.combine_threshold,
-        )
-
-        pipeline = BlackletterPipeline(config)
-        redacted_pdf, redacted_opinions, masked_opinions = pipeline.process(
-            args.pdf,
-            args.output,
-            args.page,
-            mask=args.mask,
-            redact=args.redact,
-            reduce=args.reduce,
-            combine_short=args.combine,
-        )
-
-        logger.info(f"✓ Redacted PDF: {redacted_pdf}")
-        logger.info(f"✓ Opinions extracted to: {masked_opinions}")
-        logger.info(f"✓ Opinions extracted to: {redacted_opinions}")
-        return 0
-
-    except Exception as e:
-        logger.error(f"Pipeline failed: {e}", exc_info=True)
-        return 1
+    if args.command == "process":
+        from blackletter.process import cmd_process
+        cmd_process(args)
+    elif args.command == "draw":
+        cmd_draw(args)
 
 
 if __name__ == "__main__":
-    exit(main())
-
-__all__ = ["main"]
+    main()
