@@ -53,7 +53,8 @@ def needs_ocr(pdf_path: Path, sample_pages: int = 3) -> bool:
 
 
 def _extract_page_image(
-    doc: fitz.Document, page_num: int,
+    doc: fitz.Document,
+    page_num: int,
 ) -> tuple[Image.Image, float]:
     """Extract the image from a page, return PIL Image and effective DPI."""
     page = doc[page_num]
@@ -225,8 +226,14 @@ def ocr_pdf(
     # Step 2: OCR
     print("  OCR step 2: Adding text layer (tesseract)...")
     # Suppress verbose ocrmypdf/pikepdf/fontTools debug noise
-    for name in ("ocrmypdf", "pikepdf", "ocrmypdf._exec",
-                 "fontTools", "fontTools.subset", "fontTools.ttLib"):
+    for name in (
+        "ocrmypdf",
+        "pikepdf",
+        "ocrmypdf._exec",
+        "fontTools",
+        "fontTools.subset",
+        "fontTools.ttLib",
+    ):
         logging.getLogger(name).setLevel(logging.WARNING)
     ocrmypdf.ocr(
         str(tmp_path),
@@ -245,4 +252,3 @@ def ocr_pdf(
     orig_mb = input_path.stat().st_size / (1024 * 1024)
     print(f"  OCR complete: {orig_mb:.1f} MB -> {final_mb:.1f} MB")
     return output_path
-

@@ -12,7 +12,7 @@ from pathlib import Path
 import cv2
 import fitz
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from ultralytics import YOLO
 
 from blackletter.models import BBox, Detection, Document, Label, Page
@@ -84,8 +84,10 @@ def _filter_key_icons_by_size(
             return True
         if d.confidence >= 0.75:
             return True  # already trusted
-        return (abs(d.bbox.width - med_w) / med_w <= tolerance
-                and abs(d.bbox.height - med_h) / med_h <= tolerance)
+        return (
+            abs(d.bbox.width - med_w) / med_w <= tolerance
+            and abs(d.bbox.height - med_h) / med_h <= tolerance
+        )
 
     kept = [d for d in detections if size_ok(d)]
     removed = len(detections) - len(kept)
@@ -114,7 +116,10 @@ def detect_columns(
 
     # Binarize; ink=1
     _, bw = cv2.threshold(
-        roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU,
+        roi,
+        0,
+        255,
+        cv2.THRESH_BINARY + cv2.THRESH_OTSU,
     )
     ink = (bw == 0).astype(np.uint8)
 
@@ -130,7 +135,9 @@ def detect_columns(
     if win % 2 == 0:
         win += 1
     proj_smooth = cv2.GaussianBlur(
-        proj.reshape(1, -1), (win, 1), 0,
+        proj.reshape(1, -1),
+        (win, 1),
+        0,
     ).ravel()
 
     # Find lowest-ink valley near center
@@ -185,8 +192,10 @@ def detect_columns(
         )
 
     return (
-        float(left_x1), float(left_x2),
-        float(right_x1), float(right_x2),
+        float(left_x1),
+        float(left_x2),
+        float(right_x1),
+        float(right_x2),
         float(center_x),
     )
 
@@ -200,8 +209,7 @@ def _ocr_region(fitz_page, rect: fitz.Rect, psm: int = 7) -> str:
     pix = fitz_page.get_pixmap(matrix=mat, clip=rect)
 
     # Convert to numpy for preprocessing
-    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(
-        pix.height, pix.width, pix.n)
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     if pix.n == 4:
         gray = cv2.cvtColor(img, cv2.COLOR_BGRA2GRAY)
     elif pix.n == 3:
@@ -215,10 +223,17 @@ def _ocr_region(fitz_page, rect: fitz.Rect, psm: int = 7) -> str:
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
         cv2.imwrite(tmp.name, bw)
         result = subprocess.run(
-            ["tesseract", tmp.name, "stdout",
-             "-c", "tessedit_char_whitelist=0123456789",
-             "--psm", str(psm)],
-            capture_output=True, text=True,
+            [
+                "tesseract",
+                tmp.name,
+                "stdout",
+                "-c",
+                "tessedit_char_whitelist=0123456789",
+                "--psm",
+                str(psm),
+            ],
+            capture_output=True,
+            text=True,
         )
         Path(tmp.name).unlink(missing_ok=True)
     return result.stdout.strip()
@@ -292,8 +307,7 @@ def validate_page_numbers(document: Document) -> list[str]:
     """
     warnings: list[str] = []
 
-    numbered = [(p.index, p.page_number) for p in document.pages
-                if p.page_number is not None]
+    numbered = [(p.index, p.page_number) for p in document.pages if p.page_number is not None]
 
     if not numbered:
         warnings.append("No page numbers detected in document")
@@ -365,8 +379,7 @@ def scan(
         mb = pdf_path.stat().st_size / (1024 * 1024)
         print(f"  Source PDF: {mb:.1f} MB (no shrink/OCR needed)")
 
-    doc = Document(pdf_path=actual_path, first_page=first_page,
-                   ocr_applied=actual_path != pdf_path)
+    doc = Document(pdf_path=actual_path, first_page=first_page, ocr_applied=actual_path != pdf_path)
     pdf = fitz.open(actual_path)
     total_pages = len(pdf)
 
@@ -388,8 +401,7 @@ def scan(
                 lx1, lx2, rx1, rx2, mid = detect_columns(img_bgr)
             except (ValueError, Exception):
                 lx1, lx2, rx1, rx2, mid = 0, 0, 0, 0, 0
-            meta.append((page_idx, fitz_page, pix.width, pix.height,
-                         (lx1, lx2, rx1, rx2, mid)))
+            meta.append((page_idx, fitz_page, pix.width, pix.height, (lx1, lx2, rx1, rx2, mid)))
         return imgs, meta
 
     def _process_results(batch_results, batch_meta):
@@ -411,21 +423,21 @@ def scan(
 
             for box in batch_results[j].boxes:
                 class_id = int(box.cls[0].item())
-                page.detections.append(Detection(
-                    bbox=BBox.from_xyxy(box.xyxy[0].tolist()),
-                    label=Label(class_id),
-                    confidence=float(box.conf[0].item()),
-                    page_index=page_idx,
-                ))
+                page.detections.append(
+                    Detection(
+                        bbox=BBox.from_xyxy(box.xyxy[0].tolist()),
+                        label=Label(class_id),
+                        confidence=float(box.conf[0].item()),
+                        page_index=page_idx,
+                    )
+                )
 
-            pn_dets = [d for d in page.detections
-                       if d.label == Label.PAGE_NUMBER]
+            pn_dets = [d for d in page.detections if d.label == Label.PAGE_NUMBER]
             if pn_dets:
                 best_pn = max(pn_dets, key=lambda d: d.confidence)
                 b = best_pn.bbox.to_pdf(page.scale_x, page.scale_y)
                 rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-                page.page_number = _extract_page_number(
-                    fitz_page, rect, hint=page_idx + first_page)
+                page.page_number = _extract_page_number(fitz_page, rect, hint=page_idx + first_page)
 
             doc.pages.append(page)
 
@@ -434,8 +446,7 @@ def scan(
     print(f"  Detecting on {total_pages} pages...")
 
     # Pipeline: render next batch while YOLO runs on current batch
-    batches = [(s, min(s + BATCH_SIZE, total_pages))
-               for s in range(0, total_pages, BATCH_SIZE)]
+    batches = [(s, min(s + BATCH_SIZE, total_pages)) for s in range(0, total_pages, BATCH_SIZE)]
 
     with ThreadPoolExecutor(max_workers=1) as render_pool:
         # Kick off first render
@@ -447,8 +458,7 @@ def scan(
 
             # Start rendering next batch while we run YOLO
             if i + 1 < len(batches):
-                next_future = render_pool.submit(
-                    _render_batch, *batches[i + 1])
+                next_future = render_pool.submit(_render_batch, *batches[i + 1])
 
             # YOLO inference on current batch
             batch_results = model(batch_imgs, conf=confidence, verbose=False)
@@ -569,11 +579,13 @@ def _pair_opinions(
     before the next key icon are ignored to avoid false-positive splits.
     """
     captions = [
-        d for d in document.by_label(Label.CASE_CAPTION)
+        d
+        for d in document.by_label(Label.CASE_CAPTION)
         if d.confidence >= LABEL_CONFIDENCE.get(Label.CASE_CAPTION, CONFIDENCE_THRESHOLD)
     ]
     all_keys = [
-        d for d in document.by_label(Label.KEY_ICON)
+        d
+        for d in document.by_label(Label.KEY_ICON)
         if d.confidence >= LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
     ]
     keys = [d for d in _filter_key_icons_by_size(all_keys) if d.label == Label.KEY_ICON]
@@ -600,7 +612,9 @@ def _pair_opinions(
 
 
 def _tighten_to_text(
-    fitz_page, rect: fitz.Rect, padding: float = 2.0,
+    fitz_page,
+    rect: fitz.Rect,
+    padding: float = 2.0,
     skip: bool = False,
 ) -> fitz.Rect | None:
     """Shrink a rect to tightly fit the PDF text within it.
@@ -634,8 +648,7 @@ def _filter_dets(dets: list[Detection]) -> list[Detection]:
       so page numbers are never covered by a state-abbreviation redaction.
     """
     filtered = [
-        d for d in dets
-        if d.confidence >= LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD)
+        d for d in dets if d.confidence >= LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD)
     ]
 
     # Resolve PAGE_NUMBER / STATE_ABBREVIATION overlaps: trim SA
@@ -652,17 +665,24 @@ def _filter_dets(dets: list[Detection]) -> list[Detection]:
                     else:
                         box = BBox(max(box.x1, pn.x2), box.y1, box.x2, box.y2)
             if box.width > 5:
-                result.append(Detection(
-                    bbox=box, label=d.label,
-                    confidence=d.confidence, page_index=d.page_index,
-                ))
+                result.append(
+                    Detection(
+                        bbox=box,
+                        label=d.label,
+                        confidence=d.confidence,
+                        page_index=d.page_index,
+                    )
+                )
         else:
             result.append(d)
     return result
 
 
 def _draw_boxes(
-    shape, dets: list[Detection], page: Page, fitz_page=None,
+    shape,
+    dets: list[Detection],
+    page: Page,
+    fitz_page=None,
 ) -> None:
     """Draw labeled bounding boxes onto a fitz shape.
 
@@ -689,11 +709,9 @@ def _draw_boxes(
             for pn_r in pn_rects:
                 if rect.intersects(pn_r):
                     if rect.x0 < pn_r.x0:
-                        rect = fitz.Rect(rect.x0, rect.y0,
-                                         min(rect.x1, pn_r.x0), rect.y1)
+                        rect = fitz.Rect(rect.x0, rect.y0, min(rect.x1, pn_r.x0), rect.y1)
                     else:
-                        rect = fitz.Rect(max(rect.x0, pn_r.x1), rect.y0,
-                                         rect.x1, rect.y1)
+                        rect = fitz.Rect(max(rect.x0, pn_r.x1), rect.y0, rect.x1, rect.y1)
             if rect.width < 3:
                 continue
         final.append((det, rect))
@@ -716,9 +734,13 @@ def _mask_rect(shape, rect: fitz.Rect) -> None:
     shape.finish(color=(1, 1, 1), fill=(1, 1, 1), width=0)
 
 
-_MARGIN_LABELS = frozenset({
-    Label.PAGE_HEADER, Label.PAGE_NUMBER, Label.STATE_ABBREVIATION,
-})
+_MARGIN_LABELS = frozenset(
+    {
+        Label.PAGE_HEADER,
+        Label.PAGE_NUMBER,
+        Label.STATE_ABBREVIATION,
+    }
+)
 
 
 def _margin_bounds(page: Page) -> tuple[float, float]:
@@ -815,13 +837,22 @@ def _outside_opinion_rects(
 
 
 def _mask_outside_opinion(
-    shape, fitz_page, page: Page,
-    caption: Detection, key: Detection,
-    is_first: bool, is_last: bool,
+    shape,
+    fitz_page,
+    page: Page,
+    caption: Detection,
+    key: Detection,
+    is_first: bool,
+    is_last: bool,
 ) -> None:
     """Draw white masks for content outside the opinion span."""
     for rect in _outside_opinion_rects(
-        page, fitz_page.rect.width, caption, key, is_first, is_last,
+        page,
+        fitz_page.rect.width,
+        caption,
+        key,
+        is_first,
+        is_last,
     ):
         _mask_rect(shape, rect)
 
@@ -838,9 +869,7 @@ def _find_redaction_end(
     Returns None if neither is found (caller should try fallback).
     """
     cap_sk = caption.sort_key(mid)
-    after_caption = [
-        d for d in opinion_dets if d.sort_key(mid) > cap_sk
-    ]
+    after_caption = [d for d in opinion_dets if d.sort_key(mid) > cap_sk]
 
     for d in after_caption:
         if d.label == Label.DIVIDER:
@@ -868,8 +897,7 @@ def _headnote_fallback_rects(
     after_caption = [d for d in opinion_dets if d.sort_key(mid) > cap_sk]
 
     headnotes = [
-        d for d in after_caption
-        if d.label == Label.HEADNOTE and d.confidence >= min_confidence
+        d for d in after_caption if d.label == Label.HEADNOTE and d.confidence >= min_confidence
     ]
     if not headnotes:
         return []
@@ -879,6 +907,7 @@ def _headnote_fallback_rects(
 
     # Group headnotes by (page_index, column)
     from collections import defaultdict
+
     col_headnotes: dict[tuple[int, int], list[Detection]] = defaultdict(list)
     for hn in headnotes:
         page = pages_by_index[hn.page_index]
@@ -895,8 +924,7 @@ def _headnote_fallback_rects(
 
     for page_idx in range(caption.page_index, last_page + 1):
         page = pages_by_index[page_idx]
-        sx, sy = page.scale_x, page.scale_y
-        mid_pdf = page.midpoint * sx
+        sx = page.scale_x
         header_bottom, footer_top = _margin_bounds(page)
 
         col_bounds = [
@@ -1003,12 +1031,18 @@ REDACTION_COLOR = (1, 0, 0)  # red for debug
 REDACTION_OPACITY = 0.25
 
 
-_REDACT_WHITE = frozenset({
-    Label.STATE_ABBREVIATION, Label.PAGE_HEADER,
-})
-_REDACT_BLACK = frozenset({
-    Label.DIVIDER, Label.HEADNOTE_BRACKET,
-})
+_REDACT_WHITE = frozenset(
+    {
+        Label.STATE_ABBREVIATION,
+        Label.PAGE_HEADER,
+    }
+)
+_REDACT_BLACK = frozenset(
+    {
+        Label.DIVIDER,
+        Label.HEADNOTE_BRACKET,
+    }
+)
 
 
 def _extract_opinion_footnotes(
@@ -1035,8 +1069,7 @@ def _extract_opinion_footnotes(
     for d in footnote_dets:
         by_page.setdefault(d.page_index, []).append(d)
     for page_idx in sorted(by_page):
-        dets = sorted(by_page[page_idx],
-                       key=lambda d: -d.confidence)
+        dets = sorted(by_page[page_idx], key=lambda d: -d.confidence)
         keep: list[Detection] = []
         for d in dets:
             if any(d.bbox.iou(k.bbox) > 0.3 for k in keep):
@@ -1073,10 +1106,8 @@ def _extract_opinion_footnotes(
         if spans_both:
             # Split into left column then right column
             clips = [
-                fitz.Rect(full_clip.x0, full_clip.y0,
-                          mid_pdf, full_clip.y1),
-                fitz.Rect(mid_pdf, full_clip.y0,
-                          full_clip.x1, full_clip.y1),
+                fitz.Rect(full_clip.x0, full_clip.y0, mid_pdf, full_clip.y1),
+                fitz.Rect(mid_pdf, full_clip.y0, full_clip.x1, full_clip.y1),
             ]
         else:
             clips = [full_clip]
@@ -1099,39 +1130,30 @@ def _extract_opinion_footnotes(
             tp = tmp[0]
             pw, ph = tp.rect.width, tp.rect.height
             if clip.y0 > 0:
-                tp.add_redact_annot(
-                    fitz.Rect(0, 0, pw, clip.y0),
-                    fill=(1, 1, 1))
+                tp.add_redact_annot(fitz.Rect(0, 0, pw, clip.y0), fill=(1, 1, 1))
             if clip.y1 < ph:
-                tp.add_redact_annot(
-                    fitz.Rect(0, clip.y1, pw, ph),
-                    fill=(1, 1, 1))
+                tp.add_redact_annot(fitz.Rect(0, clip.y1, pw, ph), fill=(1, 1, 1))
             if clip.x0 > 0:
-                tp.add_redact_annot(
-                    fitz.Rect(0, clip.y0, clip.x0, clip.y1),
-                    fill=(1, 1, 1))
+                tp.add_redact_annot(fitz.Rect(0, clip.y0, clip.x0, clip.y1), fill=(1, 1, 1))
             if clip.x1 < pw:
-                tp.add_redact_annot(
-                    fitz.Rect(clip.x1, clip.y0, pw, clip.y1),
-                    fill=(1, 1, 1))
+                tp.add_redact_annot(fitz.Rect(clip.x1, clip.y0, pw, clip.y1), fill=(1, 1, 1))
             tp.apply_redactions()
 
             scale = min(1.0, usable_w / clip.width)
             dest_w = clip.width * scale
             dest_h = clip.height * scale
 
-            if (y_cursor + dest_h > page_h - margin
-                    and y_cursor > margin + 1):
-                out_page = out_pdf.new_page(
-                    width=page_w, height=page_h)
+            if y_cursor + dest_h > page_h - margin and y_cursor > margin + 1:
+                out_page = out_pdf.new_page(width=page_w, height=page_h)
                 y_cursor = margin
 
             dest_rect = fitz.Rect(
-                margin, y_cursor,
-                margin + dest_w, y_cursor + dest_h,
+                margin,
+                y_cursor,
+                margin + dest_w,
+                y_cursor + dest_h,
             )
-            out_page.show_pdf_page(
-                dest_rect, tmp, 0, clip=clip)
+            out_page.show_pdf_page(dest_rect, tmp, 0, clip=clip)
             tmp.close()
             y_cursor += dest_h + gap
 
@@ -1142,7 +1164,6 @@ def _extract_opinion_footnotes(
     out_pdf.save(output_path)
     out_pdf.close()
     return output_path
-
 
 
 def recompress_images(pdf: fitz.Document, quality: int = 80) -> None:
@@ -1298,6 +1319,7 @@ def split_opinions(
 
     # Count occurrences to know which names need sequence numbers
     from collections import Counter
+
     name_counts = Counter(base_names)
     name_seq: dict[str, int] = {}
 
@@ -1318,9 +1340,7 @@ def split_opinions(
         out_path = output_dir / name
 
         out_pdf = fitz.open()
-        out_pdf.insert_pdf(
-            pdf, from_page=caption.page_index, to_page=key.page_index
-        )
+        out_pdf.insert_pdf(pdf, from_page=caption.page_index, to_page=key.page_index)
 
         cap_key = caption.sort_key(mid)
         key_key = key.sort_key(mid)
@@ -1338,20 +1358,26 @@ def split_opinions(
         headnote_rects: list[tuple[int, fitz.Rect]] = []
         if debug_redactions or redact:
             end_marker = _find_redaction_end(
-                opinion_dets, caption, key, mid,
+                opinion_dets,
+                caption,
+                key,
+                mid,
             )
             if end_marker is not None:
                 headnote_rects = _redaction_rects(
-                    caption, end_marker, pages_by_index,
+                    caption,
+                    end_marker,
+                    pages_by_index,
                 )
             else:
                 headnote_rects = _headnote_fallback_rects(
-                    opinion_dets, caption, pages_by_index, mid,
+                    opinion_dets,
+                    caption,
+                    pages_by_index,
+                    mid,
                 )
 
-        for local_idx, src_idx in enumerate(
-            range(caption.page_index, key.page_index + 1)
-        ):
+        for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1)):
             page = pages_by_index[src_idx]
             fitz_page = out_pdf[local_idx]
             is_first = src_idx == caption.page_index
@@ -1379,34 +1405,62 @@ def split_opinions(
                             # Split: add parts above/below/left/right of PN
                             # Top slice
                             if rect.y0 < pn.y0:
-                                add_safe(fitz.Rect(
-                                    rect.x0, rect.y0, rect.x1, pn.y0,
-                                ), fill)
+                                add_safe(
+                                    fitz.Rect(
+                                        rect.x0,
+                                        rect.y0,
+                                        rect.x1,
+                                        pn.y0,
+                                    ),
+                                    fill,
+                                )
                             # Bottom slice
                             if rect.y1 > pn.y1:
-                                add_safe(fitz.Rect(
-                                    rect.x0, pn.y1, rect.x1, rect.y1,
-                                ), fill)
+                                add_safe(
+                                    fitz.Rect(
+                                        rect.x0,
+                                        pn.y1,
+                                        rect.x1,
+                                        rect.y1,
+                                    ),
+                                    fill,
+                                )
                             # Left slice (middle band only)
                             top = max(rect.y0, pn.y0)
                             bot = min(rect.y1, pn.y1)
                             if rect.x0 < pn.x0 and top < bot:
-                                add_safe(fitz.Rect(
-                                    rect.x0, top, pn.x0, bot,
-                                ), fill)
+                                add_safe(
+                                    fitz.Rect(
+                                        rect.x0,
+                                        top,
+                                        pn.x0,
+                                        bot,
+                                    ),
+                                    fill,
+                                )
                             # Right slice (middle band only)
                             if rect.x1 > pn.x1 and top < bot:
-                                add_safe(fitz.Rect(
-                                    pn.x1, top, rect.x1, bot,
-                                ), fill)
+                                add_safe(
+                                    fitz.Rect(
+                                        pn.x1,
+                                        top,
+                                        rect.x1,
+                                        bot,
+                                    ),
+                                    fill,
+                                )
                             return
                     fitz_page.add_redact_annot(rect, fill=fill)
 
                 # White redact: content outside opinion (redacted + masked)
                 if is_first or is_last:
                     for rect in _outside_opinion_rects(
-                        page, fitz_page.rect.width,
-                        caption, key, is_first, is_last,
+                        page,
+                        fitz_page.rect.width,
+                        caption,
+                        key,
+                        is_first,
+                        is_last,
                     ):
                         add_safe(rect, (1, 1, 1))
 
@@ -1443,7 +1497,8 @@ def split_opinions(
                     if d.label not in redact_labels:
                         continue
                     if d.confidence < LABEL_CONFIDENCE.get(
-                        d.label, CONFIDENCE_THRESHOLD,
+                        d.label,
+                        CONFIDENCE_THRESHOLD,
                     ):
                         continue
                     # Skip detections outside this opinion's content
@@ -1465,7 +1520,8 @@ def split_opinions(
                     if d.label != Label.KEY_ICON:
                         continue
                     if d.confidence < LABEL_CONFIDENCE.get(
-                        d.label, CONFIDENCE_THRESHOLD,
+                        d.label,
+                        CONFIDENCE_THRESHOLD,
                     ):
                         continue
                     b = d.bbox.to_pdf(sx, sy)
@@ -1483,10 +1539,7 @@ def split_opinions(
                 # Draw bounding boxes for requested labels on top of redacted page
                 if draw_labels:
                     shape = fitz_page.new_shape()
-                    dets = _filter_dets([
-                        d for d in page.detections
-                        if d.label in draw_labels
-                    ])
+                    dets = _filter_dets([d for d in page.detections if d.label in draw_labels])
                     _draw_boxes(shape, dets, page, fitz_page)
                     shape.commit()
 
@@ -1496,8 +1549,13 @@ def split_opinions(
 
                 if mask:
                     _mask_outside_opinion(
-                        shape, fitz_page, page,
-                        caption, key, is_first, is_last,
+                        shape,
+                        fitz_page,
+                        page,
+                        caption,
+                        key,
+                        is_first,
+                        is_last,
                     )
 
                 # Debug headnote zone overlays
@@ -1524,14 +1582,14 @@ def split_opinions(
                         )
 
                 if draw_labels is not None:
-                    dets = _filter_dets([
-                        d for d in page.detections
-                        if d.label in draw_labels
-                        and (
-                            d.label in _MARGIN_LABELS
-                            or cap_key <= d.sort_key(mid) <= key_key
-                        )
-                    ])
+                    dets = _filter_dets(
+                        [
+                            d
+                            for d in page.detections
+                            if d.label in draw_labels
+                            and (d.label in _MARGIN_LABELS or cap_key <= d.sort_key(mid) <= key_key)
+                        ]
+                    )
                     _draw_boxes(shape, dets, page, fitz_page)
 
                 shape.commit()
@@ -1539,9 +1597,7 @@ def split_opinions(
         # For masked mode, remove pages that are fully headnotes
         if redact_mode == "masked" and headnote_rects:
             pages_to_delete: list[int] = []
-            for local_idx, src_idx in enumerate(
-                range(caption.page_index, key.page_index + 1)
-            ):
+            for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1)):
                 page = pages_by_index[src_idx]
                 header_bottom, footer_top = _margin_bounds(page)
                 sx = page.scale_x
@@ -1580,8 +1636,8 @@ def split_opinions(
         # Optionally extract footnotes for this opinion
         if extract_footnotes:
             fn_dets = [
-                d for src_idx in range(
-                    caption.page_index, key.page_index + 1)
+                d
+                for src_idx in range(caption.page_index, key.page_index + 1)
                 for d in pages_by_index[src_idx].detections
                 if d.label == Label.FOOTNOTES
             ]
@@ -1589,11 +1645,12 @@ def split_opinions(
                 fn_base = name.replace(".pdf", "")
                 fn_name = f"{fn_base}-footnotes.pdf"
                 _extract_opinion_footnotes(
-                    pdf, fn_dets, pages_by_index,
+                    pdf,
+                    fn_dets,
+                    pages_by_index,
                     output_dir / fn_name,
                     skip_tighten=document.ocr_applied,
                 )
 
     pdf.close()
     return written
-

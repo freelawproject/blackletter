@@ -32,21 +32,25 @@ class Label(IntEnum):
         return self in _STRUCTURAL
 
 
-_COPYRIGHTED = frozenset({
-    Label.KEY_ICON,
-    Label.PAGE_HEADER,
-    Label.HEADNOTE_BRACKET,
-    Label.HEADNOTE,
-})
+_COPYRIGHTED = frozenset(
+    {
+        Label.KEY_ICON,
+        Label.PAGE_HEADER,
+        Label.HEADNOTE_BRACKET,
+        Label.HEADNOTE,
+    }
+)
 
-_STRUCTURAL = frozenset({
-    Label.CASE_CAPTION,
-    Label.DIVIDER,
-    Label.CASE_METADATA,
-    Label.CASE_SEQUENCE,
-    Label.PAGE_NUMBER,
-    Label.STATE_ABBREVIATION,
-})
+_STRUCTURAL = frozenset(
+    {
+        Label.CASE_CAPTION,
+        Label.DIVIDER,
+        Label.CASE_METADATA,
+        Label.CASE_SEQUENCE,
+        Label.PAGE_NUMBER,
+        Label.STATE_ABBREVIATION,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)

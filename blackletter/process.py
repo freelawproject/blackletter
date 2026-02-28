@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import io
 import logging
 from collections import Counter
 from pathlib import Path
 
 import fitz
-from PIL import Image
 from ultralytics import YOLO
 
 from blackletter.models import Label
@@ -64,7 +62,7 @@ def _build_verify_report(document, opinions) -> list[str]:
     lines.append(f"{len(document.pages)} pages scanned")
     lines.append("")
     lines.append("Detection counts:")
-    for label in sorted(counts, key=lambda l: l.value):
+    for label in sorted(counts, key=lambda lab: lab.value):
         lines.append(f"  {label.name:25s}: {counts[label]}")
 
     # Page number stats
@@ -97,15 +95,19 @@ def _build_verify_report(document, opinions) -> list[str]:
 
     # Opinion pairing preview
     captions = [
-        d for d in document.by_label(Label.CASE_CAPTION)
+        d
+        for d in document.by_label(Label.CASE_CAPTION)
         if d.confidence >= LABEL_CONFIDENCE.get(Label.CASE_CAPTION, CONFIDENCE_THRESHOLD)
     ]
     keys = [
-        d for d in document.by_label(Label.KEY_ICON)
+        d
+        for d in document.by_label(Label.KEY_ICON)
         if d.confidence >= LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
     ]
     lines.append("")
-    lines.append(f"Opinion pairing: {len(captions)} captions, {len(keys)} key icons -> {len(opinions)} pairs")
+    lines.append(
+        f"Opinion pairing: {len(captions)} captions, {len(keys)} key icons -> {len(opinions)} pairs"
+    )
 
     # Per-opinion details
     if opinions:
@@ -141,10 +143,7 @@ def _build_verify_report(document, opinions) -> list[str]:
                     f" -> pages {first_num}-{last_num}  [{fname}]"
                 )
             else:
-                lines.append(
-                    f"  Opinion {i + 1}: PDF pages {pdf_first}-{pdf_last}"
-                    f"  [{fname}]"
-                )
+                lines.append(f"  Opinion {i + 1}: PDF pages {pdf_first}-{pdf_last}  [{fname}]")
 
             # List each page in the span with its detected number
             for idx in range(caption.page_index, key.page_index + 1):
@@ -214,8 +213,10 @@ def _build_masked_opinions(
             j = i + 1
             while j < len(opinions):
                 next_cap, next_key = opinions[j]
-                if (next_cap.page_index == next_key.page_index
-                        and next_cap.page_index == caption.page_index):
+                if (
+                    next_cap.page_index == next_key.page_index
+                    and next_cap.page_index == caption.page_index
+                ):
                     group.append(j)
                     j += 1
                 else:
@@ -259,7 +260,6 @@ def _build_masked_opinions(
         fitz_page = out_pdf[0]
 
         sx, sy = page.scale_x, page.scale_y
-        mid_pdf = page.midpoint * sx
 
         # Collect page number rects — never redact these
         pn_rects = []
@@ -291,8 +291,12 @@ def _build_masked_opinions(
         # Outside-opinion whiteout: treat the group as one mega-opinion
         # from first caption to last key
         for rect in _outside_opinion_rects(
-            page, fitz_page.rect.width,
-            first_cap, last_key, is_first=True, is_last=True,
+            page,
+            fitz_page.rect.width,
+            first_cap,
+            last_key,
+            is_first=True,
+            is_last=True,
         ):
             add_safe(rect, (1, 1, 1))
 
@@ -312,8 +316,7 @@ def _build_masked_opinions(
             if end_marker is not None:
                 headnote_rects = _redaction_rects(cap, end_marker, pages_by_index)
             else:
-                headnote_rects = _headnote_fallback_rects(
-                    opinion_dets, cap, pages_by_index, mid)
+                headnote_rects = _headnote_fallback_rects(opinion_dets, cap, pages_by_index, mid)
             if headnote_rects:
                 header_bottom, footer_top = _margin_bounds(page)
                 for rect_page_idx, rect in headnote_rects:
@@ -422,8 +425,9 @@ def _build_full_redacted(
         if end_marker is not None:
             all_headnote_rects.extend(_redaction_rects(caption, end_marker, pages_by_index))
         else:
-            all_headnote_rects.extend(_headnote_fallback_rects(
-                opinion_dets, caption, pages_by_index, mid))
+            all_headnote_rects.extend(
+                _headnote_fallback_rects(opinion_dets, caption, pages_by_index, mid)
+            )
 
     # Process each page
     total_pages = len(document.pages)
@@ -526,7 +530,6 @@ def _build_full_redacted(
     return output_path
 
 
-
 def _extract_images(document, output_dir: Path) -> int:
     """Extract detected IMAGE regions from the PDF as PNG files.
 
@@ -544,7 +547,8 @@ def _extract_images(document, output_dir: Path) -> int:
 
         # Collect IMAGE detections above confidence threshold
         images = [
-            d for d in page.detections
+            d
+            for d in page.detections
             if d.label == Label.IMAGE
             and d.confidence >= LABEL_CONFIDENCE.get(Label.IMAGE, CONFIDENCE_THRESHOLD)
         ]
@@ -584,7 +588,7 @@ def cmd_process(args: argparse.Namespace) -> None:
     masked_dir = base_dir / "masked"
 
     # ── Scan ──
-    shrink = not getattr(args, 'no_shrink', False)
+    shrink = not getattr(args, "no_shrink", False)
 
     # Build output name: reporter.volume.firstpage.lastpage
     page_count = len(fitz.open(str(args.pdf)))
@@ -600,11 +604,15 @@ def cmd_process(args: argparse.Namespace) -> None:
 
     src_mb = args.pdf.stat().st_size / (1024 * 1024)
     print(f"Scanning {args.pdf.name} ({page_count} pages, {src_mb:.1f} MB)...")
-    document = scan(args.pdf, model, first_page=args.first_page,
-                    output_dir=base_dir,
-                    shrink=shrink,
-                    optimize=getattr(args, 'optimize', 1),
-                    output_name=scan_name)
+    document = scan(
+        args.pdf,
+        model,
+        first_page=args.first_page,
+        output_dir=base_dir,
+        shrink=shrink,
+        optimize=getattr(args, "optimize", 1),
+        output_name=scan_name,
+    )
     if args.reporter:
         document.reporter = args.reporter
     if args.volume:
@@ -635,14 +643,16 @@ def cmd_process(args: argparse.Namespace) -> None:
         prefix += f"{args.volume}."
     full_redacted_name = f"{prefix}redacted.pdf" if prefix else "redacted.pdf"
     full_redacted_path = base_dir / full_redacted_name
-    print(f"\nBuilding full redacted PDF...")
+    print("\nBuilding full redacted PDF...")
     _build_full_redacted(document, opinions, full_redacted_path)
 
     # ── Unredacted ──
     if not args.no_unredacted:
         print(f"\nSplitting unredacted into {unredacted_dir}...")
         unredacted_paths = split_opinions(
-            document.pdf_path, document, unredacted_dir,
+            document.pdf_path,
+            document,
+            unredacted_dir,
             first_page=args.first_page,
             redact_mode="unredacted",
             extract_footnotes=args.footnotes,
@@ -654,7 +664,9 @@ def cmd_process(args: argparse.Namespace) -> None:
     # ── Redacted ──
     print(f"\nSplitting redacted into {redacted_dir}...")
     redacted_paths = split_opinions(
-        document.pdf_path, document, redacted_dir,
+        document.pdf_path,
+        document,
+        redacted_dir,
         first_page=args.first_page,
         redact_mode="redacted",
         extract_footnotes=args.footnotes,
@@ -664,13 +676,18 @@ def cmd_process(args: argparse.Namespace) -> None:
     # ── Masked (for LLM) ──
     print(f"\nSplitting masked into {masked_dir}...")
     masked_paths = split_opinions(
-        document.pdf_path, document, masked_dir,
+        document.pdf_path,
+        document,
+        masked_dir,
         first_page=args.first_page,
         redact_mode="masked",
     )
     # Consolidate same-page opinions
     final_masked = _build_masked_opinions(
-        masked_paths, opinions, document, masked_dir,
+        masked_paths,
+        opinions,
+        document,
+        masked_dir,
     )
     print(f"  Wrote {len(final_masked)} masked PDFs ({len(masked_paths)} opinions consolidated)")
 
@@ -731,39 +748,56 @@ def build_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
     )
     p.add_argument("pdf", type=Path, help="Path to the source PDF")
     p.add_argument(
-        "--model", type=Path, default=DEFAULT_MODEL,
+        "--model",
+        type=Path,
+        default=DEFAULT_MODEL,
         help=f"Path to the YOLO model weights (.pt) (default: {DEFAULT_MODEL.name})",
     )
     p.add_argument(
-        "--reporter", type=str, default=None,
+        "--reporter",
+        type=str,
+        default=None,
         help="Reporter abbreviation (e.g. f3d, a3d)",
     )
     p.add_argument(
-        "--volume", type=str, default=None,
+        "--volume",
+        type=str,
+        default=None,
         help="Volume number",
     )
     p.add_argument(
-        "--first-page", type=int, default=1,
+        "--first-page",
+        type=int,
+        default=1,
         help="Page number of the first page in the PDF (default: 1)",
     )
     p.add_argument(
-        "--output", "-o", type=Path, required=True,
+        "--output",
+        "-o",
+        type=Path,
+        required=True,
         help="Base output directory (organized as <reporter>/<volume>/<first-page>)",
     )
     p.add_argument(
-        "--footnotes", action="store_true",
+        "--footnotes",
+        action="store_true",
         help="Extract footnotes into separate PDFs",
     )
     p.add_argument(
-        "--no-unredacted", action="store_true",
+        "--no-unredacted",
+        action="store_true",
         help="Skip generating unredacted opinion PDFs",
     )
     p.add_argument(
-        "--no-shrink", action="store_true",
+        "--no-shrink",
+        action="store_true",
         help="Skip downsampling (default: shrink to ~148 KB/page)",
     )
     p.add_argument(
-        "--optimize", type=int, default=1, choices=[0, 1, 2, 3],
+        "--optimize",
+        type=int,
+        default=1,
+        choices=[0, 1, 2, 3],
         help="ocrmypdf optimization level (0=none, 1=lossless, 2=lossy, 3=aggressive)",
     )
     return p
