@@ -7,28 +7,38 @@ name = "blackletter"
 version = "0.0.1"
 description = "Remove copyrighted material from legal case law PDFs"
 readme = "README.md"
-requires-python = ">=3.9"
-license = "BSD-2-Clause"
+requires-python = ">=3.12"
+license = "AGPL-3.0-or-later"
 authors = [
-    {name = "Your Name", email = "bill@free.law"}
+    {name = "Free Law Project", email = "bill@free.law"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Legal Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Text Processing :: General",
 ]
 
 dependencies = [
     "ultralytics>=8.0.0",
     "opencv-python>=4.8.0",
-    "pdfplumber>=0.10.0",
     "pymupdf>=1.23.0",
-    "numpy>=1.20.0",
-    "google-genai>=1.0.0",
+    "pillow>=12.0.0",
+    "ocrmypdf>=16.0.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
-    "black>=23.0",
     "ruff>=0.1.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/freelawproject/blackletter"
+Repository = "https://github.com/freelawproject/blackletter"
+Issues = "https://github.com/freelawproject/blackletter/issues"
 
 [project.scripts]
 blackletter = "blackletter.cli:main"
@@ -37,10 +47,12 @@ blackletter = "blackletter.cli:main"
 where = ["."]
 include = ["blackletter*"]
 
-[tool.black]
-line-length = 100
-target-version = ['py39', 'py310', 'py311', 'py312']
+[tool.setuptools.package-data]
+blackletter = ["models/*.pt"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py312"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
