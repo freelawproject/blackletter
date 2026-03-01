@@ -1,8 +1,9 @@
 # Blackletter
 
-Remove copyrighted material from legal case law PDFs.
+A reference to blackletter law, this tools removes potentially copyrighted material from legal case law PDFs. This fulfills our goal of respecting any intellectual property rights others may have while making it possible to digitize and publish case law. This is essential to our mission of making case law accessible to all — a prerequisite for meaningful participation in our democracy.
 
-A reference to blackletter law, this tool removes proprietary annotations from judicial opinions—specifically, headnotes, captions, key cites, and other copyrighted materials—while preserving the authentic opinion text.
+Proprietary annotations that are removed from judicial opinions include, but are not limited to, headnotes, captions, and key cites.
+
 
 ## Installation
 
@@ -44,12 +45,12 @@ This runs the full pipeline: OCR (if needed), YOLO detection, page number extrac
 The `process` command runs a single-pass pipeline:
 
 1. **OCR** (if needed): Detects image-only PDFs, downsamples pages, and adds a text layer via ocrmypdf/tesseract
-2. **Detection**: Runs a YOLO model to identify copyrighted elements (headnotes, captions, key cites, brackets, etc.) and structural elements (page numbers, dividers, footnotes)
+2. **Detection**: Runs a YOLO model to identify proprietary elements (headnotes, captions, key cites, brackets, etc.) and structural elements (page numbers, dividers, footnotes)
 3. **Page Numbers**: Extracts and validates page numbers using OCR on detected regions
 4. **Opinion Pairing**: Matches case captions to key icons to identify opinion boundaries
 5. **Splitting & Redaction**: Produces three output variants per opinion:
    - **Unredacted**: Raw opinion pages extracted from the source
-   - **Redacted**: Copyrighted content (headnotes, brackets, key icons) blacked out; non-opinion content whited out
+   - **Redacted**: Potentially copyrighted content (headnotes, brackets, key icons) blacked out; non-opinion content whited out
    - **Masked**: Optimized for LLM ingestion — only the opinion text is visible
 
 Additionally produces:
@@ -93,7 +94,7 @@ output/<reporter>/<volume>/<first-page>/
     <reporter>.<volume>.redacted.pdf    # Full redacted document
     images/                             # Extracted images (PNGs)
     unredacted/                         # Individual opinion PDFs (raw)
-    redacted/                           # Individual opinion PDFs (copyrighted content redacted)
+    redacted/                           # Individual opinion PDFs (potentially copyrighted content redacted)
     masked/                             # Individual opinion PDFs (for LLM ingestion)
 ```
 
@@ -103,18 +104,18 @@ The YOLO model detects 13 element types:
 
 | Label | Description |
 |-------|-------------|
-| KEY_ICON | West key cite icons (copyrighted) |
+| KEY_ICON | West key cite icons |
 | DIVIDER | Opinion section dividers |
-| PAGE_HEADER | Running headers (copyrighted) |
+| PAGE_HEADER | Running headers |
 | CASE_CAPTION | Opinion title/parties |
 | FOOTNOTES | Footnote sections |
-| HEADNOTE_BRACKET | Bracketed headnote markers (copyrighted) |
+| HEADNOTE_BRACKET | Bracketed headnote markers |
 | CASE_METADATA | Court, date, counsel info |
 | CASE_SEQUENCE | Docket/case sequence numbers |
 | PAGE_NUMBER | Page numbers |
 | STATE_ABBREVIATION | State abbreviation markers |
 | IMAGE | Photos, charts, diagrams |
-| HEADNOTE | Headnote text (copyrighted) |
+| HEADNOTE | Headnote text |
 | BACKGROUND | Background/procedural history |
 
 ## Requirements
