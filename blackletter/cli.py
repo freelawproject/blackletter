@@ -72,7 +72,7 @@ def cmd_draw(args: argparse.Namespace) -> None:
 
     output_path = args.output
     print(f"Drawing boxes to {output_path}...")
-    draw_detections(args.pdf, document, output_path, labels=label_set)
+    draw_detections(document.pdf_path, document, output_path, labels=label_set)
     print("Done")
 
 
