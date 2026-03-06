@@ -471,11 +471,9 @@ def scan(
             pn_dets = [d for d in page.detections if d.label == Label.PAGE_NUMBER]
             # Filter out edge artifacts and tiny boxes
             pn_dets = [
-                d for d in pn_dets
-                if d.bbox.height >= 40
-                and d.bbox.width >= 40
-                and d.bbox.y1 >= 5
-                and d.bbox.x1 >= 5
+                d
+                for d in pn_dets
+                if d.bbox.height >= 40 and d.bbox.width >= 40 and d.bbox.y1 >= 5 and d.bbox.x1 >= 5
             ]
             # Try each detection in confidence order until one yields a number
             pn_dets.sort(key=lambda d: d.confidence, reverse=True)

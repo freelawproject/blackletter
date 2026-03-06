@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import sys
 from collections import Counter
 from pathlib import Path
 
@@ -313,7 +312,9 @@ def _build_masked_opinions(
                     opinion_dets.append(d)
             opinion_dets.sort(key=lambda d: d.sort_key(mid))
 
-            end_marker = _find_redaction_end(opinion_dets, cap, key, mid, reporter=document.reporter)
+            end_marker = _find_redaction_end(
+                opinion_dets, cap, key, mid, reporter=document.reporter
+            )
             if end_marker is not None:
                 headnote_rects = _redaction_rects(cap, end_marker, pages_by_index)
             else:
@@ -422,7 +423,9 @@ def _build_full_redacted(
                 if caption.sort_key(mid) <= sk <= key.sort_key(mid):
                     opinion_dets.append(d)
         opinion_dets.sort(key=lambda d: d.sort_key(mid))
-        end_marker = _find_redaction_end(opinion_dets, caption, key, mid, reporter=document.reporter)
+        end_marker = _find_redaction_end(
+            opinion_dets, caption, key, mid, reporter=document.reporter
+        )
         if end_marker is not None:
             all_headnote_rects.extend(_redaction_rects(caption, end_marker, pages_by_index))
         else:
