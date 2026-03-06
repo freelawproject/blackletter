@@ -34,7 +34,7 @@ from blackletter.scanner import (
 
 logger = logging.getLogger("blackletter")
 
-DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "run_9.pt"
+DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "best.pt"
 
 
 def _build_output_dir(args: argparse.Namespace) -> Path:
@@ -312,7 +312,9 @@ def _build_masked_opinions(
                     opinion_dets.append(d)
             opinion_dets.sort(key=lambda d: d.sort_key(mid))
 
-            end_marker = _find_redaction_end(opinion_dets, cap, key, mid)
+            end_marker = _find_redaction_end(
+                opinion_dets, cap, key, mid, reporter=document.reporter
+            )
             if end_marker is not None:
                 headnote_rects = _redaction_rects(cap, end_marker, pages_by_index)
             else:
@@ -421,7 +423,9 @@ def _build_full_redacted(
                 if caption.sort_key(mid) <= sk <= key.sort_key(mid):
                     opinion_dets.append(d)
         opinion_dets.sort(key=lambda d: d.sort_key(mid))
-        end_marker = _find_redaction_end(opinion_dets, caption, key, mid)
+        end_marker = _find_redaction_end(
+            opinion_dets, caption, key, mid, reporter=document.reporter
+        )
         if end_marker is not None:
             all_headnote_rects.extend(_redaction_rects(caption, end_marker, pages_by_index))
         else:
@@ -641,13 +645,13 @@ def cmd_process(args: argparse.Namespace) -> None:
         prefix = f"{args.reporter}."
     if args.volume:
         prefix += f"{args.volume}."
-    full_redacted_name = f"{prefix}redacted.pdf" if prefix else "redacted.pdf"
+    full_redacted_name = f"{scan_name}.redacted.pdf"
     full_redacted_path = base_dir / full_redacted_name
     print("\nBuilding full redacted PDF...")
     _build_full_redacted(document, opinions, full_redacted_path)
 
     # ── Unredacted ──
-    if not args.no_unredacted:
+    if args.unredacted:
         print(f"\nSplitting unredacted into {unredacted_dir}...")
         unredacted_paths = split_opinions(
             document.pdf_path,
@@ -658,8 +662,6 @@ def cmd_process(args: argparse.Namespace) -> None:
             extract_footnotes=args.footnotes,
         )
         print(f"  Wrote {len(unredacted_paths)} unredacted PDFs")
-    else:
-        print("\nSkipping unredacted (--no-unredacted)")
 
     # ── Redacted ──
     print(f"\nSplitting redacted into {redacted_dir}...")
@@ -701,7 +703,7 @@ def process(
     first_page: int = 1,
     model: str | Path | None = None,
     footnotes: bool = False,
-    no_unredacted: bool = False,
+    unredacted: bool = False,
     no_shrink: bool = False,
     optimize: int = 1,
 ) -> Path:
@@ -715,7 +717,7 @@ def process(
         first_page: Page number of the first page in the PDF.
         model: Path to YOLO model weights. Defaults to bundled model.
         footnotes: Extract footnotes into separate PDFs.
-        no_unredacted: Skip generating unredacted opinion PDFs.
+        unredacted: Also generate unredacted opinion PDFs.
         no_shrink: Skip downsampling images.
         optimize: ocrmypdf optimization level (0-3).
 
@@ -732,7 +734,7 @@ def process(
         first_page=first_page,
         model=Path(model),
         footnotes=footnotes,
-        no_unredacted=no_unredacted,
+        unredacted=unredacted,
         no_shrink=no_shrink,
         optimize=optimize,
     )
@@ -784,7 +786,7 @@ def build_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         help="Extract footnotes into separate PDFs",
     )
     p.add_argument(
-        "--no-unredacted",
+        "--unredacted",
         action="store_true",
         help="Skip generating unredacted opinion PDFs",
     )

@@ -18,7 +18,7 @@ from blackletter.scanner import (
 logger = logging.getLogger("blackletter")
 
 
-DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "run_9.pt"
+DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "best.pt"
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -72,7 +72,7 @@ def cmd_draw(args: argparse.Namespace) -> None:
 
     output_path = args.output
     print(f"Drawing boxes to {output_path}...")
-    draw_detections(args.pdf, document, output_path, labels=label_set)
+    draw_detections(document.pdf_path, document, output_path, labels=label_set)
     print("Done")
 
 

@@ -48,6 +48,8 @@ LABEL_COLORS: dict[Label, tuple[int, int, int]] = {
     Label.IMAGE: (255, 87, 34),
     Label.HEADNOTE: (142, 68, 173),
     Label.BACKGROUND: (189, 195, 199),
+    Label.SYLLABUS: (241, 196, 15),
+    Label.EDGES: (44, 62, 80),
 }
 
 # Max allowed deviation from median key-icon size (as a fraction).
@@ -332,6 +334,38 @@ def validate_page_numbers(document: Document) -> list[str]:
     return warnings
 
 
+def _fix_rotated_pages(pdf_path: Path, dest_dir: Path, stem: str) -> Path:
+    """Rasterize rotated pages so every page has rotation=0.
+
+    Pages without rotation are copied as-is.  Rotated pages are rendered
+    to a JPEG pixmap (which applies the rotation) and inserted as an image.
+    Returns the original path unchanged if no pages are rotated.
+    """
+    src = fitz.open(pdf_path)
+    if not any(src[i].rotation != 0 for i in range(len(src))):
+        src.close()
+        return pdf_path
+
+    n_fixed = 0
+    dst = fitz.open()
+    for page in src:
+        if page.rotation == 0:
+            dst.insert_pdf(src, from_page=page.number, to_page=page.number)
+        else:
+            pix = page.get_pixmap(dpi=300)
+            jpg = pix.tobytes("jpeg", jpg_quality=85)
+            new_page = dst.new_page(width=page.rect.width, height=page.rect.height)
+            new_page.insert_image(new_page.rect, stream=jpg)
+            n_fixed += 1
+
+    out_path = dest_dir / f"{stem}_fixed.pdf"
+    dst.save(str(out_path), garbage=4, deflate=True)
+    dst.close()
+    src.close()
+    print(f"  Fixed {n_fixed} rotated page(s)")
+    return out_path
+
+
 def scan(
     pdf_path: Path,
     model: YOLO,
@@ -353,30 +387,32 @@ def scan(
     """
     from blackletter.ocr import needs_ocr, ocr_pdf, _downsample_pdf
 
-    actual_path = pdf_path
     dest_dir = output_dir if output_dir else Path(tempfile.gettempdir())
     dest_dir.mkdir(parents=True, exist_ok=True)
 
     out_stem = output_name if output_name else pdf_path.stem
 
-    if needs_ocr(pdf_path):
+    # Fix rotated pages first so all downstream coordinates are consistent.
+    actual_path = _fix_rotated_pages(pdf_path, dest_dir, out_stem)
+
+    if needs_ocr(actual_path):
         print("  PDF has no text layer — running OCR...")
         ocr_out = dest_dir / f"{out_stem}.pdf"
-        ocr_pdf(pdf_path, ocr_out, optimize=optimize)
+        ocr_pdf(actual_path, ocr_out, optimize=optimize)
+        orig_mb = actual_path.stat().st_size / (1024 * 1024)
         actual_path = ocr_out
-        orig_mb = pdf_path.stat().st_size / (1024 * 1024)
         final_mb = ocr_out.stat().st_size / (1024 * 1024)
         print(f"  OCR complete: {orig_mb:.1f} MB -> {final_mb:.1f} MB ({ocr_out.name})")
     elif shrink:
         print("  Downsampling images...")
         shrunk = dest_dir / f"{out_stem}.pdf"
-        _downsample_pdf(pdf_path, shrunk)
+        _downsample_pdf(actual_path, shrunk)
+        orig_mb = actual_path.stat().st_size / (1024 * 1024)
         actual_path = shrunk
-        orig_mb = pdf_path.stat().st_size / (1024 * 1024)
         final_mb = shrunk.stat().st_size / (1024 * 1024)
         print(f"  Downsampled: {orig_mb:.1f} MB -> {final_mb:.1f} MB ({shrunk.name})")
     else:
-        mb = pdf_path.stat().st_size / (1024 * 1024)
+        mb = actual_path.stat().st_size / (1024 * 1024)
         print(f"  Source PDF: {mb:.1f} MB (no shrink/OCR needed)")
 
     doc = Document(pdf_path=actual_path, first_page=first_page, ocr_applied=actual_path != pdf_path)
@@ -433,9 +469,16 @@ def scan(
                 )
 
             pn_dets = [d for d in page.detections if d.label == Label.PAGE_NUMBER]
-            if pn_dets:
-                best_pn = max(pn_dets, key=lambda d: d.confidence)
-                b = best_pn.bbox.to_pdf(page.scale_x, page.scale_y)
+            # Filter out edge artifacts and tiny boxes
+            pn_dets = [
+                d
+                for d in pn_dets
+                if d.bbox.height >= 40 and d.bbox.width >= 40 and d.bbox.y1 >= 5 and d.bbox.x1 >= 5
+            ]
+            # Try each detection in confidence order until one yields a number
+            pn_dets.sort(key=lambda d: d.confidence, reverse=True)
+            for pn_det in pn_dets:
+                b = pn_det.bbox.to_pdf(page.scale_x, page.scale_y)
                 rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
                 page.page_number = _extract_page_number(fitz_page, rect, hint=page_idx + first_page)
 
@@ -862,6 +905,7 @@ def _find_redaction_end(
     caption: Detection,
     key: Detection,
     mid: float,
+    reporter: str | None = None,
 ) -> Detection | None:
     """Find the end of the headnote zone.
 
@@ -870,6 +914,12 @@ def _find_redaction_end(
     """
     cap_sk = caption.sort_key(mid)
     after_caption = [d for d in opinion_dets if d.sort_key(mid) > cap_sk]
+
+    # For Supreme Court opinions, prefer SYLLABUS as the boundary
+    if reporter and reporter.lower() == "sct":
+        for d in after_caption:
+            if d.label == Label.SYLLABUS:
+                return d
 
     for d in after_caption:
         if d.label == Label.DIVIDER:
@@ -1362,6 +1412,7 @@ def split_opinions(
                 caption,
                 key,
                 mid,
+                reporter=document.reporter,
             )
             if end_marker is not None:
                 headnote_rects = _redaction_rects(

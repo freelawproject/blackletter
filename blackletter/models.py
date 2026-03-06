@@ -6,7 +6,7 @@ from pathlib import Path
 
 
 class Label(IntEnum):
-    """YOLO detection classes matching the trained model (run 6)."""
+    """YOLO detection classes matching the trained model."""
 
     KEY_ICON = 0
     DIVIDER = 1
@@ -21,6 +21,8 @@ class Label(IntEnum):
     IMAGE = 10
     HEADNOTE = 11
     BACKGROUND = 12
+    SYLLABUS = 13
+    EDGES = 14
 
     @property
     def is_copyrighted(self) -> bool:
