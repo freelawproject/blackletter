@@ -73,7 +73,7 @@ Options:
   -o, --output PATH         Base output directory (required)
   --model PATH              Path to YOLO model weights (default: bundled run_9.pt)
   --footnotes               Extract footnotes into separate PDFs
-  --no-unredacted           Skip generating unredacted opinion PDFs
+  --unredacted              Also generate unredacted opinion PDFs
   --no-shrink               Skip downsampling (default: shrink to ~148 KB/page)
   --optimize {0,1,2,3}      ocrmypdf optimization level (default: 1)
 ```

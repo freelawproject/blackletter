@@ -18,7 +18,7 @@ from blackletter.scanner import (
 logger = logging.getLogger("blackletter")
 
 
-DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "run_9.pt"
+DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "best.pt"
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:

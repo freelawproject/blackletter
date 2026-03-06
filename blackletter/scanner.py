@@ -48,6 +48,8 @@ LABEL_COLORS: dict[Label, tuple[int, int, int]] = {
     Label.IMAGE: (255, 87, 34),
     Label.HEADNOTE: (142, 68, 173),
     Label.BACKGROUND: (189, 195, 199),
+    Label.SYLLABUS: (241, 196, 15),
+    Label.EDGES: (44, 62, 80),
 }
 
 # Max allowed deviation from median key-icon size (as a fraction).
@@ -467,9 +469,18 @@ def scan(
                 )
 
             pn_dets = [d for d in page.detections if d.label == Label.PAGE_NUMBER]
-            if pn_dets:
-                best_pn = max(pn_dets, key=lambda d: d.confidence)
-                b = best_pn.bbox.to_pdf(page.scale_x, page.scale_y)
+            # Filter out edge artifacts and tiny boxes
+            pn_dets = [
+                d for d in pn_dets
+                if d.bbox.height >= 40
+                and d.bbox.width >= 40
+                and d.bbox.y1 >= 5
+                and d.bbox.x1 >= 5
+            ]
+            # Try each detection in confidence order until one yields a number
+            pn_dets.sort(key=lambda d: d.confidence, reverse=True)
+            for pn_det in pn_dets:
+                b = pn_det.bbox.to_pdf(page.scale_x, page.scale_y)
                 rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
                 page.page_number = _extract_page_number(fitz_page, rect, hint=page_idx + first_page)
 
@@ -904,6 +915,12 @@ def _find_redaction_end(
     """
     cap_sk = caption.sort_key(mid)
     after_caption = [d for d in opinion_dets if d.sort_key(mid) > cap_sk]
+
+    # For Supreme Court opinions, prefer SYLLABUS as the boundary
+    if reporter and reporter.lower() == "sct":
+        for d in after_caption:
+            if d.label == Label.SYLLABUS:
+                return d
 
     for d in after_caption:
         if d.label == Label.DIVIDER:
@@ -1396,6 +1413,7 @@ def split_opinions(
                 caption,
                 key,
                 mid,
+                reporter=document.reporter,
             )
             if end_marker is not None:
                 headnote_rects = _redaction_rects(
