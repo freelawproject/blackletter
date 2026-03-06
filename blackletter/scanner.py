@@ -907,6 +907,7 @@ def _find_redaction_end(
     caption: Detection,
     key: Detection,
     mid: float,
+    reporter: str | None = None,
 ) -> Detection | None:
     """Find the end of the headnote zone.
 
