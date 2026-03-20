@@ -2,6 +2,13 @@
 
 ## Current
 
+0.0.3 (2026-03-20)
+
+- Fix `blackletter validate` crashing with FileNotFoundError when large.pt is missing (now auto-downloads from Hugging Face)
+- Fix `analyze.py` referencing old model name `analyze.pt` instead of `large.pt`
+
+## Past
+
 0.0.2 (2026-03-20)
 
 - Add small/medium/large model tiers; large model auto-downloads from Hugging Face on first use
