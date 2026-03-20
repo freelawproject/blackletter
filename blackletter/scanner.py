@@ -49,11 +49,50 @@ LABEL_COLORS: dict[Label, tuple[int, int, int]] = {
     Label.HEADNOTE: (142, 68, 173),
     Label.BACKGROUND: (189, 195, 199),
     Label.SYLLABUS: (241, 196, 15),
-    Label.EDGES: (44, 62, 80),
+    Label.EDITORIAL: (44, 62, 80),
+    Label.JUDGES: (127, 140, 141),
+    Label.TEXT_COLUMN: (174, 214, 241),
+    Label.DOCKET: (82, 190, 128),
+    Label.DATE: (245, 176, 65),
+    Label.COURT: (72, 201, 176),
+    Label.CITATION: (205, 97, 85),
 }
 
 # Max allowed deviation from median key-icon size (as a fraction).
 _KEY_ICON_SIZE_TOLERANCE = 0.40
+_KEY_ICON_MIN_RATIO = 1.5  # must be wider than tall
+_KEY_ICON_MAX_RATIO = 4.0  # not absurdly wide (e.g. a full-width divider)
+
+# Pixel tolerance for fuzzy exclusion matching (handles YOLO non-determinism on re-scan).
+_EXCLUSION_TOLERANCE = 10
+
+
+def _check_excluded(
+    d: "Detection",
+    excluded: "set[tuple[int, int, int, int]] | None",
+    tolerance: int = _EXCLUSION_TOLERANCE,
+) -> bool:
+    """Return True if detection d matches any entry in excluded.
+
+    Matches on (page_index, label_id) exactly, then checks bbox origin
+    within ±tolerance pixels to handle minor YOLO coordinate variation
+    between scans of the same PDF.
+    """
+    if not excluded:
+        return False
+    pi = d.page_index
+    lid = int(d.label)
+    bx = round(d.bbox.x1)
+    by = round(d.bbox.y1)
+    if (pi, lid, bx, by) in excluded:
+        return True
+    return any(
+        ex_pi == pi
+        and ex_lid == lid
+        and abs(bx - ex_bx) <= tolerance
+        and abs(by - ex_by) <= tolerance
+        for ex_pi, ex_lid, ex_bx, ex_by in excluded
+    )
 
 
 def _filter_key_icons_by_size(
@@ -71,11 +110,21 @@ def _filter_key_icons_by_size(
     from statistics import median
 
     key_dets = [d for d in detections if d.label == Label.KEY_ICON]
+
+    # Always apply ratio filter, even for single detections
+    def ratio_ok(d: Detection) -> bool:
+        ratio = d.bbox.width / d.bbox.height if d.bbox.height > 0 else 0
+        return _KEY_ICON_MIN_RATIO <= ratio <= _KEY_ICON_MAX_RATIO
+
     if len(key_dets) < 2:
-        return detections
+        kept = [d for d in detections if d.label != Label.KEY_ICON or ratio_ok(d)]
+        removed = len(detections) - len(kept)
+        if removed:
+            logger.info("Removed %d KEY_ICON detection(s) with bad ratio", removed)
+        return kept
 
     # Use high-confidence detections to establish expected size
-    high_conf = [d for d in key_dets if d.confidence >= 0.75]
+    high_conf = [d for d in key_dets if d.confidence >= 0.90]
     reference = high_conf if len(high_conf) >= 2 else key_dets
 
     med_w = median(d.bbox.width for d in reference)
@@ -84,7 +133,9 @@ def _filter_key_icons_by_size(
     def size_ok(d: Detection) -> bool:
         if d.label != Label.KEY_ICON:
             return True
-        if d.confidence >= 0.75:
+        if not ratio_ok(d):
+            return False
+        if d.confidence >= 0.90:
             return True  # already trusted
         return (
             abs(d.bbox.width - med_w) / med_w <= tolerance
@@ -230,7 +281,7 @@ def _ocr_region(fitz_page, rect: fitz.Rect, psm: int = 7) -> str:
                 tmp.name,
                 "stdout",
                 "-c",
-                "tessedit_char_whitelist=0123456789",
+                "tessedit_char_whitelist=0123456789-,",
                 "--psm",
                 str(psm),
             ],
@@ -252,14 +303,37 @@ def _plausible(n: int, hint: int, max_digits: int = 4) -> bool:
     return True
 
 
-def _extract_page_number(fitz_page, rect: fitz.Rect, hint: int = 0) -> int | None:
-    """Extract a page number from a PDF region using text + OCR.
+def _parse_page_range(text: str) -> tuple[int, ...] | None:
+    """Try to parse a page range like '31-32', '31,32', '31, 32' from text.
+
+    Returns a tuple of (start, end) if a range is found, (single,) if just
+    one number, or None if nothing plausible.
+    """
+    text = text.strip()
+    # Match patterns like "31-32", "31–32", "31,32", "31, 32"
+    m = re.match(r"(\d+)\s*[-–,]\s*(\d+)$", text)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if b > a and b - a <= 2:  # reasonable range (1-2 page span)
+            return (a, b)
+    # Single number
+    digits = re.sub(r"\D", "", text)
+    if digits:
+        return (int(digits),)
+    return None
+
+
+def _extract_page_number(
+    fitz_page, rect: fitz.Rect, hint: int = 0
+) -> tuple[int, int | None] | None:
+    """Extract a page number (or range) from a PDF region using text + OCR.
 
     Tightens the rect to actual text first, then tries the embedded PDF
     text layer and multiple tesseract PSM modes.  Filters out implausible
     results (too many digits, too far from expected position).
 
-    Returns the integer page number, or None if extraction fails.
+    Returns (page_number, page_number_end) where page_number_end is set
+    only if a range was detected, or None if extraction fails.
     """
     # Tighten rect to actual text to avoid grabbing adjacent characters
     tight = _tighten_to_text(fitz_page, rect, padding=2.0)
@@ -271,24 +345,40 @@ def _extract_page_number(fitz_page, rect: fitz.Rect, hint: int = 0) -> int | Non
 
     # Method 1: PDF text layer — fast, try this first
     pdf_text = fitz_page.get_text("text", clip=rect).strip()
+
+    # Check for page range first
+    parsed = _parse_page_range(pdf_text)
+    if parsed and len(parsed) == 2:
+        a, b = parsed
+        if _plausible(a, hint, max_digits) or _plausible(b, hint, max_digits):
+            return (a, b)
+
     pdf_digits = re.sub(r"\D", "", pdf_text)
 
     # If PDF text gives a plausible number, use it without OCR
     if pdf_digits:
         n = int(pdf_digits)
         if _plausible(n, hint, max_digits):
-            return n
+            return (n, None)
 
     # Method 2: tesseract OCR — only if text layer failed
     # Try modes in order; stop as soon as we get a plausible result
     ocr_results: list[int] = []
     for psm in (8, 7, 13):
-        digits = _ocr_region(fitz_page, rect, psm=psm)
-        if digits:
-            n = int(digits)
-            if _plausible(n, hint, max_digits):
-                return n
-            ocr_results.append(n)
+        raw = _ocr_region(fitz_page, rect, psm=psm)
+        if raw:
+            # Check for range in OCR output too
+            parsed = _parse_page_range(raw)
+            if parsed and len(parsed) == 2:
+                a, b = parsed
+                if _plausible(a, hint, max_digits) or _plausible(b, hint, max_digits):
+                    return (a, b)
+            digits = re.sub(r"\D", "", raw)
+            if digits:
+                n = int(digits)
+                if _plausible(n, hint, max_digits):
+                    return (n, None)
+                ocr_results.append(n)
 
     # Fallback: take any result without plausibility filter
     candidates = []
@@ -297,8 +387,10 @@ def _extract_page_number(fitz_page, rect: fitz.Rect, hint: int = 0) -> int | Non
     candidates.extend(ocr_results)
     if candidates:
         if hint > 0:
-            return min(candidates, key=lambda n: abs(n - hint))
-        return min(candidates, key=lambda n: len(str(n)))
+            n = min(candidates, key=lambda n: abs(n - hint))
+        else:
+            n = min(candidates, key=lambda n: len(str(n)))
+        return (n, None)
     return None
 
 
@@ -366,6 +458,79 @@ def _fix_rotated_pages(pdf_path: Path, dest_dir: Path, stem: str) -> Path:
     return out_path
 
 
+_SCAN_WORKER_SCRIPT = """
+import os, sys, json
+os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
+import torch
+torch.set_num_threads(2)
+
+import fitz, cv2, numpy as np
+from PIL import Image
+from ultralytics import YOLO
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+from blackletter.scanner import detect_columns, _extract_page_number, DPI
+from blackletter.models import Label
+
+pdf_path, model_path = sys.argv[1], sys.argv[2]
+page_start, page_end = int(sys.argv[3]), int(sys.argv[4])
+confidence, first_page = float(sys.argv[5]), int(sys.argv[6])
+output_path = sys.argv[7]
+
+model = YOLO(model_path)
+pdf = fitz.open(pdf_path)
+mat = fitz.Matrix(DPI / 72, DPI / 72)
+BATCH = 4
+pages_data = []
+
+for bs in range(page_start, page_end, BATCH):
+    be = min(bs + BATCH, page_end)
+    imgs, meta = [], []
+    for pi in range(bs, be):
+        fp = pdf[pi]
+        pix = fp.get_pixmap(matrix=mat)
+        img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        imgs.append(img)
+        img_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+        try:
+            lx1, lx2, rx1, rx2, mid = detect_columns(img_bgr)
+        except Exception:
+            lx1, lx2, rx1, rx2, mid = 0, 0, 0, 0, 0
+        meta.append((pi, fp.rect.width, fp.rect.height, pix.width, pix.height, (lx1, lx2, rx1, rx2, mid)))
+
+    results = model(imgs, conf=confidence, verbose=False, device=None)
+    for j, (pi, pdf_w, pdf_h, pw, ph, cols) in enumerate(meta):
+        dets = []
+        for box in results[j].boxes:
+            dets.append({"bbox": box.xyxy[0].tolist(), "label": int(box.cls[0].item()), "conf": float(box.conf[0].item())})
+
+        fp = pdf[pi]
+        sx, sy = pdf_w / pw, pdf_h / ph
+        pn, pn_end = None, None
+        pn_dets = [d for d in dets if d["label"] == int(Label.PAGE_NUMBER)
+                   and (d["bbox"][3]-d["bbox"][1]) >= 40 and (d["bbox"][2]-d["bbox"][0]) >= 40
+                   and d["bbox"][1] >= 5 and d["bbox"][0] >= 5]
+        pn_dets.sort(key=lambda d: d["conf"], reverse=True)
+        for pd in pn_dets:
+            bx1, by1, bx2, by2 = pd["bbox"]
+            rect = fitz.Rect(bx1*sx, by1*sy, bx2*sx, by2*sy)
+            r = _extract_page_number(fp, rect, hint=pi + first_page)
+            if r is not None:
+                pn, pn_end = r
+                break
+
+        pages_data.append({"index": pi, "pdf_width": pdf_w, "pdf_height": pdf_h,
+                           "img_width": pw, "img_height": ph, "cols": cols,
+                           "detections": dets, "page_number": pn, "page_number_end": pn_end})
+
+    print(f"    Worker pages {bs}-{be}/{page_end}", flush=True)
+
+pdf.close()
+with open(output_path, "w") as f:
+    json.dump(pages_data, f)
+"""
+
+
 def scan(
     pdf_path: Path,
     model: YOLO,
@@ -373,8 +538,11 @@ def scan(
     first_page: int = 1,
     output_dir: Path | None = None,
     shrink: bool = False,
+    skip_ocr: bool = False,
     optimize: int = 1,
     output_name: str | None = None,
+    device: str | None = None,
+    progress_callback=None,
 ) -> Document:
     """Scan a PDF and return a Document with all detections.
 
@@ -384,6 +552,9 @@ def scan(
 
     If shrink=True, downsample images to ~148 KB/page even if the PDF
     already has a text layer.
+
+    If skip_ocr=True, never run OCR regardless of text layer presence
+    (use when the PDF is already known to have a text layer).
     """
     from blackletter.ocr import needs_ocr, ocr_pdf, _downsample_pdf
 
@@ -395,7 +566,7 @@ def scan(
     # Fix rotated pages first so all downstream coordinates are consistent.
     actual_path = _fix_rotated_pages(pdf_path, dest_dir, out_stem)
 
-    if needs_ocr(actual_path):
+    if not skip_ocr and needs_ocr(actual_path):
         print("  PDF has no text layer — running OCR...")
         ocr_out = dest_dir / f"{out_stem}.pdf"
         ocr_pdf(actual_path, ocr_out, optimize=optimize)
@@ -404,116 +575,271 @@ def scan(
         final_mb = ocr_out.stat().st_size / (1024 * 1024)
         print(f"  OCR complete: {orig_mb:.1f} MB -> {final_mb:.1f} MB ({ocr_out.name})")
     elif shrink:
-        print("  Downsampling images...")
-        shrunk = dest_dir / f"{out_stem}.pdf"
-        _downsample_pdf(actual_path, shrunk)
-        orig_mb = actual_path.stat().st_size / (1024 * 1024)
-        actual_path = shrunk
-        final_mb = shrunk.stat().st_size / (1024 * 1024)
-        print(f"  Downsampled: {orig_mb:.1f} MB -> {final_mb:.1f} MB ({shrunk.name})")
+        # Skip downsample for bitonal (1-bit) PDFs — already compact
+        _chk = fitz.open(str(actual_path))
+        _imgs = _chk[0].get_images(full=True) if _chk.page_count else []
+        _is_bitonal = bool(_imgs and _imgs[0][4] == 1)
+        _chk.close()
+        if _is_bitonal:
+            mb = actual_path.stat().st_size / (1024 * 1024)
+            print(f"  Source PDF: {mb:.1f} MB (bitonal, skipping downsample)")
+            # Copy to output dir so output is self-contained
+            if output_dir and actual_path.parent != dest_dir:
+                import shutil
+
+                dest_copy = dest_dir / f"{out_stem}.pdf"
+                if not dest_copy.exists():
+                    shutil.copy2(str(actual_path), str(dest_copy))
+                    print(f"  Copied to {dest_copy.name}")
+                actual_path = dest_copy
+        else:
+            print("  Downsampling images...")
+            shrunk = dest_dir / f"{out_stem}.pdf"
+            _downsample_pdf(actual_path, shrunk)
+            orig_mb = actual_path.stat().st_size / (1024 * 1024)
+            actual_path = shrunk
+            final_mb = shrunk.stat().st_size / (1024 * 1024)
+            print(f"  Downsampled: {orig_mb:.1f} MB -> {final_mb:.1f} MB ({shrunk.name})")
     else:
         mb = actual_path.stat().st_size / (1024 * 1024)
         print(f"  Source PDF: {mb:.1f} MB (no shrink/OCR needed)")
+        # Copy to output dir so output is self-contained
+        if output_dir and actual_path.parent != dest_dir:
+            import shutil
+
+            dest_copy = dest_dir / f"{out_stem}.pdf"
+            if not dest_copy.exists():
+                shutil.copy2(str(actual_path), str(dest_copy))
+                print(f"  Copied to {dest_copy.name}")
+            actual_path = dest_copy
 
     doc = Document(pdf_path=actual_path, first_page=first_page, ocr_applied=actual_path != pdf_path)
     pdf = fitz.open(actual_path)
     total_pages = len(pdf)
 
-    BATCH_SIZE = 16
-    mat = fitz.Matrix(DPI / 72, DPI / 72)
+    import multiprocessing
 
-    def _render_batch(start: int, end: int):
-        """Render pages and run column detection for a batch."""
-        imgs: list[Image.Image] = []
-        meta: list[tuple] = []
-        for page_idx in range(start, end):
-            fitz_page = pdf[page_idx]
-            pix = fitz_page.get_pixmap(matrix=mat)
-            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
-            imgs.append(img)
+    n_workers = max(1, multiprocessing.cpu_count() // 2)
+    # Use parallel scan for large documents
+    use_parallel = total_pages >= 40 and n_workers > 1
 
-            img_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-            try:
-                lx1, lx2, rx1, rx2, mid = detect_columns(img_bgr)
-            except (ValueError, Exception):
-                lx1, lx2, rx1, rx2, mid = 0, 0, 0, 0, 0
-            meta.append((page_idx, fitz_page, pix.width, pix.height, (lx1, lx2, rx1, rx2, mid)))
-        return imgs, meta
+    print(
+        f"  Detecting on {total_pages} pages ({n_workers} workers)..."
+        if use_parallel
+        else f"  Detecting on {total_pages} pages...",
+        flush=True,
+    )
 
-    def _process_results(batch_results, batch_meta):
-        """Convert YOLO results into Page objects."""
-        for j, (page_idx, fitz_page, pw, ph, cols) in enumerate(batch_meta):
-            lx1, lx2, rx1, rx2, mid = cols
-            page = Page(
-                index=page_idx,
-                pdf_width=fitz_page.rect.width,
-                pdf_height=fitz_page.rect.height,
-                img_width=pw,
-                img_height=ph,
-                col_left_x1=lx1,
-                col_left_x2=lx2,
-                col_right_x1=rx1,
-                col_right_x2=rx2,
-                midpoint=mid,
+    if use_parallel:
+        import json as _json
+        import subprocess as _sp
+
+        model_path = (
+            Path(model.ckpt_path) if hasattr(model, "ckpt_path") else Path(str(model.model))
+        )
+        chunk_size = (total_pages + n_workers - 1) // n_workers
+        chunks = []
+        for i in range(n_workers):
+            s = i * chunk_size
+            e = min(s + chunk_size, total_pages)
+            if s < e:
+                chunks.append((s, e))
+
+        # Write worker script to temp file
+        worker_script = Path(tempfile.gettempdir()) / "_bl_scan_worker.py"
+        worker_script.write_text(_SCAN_WORKER_SCRIPT)
+
+        # Launch subprocesses
+        import sys as _sys
+
+        sub_procs = []
+        output_files = []
+        for wid, (s, e) in enumerate(chunks):
+            out_file = Path(tempfile.gettempdir()) / f"_bl_scan_{wid}.json"
+            output_files.append(out_file)
+            p = _sp.Popen(
+                [
+                    _sys.executable,
+                    str(worker_script),
+                    str(actual_path),
+                    str(model_path),
+                    str(s),
+                    str(e),
+                    str(confidence),
+                    str(first_page),
+                    str(out_file),
+                ],
+                stdout=_sp.PIPE,
+                stderr=_sp.STDOUT,
+                cwd=str(Path(__file__).resolve().parent.parent),
             )
+            sub_procs.append((wid, p, s, e))
 
-            for box in batch_results[j].boxes:
-                class_id = int(box.cls[0].item())
-                page.detections.append(
-                    Detection(
-                        bbox=BBox.from_xyxy(box.xyxy[0].tolist()),
-                        label=Label(class_id),
-                        confidence=float(box.conf[0].item()),
-                        page_index=page_idx,
+        # Stream output in real-time and wait for completion
+        import select
+
+        completed = set()
+        fds = {p.stdout.fileno(): (wid, p, s, e) for wid, p, s, e in sub_procs}
+        while len(completed) < len(sub_procs):
+            readable, _, _ = select.select(list(fds.keys()), [], [], 0.5)
+            for fd in readable:
+                wid, p, s, e = fds[fd]
+                line = p.stdout.readline()
+                if line:
+                    text = line.decode(errors="replace").strip()
+                    if text:
+                        print(text, flush=True)
+            for wid, p, s, e in sub_procs:
+                if wid in completed:
+                    continue
+                ret = p.poll()
+                if ret is not None:
+                    completed.add(wid)
+                    for line in p.stdout:
+                        text = line.decode(errors="replace").strip()
+                        if text:
+                            print(text, flush=True)
+                    if ret != 0:
+                        raise RuntimeError(f"YOLO worker {wid} failed (pages {s}-{e})")
+                    done_pages = sum(e2 - s2 for w2, _, s2, e2 in sub_procs if w2 in completed)
+                    print(
+                        f"    Worker {wid + 1}/{len(chunks)} done ({done_pages}/{total_pages} pages)",
+                        flush=True,
                     )
+                    if progress_callback:
+                        progress_callback(
+                            done_pages, total_pages, f"Scanning {done_pages}/{total_pages} pages"
+                        )
+
+        # Assemble Page objects from JSON output files
+        for wid, out_file in enumerate(output_files):
+            chunk_data = _json.loads(out_file.read_text())
+            out_file.unlink(missing_ok=True)
+            for pd in chunk_data:
+                lx1, lx2, rx1, rx2, mid = pd["cols"]
+                page = Page(
+                    index=pd["index"],
+                    pdf_width=pd["pdf_width"],
+                    pdf_height=pd["pdf_height"],
+                    img_width=pd["img_width"],
+                    img_height=pd["img_height"],
+                    col_left_x1=lx1,
+                    col_left_x2=lx2,
+                    col_right_x1=rx1,
+                    col_right_x2=rx2,
+                    midpoint=mid,
                 )
+                for det in pd["detections"]:
+                    page.detections.append(
+                        Detection(
+                            bbox=BBox.from_xyxy(det["bbox"]),
+                            label=Label(det["label"]),
+                            confidence=det["conf"],
+                            page_index=pd["index"],
+                        )
+                    )
+                page.page_number = pd["page_number"]
+                page.page_number_end = pd["page_number_end"]
+                doc.pages.append(page)
 
-            pn_dets = [d for d in page.detections if d.label == Label.PAGE_NUMBER]
-            # Filter out edge artifacts and tiny boxes
-            pn_dets = [
-                d
-                for d in pn_dets
-                if d.bbox.height >= 40 and d.bbox.width >= 40 and d.bbox.y1 >= 5 and d.bbox.x1 >= 5
-            ]
-            # Try each detection in confidence order until one yields a number
-            pn_dets.sort(key=lambda d: d.confidence, reverse=True)
-            for pn_det in pn_dets:
-                b = pn_det.bbox.to_pdf(page.scale_x, page.scale_y)
-                rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-                page.page_number = _extract_page_number(fitz_page, rect, hint=page_idx + first_page)
+        worker_script.unlink(missing_ok=True)
+        # Sort by page index
+        doc.pages.sort(key=lambda p: p.index)
 
-            doc.pages.append(page)
+    else:
+        # Single-process path for small documents
+        BATCH_SIZE = 4
+        mat = fitz.Matrix(DPI / 72, DPI / 72)
 
-    from concurrent.futures import ThreadPoolExecutor
+        def _render_batch(start: int, end: int):
+            imgs: list[Image.Image] = []
+            meta: list[tuple] = []
+            for page_idx in range(start, end):
+                fitz_page = pdf[page_idx]
+                pix = fitz_page.get_pixmap(matrix=mat)
+                img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                imgs.append(img)
+                img_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+                try:
+                    lx1, lx2, rx1, rx2, mid = detect_columns(img_bgr)
+                except (ValueError, Exception):
+                    lx1, lx2, rx1, rx2, mid = 0, 0, 0, 0, 0
+                meta.append((page_idx, fitz_page, pix.width, pix.height, (lx1, lx2, rx1, rx2, mid)))
+            return imgs, meta
 
-    print(f"  Detecting on {total_pages} pages...")
+        def _process_results(batch_results, batch_meta):
+            for j, (page_idx, fitz_page, pw, ph, cols) in enumerate(batch_meta):
+                lx1, lx2, rx1, rx2, mid = cols
+                page = Page(
+                    index=page_idx,
+                    pdf_width=fitz_page.rect.width,
+                    pdf_height=fitz_page.rect.height,
+                    img_width=pw,
+                    img_height=ph,
+                    col_left_x1=lx1,
+                    col_left_x2=lx2,
+                    col_right_x1=rx1,
+                    col_right_x2=rx2,
+                    midpoint=mid,
+                )
+                for box in batch_results[j].boxes:
+                    class_id = int(box.cls[0].item())
+                    page.detections.append(
+                        Detection(
+                            bbox=BBox.from_xyxy(box.xyxy[0].tolist()),
+                            label=Label(class_id),
+                            confidence=float(box.conf[0].item()),
+                            page_index=page_idx,
+                        )
+                    )
+                pn_dets = [d for d in page.detections if d.label == Label.PAGE_NUMBER]
+                pn_dets = [
+                    d
+                    for d in pn_dets
+                    if d.bbox.height >= 40
+                    and d.bbox.width >= 40
+                    and d.bbox.y1 >= 5
+                    and d.bbox.x1 >= 5
+                ]
+                pn_dets.sort(key=lambda d: d.confidence, reverse=True)
+                for pn_det in pn_dets:
+                    b = pn_det.bbox.to_pdf(page.scale_x, page.scale_y)
+                    rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+                    result = _extract_page_number(fitz_page, rect, hint=page_idx + first_page)
+                    if result is not None:
+                        page.page_number, page.page_number_end = result
+                doc.pages.append(page)
 
-    # Pipeline: render next batch while YOLO runs on current batch
-    batches = [(s, min(s + BATCH_SIZE, total_pages)) for s in range(0, total_pages, BATCH_SIZE)]
+        from concurrent.futures import ThreadPoolExecutor
 
-    with ThreadPoolExecutor(max_workers=1) as render_pool:
-        # Kick off first render
-        next_future = render_pool.submit(_render_batch, *batches[0])
-
-        for i, (batch_start, batch_end) in enumerate(batches):
-            # Wait for this batch's render to complete
-            batch_imgs, batch_meta = next_future.result()
-
-            # Start rendering next batch while we run YOLO
-            if i + 1 < len(batches):
-                next_future = render_pool.submit(_render_batch, *batches[i + 1])
-
-            # YOLO inference on current batch
-            batch_results = model(batch_imgs, conf=confidence, verbose=False)
-            _process_results(batch_results, batch_meta)
-
-            if batch_end % 50 < BATCH_SIZE or batch_end == total_pages:
+        batches = [(s, min(s + BATCH_SIZE, total_pages)) for s in range(0, total_pages, BATCH_SIZE)]
+        with ThreadPoolExecutor(max_workers=1) as render_pool:
+            next_future = render_pool.submit(_render_batch, *batches[0])
+            for i, (batch_start, batch_end) in enumerate(batches):
+                batch_imgs, batch_meta = next_future.result()
+                if i + 1 < len(batches):
+                    next_future = render_pool.submit(_render_batch, *batches[i + 1])
+                batch_results = model(batch_imgs, conf=confidence, verbose=False, device=device)
+                _process_results(batch_results, batch_meta)
                 print(f"    Page {batch_end}/{total_pages}", flush=True)
+                if progress_callback:
+                    progress_callback(
+                        batch_end, total_pages, f"Scanning page {batch_end}/{total_pages}"
+                    )
 
     # Sequential correction pass: fix misreads using neighbor context
     _correct_page_numbers(doc.pages)
 
     return doc
+
+
+def _page_num_for_sequence(page: Page) -> int | None:
+    """Return the best page_number to use for sequential checks.
+
+    For a range like 31-32, both are valid; callers pick based on context.
+    For sequence checking, use page_number (the lower/first value).
+    """
+    return page.page_number
 
 
 def _correct_page_numbers(pages: list[Page]) -> None:
@@ -522,6 +848,8 @@ def _correct_page_numbers(pages: list[Page]) -> None:
     Makes multiple passes.  On each pass, for every page, looks for the
     nearest neighbors (up to 10 pages away) that agree with each other
     sequentially.  If they do, interpolates the expected value.
+
+    Pages with ranges are left alone if either number fits the sequence.
 
     Repeats until no more corrections are made.
     """
@@ -561,8 +889,15 @@ def _correct_page_numbers(pages: list[Page]) -> None:
                 continue
 
             expected = prev_num + prev_dist
+
+            # If page has a range and either number matches, leave it alone
+            if pages[i].page_number_end is not None:
+                if pages[i].page_number == expected or pages[i].page_number_end == expected:
+                    continue
+
             if pages[i].page_number != expected:
                 pages[i].page_number = expected
+                pages[i].page_number_end = None  # clear range if correcting
                 corrections += 1
 
         if corrections == 0:
@@ -596,6 +931,7 @@ def draw_detections(
         shape = fitz_page.new_shape()
 
         dets = page.detections
+        dets = _filter_key_icons_by_size(dets)
         if labels is not None:
             dets = [d for d in dets if d.label in labels]
         dets = _filter_dets(dets)
@@ -610,6 +946,7 @@ def draw_detections(
 
 def _pair_opinions(
     document: Document,
+    excluded: set[tuple[int, int, int, int]] | None = None,
 ) -> list[tuple[Detection, Detection]]:
     """Pair each CASE_CAPTION with the next KEY_ICON in reading order.
 
@@ -620,16 +957,26 @@ def _pair_opinions(
 
     Only the first caption after a key icon is used; subsequent captions
     before the next key icon are ignored to avoid false-positive splits.
+
+    Args:
+        excluded: Optional set of (page_index, label_id, round(bbox_x1), round(bbox_y1))
+                  tuples to suppress specific detections.
     """
+
+    def _is_excluded(d):
+        return _check_excluded(d, excluded)
+
     captions = [
         d
         for d in document.by_label(Label.CASE_CAPTION)
         if d.confidence >= LABEL_CONFIDENCE.get(Label.CASE_CAPTION, CONFIDENCE_THRESHOLD)
+        and not _is_excluded(d)
     ]
     all_keys = [
         d
         for d in document.by_label(Label.KEY_ICON)
         if d.confidence >= LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
+        and not _is_excluded(d)
     ]
     keys = [d for d in _filter_key_icons_by_size(all_keys) if d.label == Label.KEY_ICON]
 
@@ -1015,25 +1362,46 @@ def _headnote_fallback_rects(
     return rects
 
 
+def _find_redaction_start(
+    opinion_dets: list[Detection],
+    caption: Detection,
+    mid: float,
+) -> Detection:
+    """Find the start of the headnote zone.
+
+    If a BACKGROUND detection exists after the caption (from the large model),
+    use its top edge as the redaction start. Otherwise fall back to the caption.
+    """
+    cap_sk = caption.sort_key(mid)
+    for d in opinion_dets:
+        if d.label == Label.BACKGROUND and d.sort_key(mid) > cap_sk:
+            return d
+    return caption
+
+
 def _redaction_rects(
     caption: Detection,
     end_marker: Detection,
     pages_by_index: dict[int, Page],
+    start_marker: Detection | None = None,
 ) -> list[tuple[int, fitz.Rect]]:
-    """Generate column-aware redaction rectangles from caption to end marker.
+    """Generate column-aware redaction rectangles from start to end marker.
 
-    Fills every column in reading order between the caption and end marker.
+    If start_marker is provided (e.g. a BACKGROUND detection), redaction
+    begins at start_marker.y1 instead of caption.y2. Otherwise falls back
+    to starting below the caption.
 
     Returns a list of (source_page_index, rect_in_pdf_points).
     """
-    cap_page = pages_by_index[caption.page_index]
+    start = start_marker or caption
+    start_page = pages_by_index[start.page_index]
     end_page = pages_by_index[end_marker.page_index]
-    cap_box = caption.bbox.to_pdf(cap_page.scale_x, cap_page.scale_y)
+    start_box = start.bbox.to_pdf(start_page.scale_x, start_page.scale_y)
     end_box = end_marker.bbox.to_pdf(end_page.scale_x, end_page.scale_y)
 
     rects: list[tuple[int, fitz.Rect]] = []
 
-    for page_idx in range(caption.page_index, end_marker.page_index + 1):
+    for page_idx in range(start.page_index, end_marker.page_index + 1):
         page = pages_by_index[page_idx]
         sx = page.scale_x
         mid_pdf = page.midpoint * sx
@@ -1044,9 +1412,9 @@ def _redaction_rects(
             (page.col_right_x1 * sx, page.col_right_x2 * sx),
         ]
 
-        cap_col = 0 if cap_box.center_x < mid_pdf else 1
+        start_col = 0 if start_box.center_x < mid_pdf else 1
         end_col = 0 if end_box.center_x < mid_pdf else 1
-        is_start = page_idx == caption.page_index
+        is_start = page_idx == start.page_index
         is_end = page_idx == end_marker.page_index
 
         for col in range(2):
@@ -1055,10 +1423,12 @@ def _redaction_rects(
             y_bot = footer_top
 
             if is_start:
-                if col < cap_col:
+                if col < start_col:
                     continue
-                if col == cap_col:
-                    y_top = cap_box.y2
+                if col == start_col:
+                    # If using a BACKGROUND marker, start at its top edge;
+                    # if falling back to caption, start below it
+                    y_top = start_box.y1 if start_marker else start_box.y2
 
             if is_end:
                 if col > end_col:
@@ -1091,6 +1461,7 @@ _REDACT_BLACK = frozenset(
     {
         Label.DIVIDER,
         Label.HEADNOTE_BRACKET,
+        Label.EDITORIAL,
     }
 )
 
@@ -1254,6 +1625,7 @@ def split_opinions(
     redact: bool = False,
     redact_mode: str | None = None,
     extract_footnotes: bool = False,
+    excluded: set[tuple[int, int, int, int]] | None = None,
 ) -> list[Path]:
     """Split a PDF into individual opinion files based on caption→key pairs.
 
@@ -1276,7 +1648,7 @@ def split_opinions(
     elif redact_mode in ("redacted", "masked"):
         redact = True
     output_dir.mkdir(parents=True, exist_ok=True)
-    opinions = _pair_opinions(document)
+    opinions = _pair_opinions(document, excluded=excluded)
 
     if not opinions:
         return []
@@ -1292,83 +1664,24 @@ def split_opinions(
     if document.reporter and document.volume:
         prefix = f"{document.reporter}.{document.volume}."
 
-    # First pass: compute base names and detect gaps within each opinion
+    # Compute base names for each opinion
+    from collections import Counter
+
     base_names: list[str] = []
     for caption, key in opinions:
         cap_page = pages_by_index[caption.page_index]
         key_page = pages_by_index[key.page_index]
-        first_num = cap_page.page_number
+        # For opinion start: use higher number if page shows a range
+        first_num = cap_page.page_number_end or cap_page.page_number
+        # For opinion end: use lower number if page shows a range
         last_num = key_page.page_number
 
-        # Check for gaps and suspicious page numbers
-        has_gap = False
-        needs_verify = False
         if first_num is not None and last_num is not None:
-            expected_pages = last_num - first_num + 1
-            actual_pages = key.page_index - caption.page_index + 1
-            if actual_pages < expected_pages:
-                has_gap = True
-                print(
-                    f"GAP in opinion {first_num}-{last_num}: expected "
-                    f"{expected_pages} pages, have {actual_pages} "
-                    f"({expected_pages - actual_pages} pages missing from source)"
-                )
-            # Check for non-sequential page numbers (possible OCR misreads)
-            nums = []
-            for idx in range(caption.page_index, key.page_index + 1):
-                p = pages_by_index[idx]
-                if p.page_number is not None:
-                    nums.append((idx, p.page_number))
-            for j in range(1, len(nums)):
-                prev_idx, prev_num = nums[j - 1]
-                curr_idx, curr_num = nums[j]
-                expected = prev_num + (curr_idx - prev_idx)
-                if curr_num != expected and not has_gap:
-                    needs_verify = True
-                    print(
-                        f"VERIFY opinion {first_num}-{last_num}: page index "
-                        f"{curr_idx} reads as {curr_num}, expected {expected} "
-                        f"(possible OCR misread)"
-                    )
-
-        if first_num is not None and last_num is not None:
-            base = f"{prefix}{first_num:04d}-{last_num:04d}"
-            if has_gap:
-                base += "_GAP"
-            elif needs_verify:
-                base += "_VERIFY"
-            base_names.append(base)
+            base_names.append(f"{prefix}{first_num:04d}-{last_num:04d}")
         else:
             fb_first = caption.page_index + first_page
             fb_last = key.page_index + first_page
-            base_names.append(f"{prefix}UNVERIFIED_{fb_first:04d}-{fb_last:04d}")
-
-    # Check for gaps between consecutive opinions
-    for i in range(1, len(opinions)):
-        _, prev_key = opinions[i - 1]
-        curr_caption, _ = opinions[i]
-        prev_key_page = pages_by_index[prev_key.page_index]
-        curr_cap_page = pages_by_index[curr_caption.page_index]
-        prev_last = prev_key_page.page_number
-        curr_first = curr_cap_page.page_number
-        if prev_last is not None and curr_first is not None:
-            # Pages between opinions: prev_key page to curr_caption page
-            pdf_pages_between = curr_caption.page_index - prev_key.page_index
-            page_nums_between = curr_first - prev_last
-            if page_nums_between > pdf_pages_between:
-                missing = page_nums_between - pdf_pages_between
-                print(
-                    f"GAP between opinions: {prev_last} -> {curr_first} "
-                    f"({missing} pages missing from source)"
-                )
-                # Flag both adjacent opinions
-                if "_GAP" not in base_names[i - 1]:
-                    base_names[i - 1] += "_GAP"
-                if "_GAP" not in base_names[i]:
-                    base_names[i] += "_GAP"
-
-    # Count occurrences to know which names need sequence numbers
-    from collections import Counter
+            base_names.append(f"{prefix}{fb_first:04d}-{fb_last:04d}")
 
     name_counts = Counter(base_names)
     name_seq: dict[str, int] = {}
@@ -1382,15 +1695,14 @@ def split_opinions(
         else:
             name = f"{base}.pdf"
 
-        if "UNVERIFIED" in name:
-            print(
-                f"UNVERIFIED: opinion at index {caption.page_index}-"
-                f"{key.page_index}, using fallback: {name}"
-            )
         out_path = output_dir / name
 
         out_pdf = fitz.open()
         out_pdf.insert_pdf(pdf, from_page=caption.page_index, to_page=key.page_index)
+
+        # Detect bitonal for safe redaction
+        _s_imgs = out_pdf[0].get_images(full=True) if out_pdf.page_count else []
+        _is_bitonal = bool(_s_imgs and _s_imgs[0][4] == 1)
 
         cap_key = caption.sort_key(mid)
         key_key = key.sort_key(mid)
@@ -1428,6 +1740,15 @@ def split_opinions(
                     mid,
                 )
 
+            # Refine block rects to line-level with docTR
+            # Keep block-level rects for page-deletion coverage check (line-level
+            # rects have gaps between lines and won't sum to 95% coverage).
+            block_headnote_rects = headnote_rects
+            if headnote_rects:
+                from blackletter.refine import refine_headnote_rects
+
+                headnote_rects = refine_headnote_rects(pdf, headnote_rects, pages_by_index)
+
         for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1)):
             page = pages_by_index[src_idx]
             fitz_page = out_pdf[local_idx]
@@ -1444,8 +1765,10 @@ def split_opinions(
                     if d.label == Label.PAGE_NUMBER:
                         b = d.bbox.to_pdf(sx, sy)
                         r = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-                        tight = _tighten_to_text(fitz_page, r, skip=document.ocr_applied)
+                        tight = _tighten_to_text(fitz_page, r, skip=False)
                         pn_rects.append(tight if tight is not None else r)
+
+                _page_redact_rects = []
 
                 def add_safe(rect: fitz.Rect, fill) -> None:
                     """Add redaction annotation, clipping around page numbers."""
@@ -1501,6 +1824,7 @@ def split_opinions(
                                     fill,
                                 )
                             return
+                    _page_redact_rects.append((fitz.Rect(rect), fill))
                     fitz_page.add_redact_annot(rect, fill=fill)
 
                 # White redact: content outside opinion (redacted + masked)
@@ -1547,6 +1871,8 @@ def split_opinions(
                 for d in page.detections:
                     if d.label not in redact_labels:
                         continue
+                    if _check_excluded(d, excluded):
+                        continue
                     if d.confidence < LABEL_CONFIDENCE.get(
                         d.label,
                         CONFIDENCE_THRESHOLD,
@@ -1560,15 +1886,26 @@ def split_opinions(
                             continue
                     b = d.bbox.to_pdf(sx, sy)
                     rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-                    tight = _tighten_to_text(fitz_page, rect, skip=document.ocr_applied)
+                    tight = _tighten_to_text(fitz_page, rect, skip=False)
                     if tight is not None:
                         rect = tight
                     fill = (0, 0, 0) if d.label in _REDACT_BLACK else (1, 1, 1)
                     add_safe(rect, fill)
 
                 # KEY_ICON redactions: white before caption, black at end
+                # Only redact icons that pass the ratio filter (same as pairing)
+                valid_key_icons = {
+                    id(d)
+                    for d in _filter_key_icons_by_size(
+                        [x for x in page.detections if x.label == Label.KEY_ICON]
+                    )
+                }
                 for d in page.detections:
                     if d.label != Label.KEY_ICON:
+                        continue
+                    if id(d) not in valid_key_icons:
+                        continue
+                    if _check_excluded(d, excluded):
                         continue
                     if d.confidence < LABEL_CONFIDENCE.get(
                         d.label,
@@ -1585,7 +1922,13 @@ def split_opinions(
                         # Within opinion (including own key) — black
                         add_safe(rect, (0, 0, 0))
 
-                fitz_page.apply_redactions()
+                if _is_bitonal and _page_redact_rects:
+                    from blackletter.process import _redact_bitonal_image
+
+                    _redact_bitonal_image(fitz_page, out_pdf, _page_redact_rects)
+                    fitz_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+                else:
+                    fitz_page.apply_redactions()
 
                 # Draw bounding boxes for requested labels on top of redacted page
                 if draw_labels:
@@ -1613,7 +1956,7 @@ def split_opinions(
                 header_bottom, footer_top = _margin_bounds(page)
                 for rect_page_idx, rect in headnote_rects:
                     if rect_page_idx == src_idx:
-                        tight = _tighten_to_text(fitz_page, rect, skip=document.ocr_applied)
+                        tight = _tighten_to_text(fitz_page, rect, skip=False)
                         if tight is not None:
                             rect = tight
                         rect = fitz.Rect(
@@ -1646,7 +1989,9 @@ def split_opinions(
                 shape.commit()
 
         # For masked mode, remove pages that are fully headnotes
-        if redact_mode == "masked" and headnote_rects:
+        # Use block-level rects (pre-refinement) for coverage — line-level rects
+        # have gaps between lines and won't reliably sum to >=95%.
+        if redact_mode == "masked" and block_headnote_rects:
             pages_to_delete: list[int] = []
             for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1)):
                 page = pages_by_index[src_idx]
@@ -1660,7 +2005,7 @@ def split_opinions(
                 # Collect headnote rects for this page, split by column
                 left_coverage = 0.0
                 right_coverage = 0.0
-                for rect_page_idx, rect in headnote_rects:
+                for rect_page_idx, rect in block_headnote_rects:
                     if rect_page_idx != src_idx:
                         continue
                     rect_height = min(rect.y1, footer_top) - max(rect.y0, header_bottom)
@@ -1678,10 +2023,24 @@ def split_opinions(
             if pages_to_delete:
                 out_pdf.delete_pages(pages_to_delete)
 
-        if redact:
-            recompress_images(out_pdf)
         out_pdf.save(out_path, garbage=4, deflate=True)
         out_pdf.close()
+        if redact and out_path.stat().st_size > 50 * 1024 * 1024:
+            reopen = fitz.open(str(out_path))
+            sample_imgs = reopen[0].get_images(full=True) if reopen.page_count else []
+            is_bitonal = bool(sample_imgs and sample_imgs[0][4] == 1)
+            if is_bitonal:
+                reopen.close()
+            else:
+                print(
+                    f"    Compressing {out_path.name} ({out_path.stat().st_size // (1024 * 1024)} MB)...",
+                    flush=True,
+                )
+                recompress_images(reopen)
+                data = reopen.tobytes(garbage=4, deflate=True)
+                reopen.close()
+                out_path.write_bytes(data)
+        print(f"    Split {i + 1}/{len(opinions)}", flush=True)
         written.append(out_path)
 
         # Optionally extract footnotes for this opinion

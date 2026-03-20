@@ -164,7 +164,7 @@ def _downsample_pdf(
         out_img = Image.open(io.BytesIO(jpeg_bytes))
         results.append((xref, jpeg_bytes, out_img.width, out_img.height))
         done = i + 1
-        if done % 50 == 0 or done == n_items:
+        if done % 10 == 0 or done == n_items:
             print(f"    Compressed {done}/{n_items} images", flush=True)
 
     # Apply results back to the document (must be sequential)
@@ -205,7 +205,6 @@ def ocr_pdf(
     Returns:
         Path to the OCR'd PDF.
     """
-    import ocrmypdf
 
     input_path = Path(input_path)
     if output_path is None:
@@ -214,41 +213,372 @@ def ocr_pdf(
 
     print(f"  OCR: processing {input_path.name} (target {target_kb} KB/page)")
 
-    # Step 1: Downsample
-    print("  OCR step 1: Downsampling images...")
-    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
+    # Check if source is already bitonal — skip downsample if so
+    _chk = fitz.open(str(input_path))
+    _imgs = _chk[0].get_images(full=True) if _chk.page_count else []
+    _is_bitonal = bool(_imgs and _imgs[0][4] == 1)
+    _chk.close()
 
-    _downsample_pdf(input_path, tmp_path, target_kb)
-    ds_mb = tmp_path.stat().st_size / (1024 * 1024)
-    print(f"  OCR step 1 done: downsampled to {ds_mb:.1f} MB")
+    if _is_bitonal:
+        print("  OCR: bitonal source, skipping downsample")
+        tmp_path = input_path
+    else:
+        # Step 1: Downsample
+        print("  OCR step 1: Downsampling images...")
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+
+        _downsample_pdf(input_path, tmp_path, target_kb)
+        ds_mb = tmp_path.stat().st_size / (1024 * 1024)
+        print(f"  OCR step 1 done: downsampled to {ds_mb:.1f} MB")
 
     # Step 2: OCR
-    print("  OCR step 2: Adding text layer (tesseract)...")
-    # Suppress verbose ocrmypdf/pikepdf/fontTools debug noise
-    for name in (
-        "ocrmypdf",
-        "pikepdf",
-        "ocrmypdf._exec",
-        "fontTools",
-        "fontTools.subset",
-        "fontTools.ttLib",
-    ):
-        logging.getLogger(name).setLevel(logging.WARNING)
-    ocrmypdf.ocr(
-        str(tmp_path),
-        str(output_path),
-        pdf_renderer="auto",
-        optimize=optimize,
-        output_type="pdf",
-        language=[language],
-        tesseract_timeout=120,
-        progress_bar=True,
-    )
+    src_doc = fitz.open(str(tmp_path))
+    n_pages = len(src_doc)
+    src_doc.close()
 
-    tmp_path.unlink(missing_ok=True)
+    import multiprocessing
+    import subprocess
+    import sys
+
+    n_workers = max(1, multiprocessing.cpu_count() // 2)
+
+    if n_pages >= 20 and n_workers > 1:
+        # ── Parallel OCR: split into chunks, OCR each, merge ──
+        print(
+            f"  OCR step 2: Adding text layer — {n_pages} pages ({n_workers} workers)...",
+            flush=True,
+        )
+
+        chunk_size = (n_pages + n_workers - 1) // n_workers
+        chunk_inputs = []
+        chunk_outputs = []
+
+        # Split PDF into chunks
+        src_doc = fitz.open(str(tmp_path))
+        for i in range(n_workers):
+            start = i * chunk_size
+            end = min(start + chunk_size, n_pages)
+            if start >= end:
+                break
+            chunk_in = Path(tempfile.gettempdir()) / f"_ocr_chunk_{i}_in.pdf"
+            chunk_out = Path(tempfile.gettempdir()) / f"_ocr_chunk_{i}_out.pdf"
+            chunk_doc = fitz.open()
+            chunk_doc.insert_pdf(src_doc, from_page=start, to_page=end - 1)
+            chunk_doc.save(str(chunk_in), garbage=4, deflate=True)
+            chunk_doc.close()
+            chunk_inputs.append(chunk_in)
+            chunk_outputs.append(chunk_out)
+        src_doc.close()
+
+        # Launch OCR subprocesses
+        procs = []
+        for i, (c_in, c_out) in enumerate(zip(chunk_inputs, chunk_outputs)):
+            script = f"""
+import os, logging
+for n in ("pikepdf","fontTools","fontTools.subset","fontTools.ttLib","ocrmypdf"):
+    logging.getLogger(n).setLevel(logging.ERROR)
+for _n in list(logging.root.manager.loggerDict):
+    if _n.startswith("ocrmypdf"):
+        logging.getLogger(_n).setLevel(logging.ERROR)
+import ocrmypdf
+from ocrmypdf import hookimpl
+from ocrmypdf._plugin_manager import get_plugin_manager
+
+class _Progress:
+    def __init__(self, *, total=None, desc=None, unit=None, disable=False, **kw):
+        self._total = total
+        self._unit = unit
+        self._current = 0
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def update(self, n=1, *, completed=None):
+        if self._unit != "page": return
+        self._current += n
+        if self._current % 10 == 0 or self._current == self._total:
+            print(f"  OCR worker {i + 1}: {{self._current}}/{{self._total}}", flush=True)
+
+class _Plugin:
+    @hookimpl
+    def get_progressbar_class(self):
+        return _Progress
+
+pm = get_plugin_manager()
+pm._pm.register(_Plugin())
+ocrmypdf.ocr(
+    "{c_in}", "{c_out}",
+    pdf_renderer="auto", optimize={optimize},
+    output_type="pdf", language=["{language}"],
+    tesseract_timeout=120, progress_bar=True,
+    plugin_manager=pm,
+)
+print("DONE", flush=True)
+"""
+            p = subprocess.Popen(
+                [sys.executable, "-c", script],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            procs.append((i, p))
+
+        # Stream output and wait for all to finish
+        import select
+
+        completed = set()
+        fds = {p.stdout.fileno(): (i, p) for i, p in procs}
+        while len(completed) < len(procs):
+            # Read available output from any worker
+            readable, _, _ = select.select(list(fds.keys()), [], [], 0.5)
+            for fd in readable:
+                i, p = fds[fd]
+                line = p.stdout.readline()
+                if line:
+                    text = line.decode(errors="replace").strip()
+                    if text:
+                        print(text, flush=True)
+            # Check for finished workers
+            for i, p in procs:
+                if i in completed:
+                    continue
+                ret = p.poll()
+                if ret is not None:
+                    completed.add(i)
+                    # Drain remaining output
+                    for line in p.stdout:
+                        text = line.decode(errors="replace").strip()
+                        if text:
+                            print(text, flush=True)
+                    start = i * chunk_size
+                    end = min(start + chunk_size, n_pages)
+                    if ret != 0:
+                        raise RuntimeError(f"OCR worker {i} failed (pages {start}-{end})")
+                    print(
+                        f"  OCR: worker {i + 1}/{len(procs)} done (pages {start + 1}-{end})",
+                        flush=True,
+                    )
+
+        # Merge chunks back into one PDF
+        print("  OCR: merging chunks...", flush=True)
+        merged = fitz.open()
+        for c_out in chunk_outputs:
+            chunk_doc = fitz.open(str(c_out))
+            merged.insert_pdf(chunk_doc)
+            chunk_doc.close()
+        merged.save(str(output_path), garbage=4, deflate=True)
+        merged.close()
+
+        # Cleanup
+        for f in chunk_inputs + chunk_outputs:
+            f.unlink(missing_ok=True)
+    else:
+        # ── Single-process OCR for small documents ──
+        print(f"  OCR step 2: Adding text layer (tesseract) — {n_pages} pages...", flush=True)
+        for name in ("pikepdf", "fontTools", "fontTools.subset", "fontTools.ttLib"):
+            logging.getLogger(name).setLevel(logging.ERROR)
+        logging.getLogger("ocrmypdf").setLevel(logging.ERROR)
+        for _log_name in list(logging.root.manager.loggerDict):
+            if _log_name.startswith("ocrmypdf"):
+                logging.getLogger(_log_name).setLevel(logging.ERROR)
+
+        import ocrmypdf as _ocrmypdf
+        from ocrmypdf import hookimpl as _hookimpl
+        from ocrmypdf._plugin_manager import get_plugin_manager as _get_pm
+
+        class _PrintProgress:
+            def __init__(self, *, total=None, desc=None, unit=None, disable=False, **kw):
+                self._total = total
+                self._desc = desc
+                self._unit = unit
+                self._disable = disable
+                self._current = 0
+
+            def __enter__(self):
+                if not self._disable and self._unit == "page":
+                    print(f"  OCR: {self._desc or 'processing'} (0/{self._total})", flush=True)
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def update(self, n=1, *, completed=None):
+                if self._disable or self._unit != "page":
+                    return
+                self._current += n
+                total = self._total or "?"
+                if isinstance(total, int) and self._current % 4 == 0 or self._current == total:
+                    print(
+                        f"  OCR: {self._desc or 'processing'} ({self._current}/{total})", flush=True
+                    )
+
+        class _ProgressPlugin:
+            @_hookimpl
+            def get_progressbar_class(self):
+                return _PrintProgress
+
+        pm = _get_pm()
+        pm._pm.register(_ProgressPlugin())
+        _ocrmypdf.ocr(
+            str(tmp_path),
+            str(output_path),
+            pdf_renderer="auto",
+            optimize=optimize,
+            output_type="pdf",
+            language=[language],
+            tesseract_timeout=120,
+            progress_bar=True,
+            plugin_manager=pm,
+        )
+
+    if tmp_path != input_path:
+        tmp_path.unlink(missing_ok=True)
 
     final_mb = output_path.stat().st_size / (1024 * 1024)
     orig_mb = input_path.stat().st_size / (1024 * 1024)
     print(f"  OCR complete: {orig_mb:.1f} MB -> {final_mb:.1f} MB")
     return output_path
+
+
+_BITONAL_WORKER_SCRIPT = """
+import io, sys
+import fitz
+import numpy as np
+from PIL import Image
+
+src_path, dst_path = sys.argv[1], sys.argv[2]
+page_start, page_end = int(sys.argv[3]), int(sys.argv[4])
+dpi, threshold = int(sys.argv[5]), int(sys.argv[6])
+
+src = fitz.open(src_path)
+out = fitz.open()
+for i in range(page_start, page_end):
+    page = src[i]
+    new_page = out.new_page(width=page.rect.width, height=page.rect.height)
+    pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+    gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+    bw = Image.fromarray((gray > threshold).astype(np.uint8) * 255).convert("1")
+    buf = io.BytesIO()
+    bw.save(buf, format="TIFF", compression="group4")
+    new_page.insert_image(new_page.rect, stream=buf.getvalue())
+out.save(dst_path, garbage=4, deflate=True)
+out.close()
+src.close()
+print(f"  Bitonal worker: pages {page_start+1}-{page_end} done", flush=True)
+"""
+
+
+def bitonal_convert(
+    src_path: Path,
+    dst_path: Path,
+    dpi: int = 200,
+    threshold: int = 160,
+) -> None:
+    """Convert a PDF to bitonal CCITT G4 (1-bit black/white).
+
+    Renders each page to grayscale at dpi, applies a threshold, and saves
+    as TIFF Group 4 compressed images. Uses parallel workers for large docs.
+    """
+    import multiprocessing
+    import subprocess
+    import sys
+    import time as _time
+
+    src = fitz.open(str(src_path))
+    total = len(src)
+    src.close()
+
+    n_workers = max(1, multiprocessing.cpu_count() // 2)
+    use_parallel = total >= 40 and n_workers > 1
+
+    orig_mb = src_path.stat().st_size / (1024 * 1024)
+    print(
+        f"  Bitonal: converting {total} pages at {dpi} DPI ({n_workers} workers)..."
+        if use_parallel
+        else f"  Bitonal: converting {total} pages at {dpi} DPI...",
+        flush=True,
+    )
+
+    if use_parallel:
+        # Write worker script
+        worker_script = Path(tempfile.gettempdir()) / "_bl_bitonal_worker.py"
+        worker_script.write_text(_BITONAL_WORKER_SCRIPT)
+
+        chunk_size = (total + n_workers - 1) // n_workers
+        chunk_outputs = []
+        procs = []
+
+        for i in range(n_workers):
+            s = i * chunk_size
+            e = min(s + chunk_size, total)
+            if s >= e:
+                break
+            chunk_out = Path(tempfile.gettempdir()) / f"_bitonal_chunk_{i}.pdf"
+            chunk_outputs.append(chunk_out)
+            p = subprocess.Popen(
+                [
+                    sys.executable,
+                    str(worker_script),
+                    str(src_path),
+                    str(chunk_out),
+                    str(s),
+                    str(e),
+                    str(dpi),
+                    str(threshold),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            procs.append((i, p, s, e))
+
+        completed = set()
+        while len(completed) < len(procs):
+            for i, p, s, e in procs:
+                if i in completed:
+                    continue
+                ret = p.poll()
+                if ret is not None:
+                    completed.add(i)
+                    out = p.stdout.read().decode(errors="replace")
+                    if out.strip():
+                        print(out.strip(), flush=True)
+                    if ret != 0:
+                        raise RuntimeError(f"Bitonal worker {i} failed:\n{out}")
+                    done_pages = sum(e2 - s2 for j, _, s2, e2 in procs if j in completed)
+                    print(f"  Bitonal: {done_pages}/{total} pages", flush=True)
+            if len(completed) < len(procs):
+                _time.sleep(0.5)
+
+        # Merge chunks
+        merged = fitz.open()
+        for chunk_out in chunk_outputs:
+            chunk_doc = fitz.open(str(chunk_out))
+            merged.insert_pdf(chunk_doc)
+            chunk_doc.close()
+        merged.save(str(dst_path), garbage=4, deflate=True)
+        merged.close()
+
+        for f in chunk_outputs:
+            f.unlink(missing_ok=True)
+        worker_script.unlink(missing_ok=True)
+    else:
+        # Single-process for small docs
+        import numpy as np
+
+        src = fitz.open(str(src_path))
+        out = fitz.open()
+        for i in range(total):
+            page = src[i]
+            new_page = out.new_page(width=page.rect.width, height=page.rect.height)
+            pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+            gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+            bw = Image.fromarray((gray > threshold).astype(np.uint8) * 255).convert("1")
+            buf = io.BytesIO()
+            bw.save(buf, format="TIFF", compression="group4")
+            new_page.insert_image(new_page.rect, stream=buf.getvalue())
+            if (i + 1) % 20 == 0 or (i + 1) == total:
+                print(f"  Bitonal: {i + 1}/{total}", flush=True)
+        out.save(str(dst_path), garbage=4, deflate=True)
+        out.close()
+        src.close()
+
+    final_mb = dst_path.stat().st_size / (1024 * 1024)
+    print(f"  Bitonal: {orig_mb:.1f} MB -> {final_mb:.1f} MB")

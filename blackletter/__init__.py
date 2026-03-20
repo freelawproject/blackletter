@@ -1,3 +1,4 @@
-from blackletter.process import process
+from blackletter.process import process, generate_files
+from blackletter.validate import validate
 
-__all__ = ["process"]
+__all__ = ["process", "generate_files", "validate"]
