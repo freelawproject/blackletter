@@ -22,7 +22,13 @@ class Label(IntEnum):
     HEADNOTE = 11
     BACKGROUND = 12
     SYLLABUS = 13
-    EDGES = 14
+    EDITORIAL = 14
+    JUDGES = 15
+    TEXT_COLUMN = 16
+    DOCKET = 17
+    DATE = 18
+    COURT = 19
+    CITATION = 20
 
     @property
     def is_copyrighted(self) -> bool:
@@ -51,6 +57,12 @@ _STRUCTURAL = frozenset(
         Label.CASE_SEQUENCE,
         Label.PAGE_NUMBER,
         Label.STATE_ABBREVIATION,
+        Label.JUDGES,
+        Label.TEXT_COLUMN,
+        Label.DOCKET,
+        Label.DATE,
+        Label.COURT,
+        Label.CITATION,
     }
 )
 
@@ -152,6 +164,7 @@ class Page:
     img_height: int
     detections: list[Detection] = field(default_factory=list)
     page_number: int | None = None
+    page_number_end: int | None = None  # second number if page shows a range (e.g. "31-32")
     col_left_x1: float = 0.0
     col_left_x2: float = 0.0
     col_right_x1: float = 0.0

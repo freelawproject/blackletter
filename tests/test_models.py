@@ -10,7 +10,7 @@ class TestLabel:
     def test_int_values_match_yolo_class_ids(self):
         assert Label.KEY_ICON == 0
         assert Label.HEADNOTE == 11
-        assert len(Label) == 15
+        assert len(Label) == 21
 
     def test_copyrighted_labels(self):
         assert Label.KEY_ICON.is_copyrighted

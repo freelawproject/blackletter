@@ -164,3 +164,6 @@ dmypy.json
 
 # Project output
 output/
+
+# Large model files (hosted on Hugging Face)
+blackletter/models/large.pt
