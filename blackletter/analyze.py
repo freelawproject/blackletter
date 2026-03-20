@@ -9,7 +9,7 @@ from pathlib import Path
 
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
-DEFAULT_ANALYZE_MODEL = Path(__file__).resolve().parent / "models" / "analyze.pt"
+DEFAULT_ANALYZE_MODEL = Path(__file__).resolve().parent / "models" / "large.pt"
 
 CROP_FRAC = 0.07
 MIN_SCORE = 0.80

@@ -87,7 +87,11 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
 
 def cmd_validate(args: argparse.Namespace) -> None:
     """Validate page number sequence and report issues."""
+    from blackletter.analyze import DEFAULT_ANALYZE_MODEL
     from blackletter.validate import validate
+
+    # Ensure the analyze model is present (downloads from HF if missing)
+    _ensure_model(args.model or DEFAULT_ANALYZE_MODEL)
 
     def progress(current, total, message):
         print(f"\r  {message}", end="", flush=True)
