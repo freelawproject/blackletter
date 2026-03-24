@@ -283,10 +283,13 @@ def _process_page(args: tuple) -> dict:
         _process_page._glm_processor = None
         _process_page._glm_model = None
         _process_page._glm = True
-    if not hasattr(_process_page, "_pdf"):
-        import fitz as _fitz
+    import fitz as _fitz
 
+    if not hasattr(_process_page, "_pdf") or getattr(_process_page, "_pdf_path", None) != pdf_path:
+        if hasattr(_process_page, "_pdf"):
+            _process_page._pdf.close()
         _process_page._pdf = _fitz.open(pdf_path)
+        _process_page._pdf_path = pdf_path
 
     import io
 
