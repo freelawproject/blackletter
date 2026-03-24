@@ -403,21 +403,29 @@ def compute_redaction_rects(
         sx, sy = page.scale_x, page.scale_y
 
         # Headnote zones — compute in image pixel coords
-        # Convert margin bounds to image pixels
         hb, ft = _margin_bounds(page)
-        hb_px = hb / sy
-        ft_px = ft / sy
 
         for rect_page_idx, rect in all_headnote_rects:
             if rect_page_idx == src_idx:
-                # rect is in PDF points — convert to pixels for text_bottom
+                # Tighten to text in PDF points first
+                tight = _tighten_to_text(fitz_page, rect)
+                if tight is not None:
+                    rect = tight
                 text_bot = _text_bottom(fitz_page, rect)
-                text_bot_px = text_bot / sy
-                # Convert rect to image pixels
+                text_left, text_right = _text_x_bounds(fitz_page, rect)
+                rect = fitz.Rect(
+                    max(rect.x0, text_left),
+                    max(rect.y0, hb),
+                    min(rect.x1, text_right),
+                    min(rect.y1, ft, text_bot),
+                )
+                if rect.is_empty or rect.x0 >= rect.x1 or rect.y0 >= rect.y1:
+                    continue
+                # Convert to image pixels
                 rx0 = rect.x0 / sx
-                ry0 = max(rect.y0 / sy, hb_px)
+                ry0 = rect.y0 / sy
                 rx1 = rect.x1 / sx
-                ry1 = min(rect.y1 / sy, ft_px, text_bot_px)
+                ry1 = rect.y1 / sy
                 _add_px(src_idx, rx0, ry0, rx1, ry1, "black", "headnote")
 
         # Per-detection redactions — output in image pixel coords
@@ -462,30 +470,32 @@ def compute_redaction_rects(
                 caption_rects.append(fitz.Rect(b.x1, b.y1, b.x2, b.y2))
 
         _CS_INSET = 3.0
+        _CS_MIN_PX = 40  # min width/height in image pixels
+        _CS_MAX_PX = 60  # max width/height in image pixels
         for d in page.detections:
             if d.label != Label.CASE_SEQUENCE:
                 continue
             if _check_excluded(d, excluded):
                 continue
-            b = d.bbox.to_pdf(sx, sy)
+            # Clamp raw YOLO bbox to min/max size in pixels, then convert
+            bx0, by0 = d.bbox.x1, d.bbox.y1
+            bx1, by1 = d.bbox.x2, d.bbox.y2
+            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            pw = max(_CS_MIN_PX, min(bx1 - bx0, _CS_MAX_PX))
+            ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
+            bx0, bx1 = cx - pw / 2, cx + pw / 2
+            by0, by1 = cy - ph / 2, cy + ph / 2
+            b = BBox(bx0, by0, bx1, by1).to_pdf(sx, sy)
             rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-            tight = _tighten_to_text(fitz_page, rect, skip=False)
-            if tight is not None:
-                rect = tight
-            else:
-                rect = fitz.Rect(
-                    rect.x0 + _CS_INSET,
-                    rect.y0 + _CS_INSET,
-                    rect.x1 - _CS_INSET,
-                    rect.y1 - _CS_INSET,
-                )
-            for cap_r in caption_rects:
-                if rect.intersects(cap_r):
-                    rect = (
-                        fitz.Rect(rect.x0, rect.y0, rect.x1, cap_r.y0)
-                        if rect.y0 < cap_r.y0
-                        else fitz.Rect(0, 0, 0, 0)
-                    )
+            # Small inset
+            rect = fitz.Rect(
+                rect.x0 + _CS_INSET,
+                rect.y0 + _CS_INSET,
+                rect.x1 - _CS_INSET,
+                rect.y1 - _CS_INSET,
+            )
+            if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
+                continue
             _add_px(
                 src_idx,
                 rect.x0 / sx,
@@ -805,25 +815,32 @@ def _build_full_redacted(
             add_safe(rect, fill)
 
         # CASE_SEQUENCE: redact black, but never overlap CASE_CAPTION
-        _CS_INSET = 3.0  # PDF points (~1mm) — YOLO boxes run a bit large
+        _CS_INSET = 3.0
+        _CS_MIN_PX = 40
+        _CS_MAX_PX = 60
         for d in page.detections:
             if d.label != Label.CASE_SEQUENCE:
                 continue
             if _check_excluded(d, excluded):
                 continue
-            b = d.bbox.to_pdf(sx, sy)
+            # Clamp to min/max pixels, then convert to PDF points
+            bx0, by0 = d.bbox.x1, d.bbox.y1
+            bx1, by1 = d.bbox.x2, d.bbox.y2
+            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            pw = max(_CS_MIN_PX, min(bx1 - bx0, _CS_MAX_PX))
+            ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
+            bx0, bx1 = cx - pw / 2, cx + pw / 2
+            by0, by1 = cy - ph / 2, cy + ph / 2
+            from blackletter.models import BBox
+
+            b = BBox(bx0, by0, bx1, by1).to_pdf(sx, sy)
             rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-            tight = _tighten_to_text(fitz_page, rect, skip=False)
-            if tight is not None:
-                rect = tight
-            else:
-                # Shrink raw YOLO box slightly
-                rect = fitz.Rect(
-                    rect.x0 + _CS_INSET,
-                    rect.y0 + _CS_INSET,
-                    rect.x1 - _CS_INSET,
-                    rect.y1 - _CS_INSET,
-                )
+            rect = fitz.Rect(
+                rect.x0 + _CS_INSET,
+                rect.y0 + _CS_INSET,
+                rect.x1 - _CS_INSET,
+                rect.y1 - _CS_INSET,
+            )
             # Clip away any overlap with caption rects
             for cap_r in caption_rects:
                 if rect.intersects(cap_r):
@@ -1778,13 +1795,17 @@ def generate_files(
     opinions = _pair_opinions(document, excluded=excluded)
     print(f"  Found {len(opinions)} opinions ({_time.time() - _t0:.0f}s)", flush=True)
 
-    # Clean margins
-    from blackletter.margins import clean_margins
+    # Clean margins — skip if margin_rects.json already exists
+    margin_rects_path = output / "margin_rects.json"
+    if not margin_rects_path.exists():
+        from blackletter.margins import clean_margins
 
-    _t0 = _time.time()
-    print("\nCleaning margins...", flush=True)
-    clean_margins(document.pdf_path)
-    print(f"  Margins cleaned ({_time.time() - _t0:.0f}s)", flush=True)
+        _t0 = _time.time()
+        print("\nCleaning margins...", flush=True)
+        clean_margins(document.pdf_path)
+        print(f"  Margins cleaned ({_time.time() - _t0:.0f}s)", flush=True)
+    else:
+        print("\nMargins already computed, skipping clean_margins.", flush=True)
 
     # Extract images
     _t0 = _time.time()

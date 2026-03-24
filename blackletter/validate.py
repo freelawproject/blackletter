@@ -418,6 +418,7 @@ def validate(
     auto_correct: bool = True,
     progress_callback=None,
     model: str | Path | None = None,
+    num_workers: int | None = None,
 ) -> dict:
     """Validate a PDF's page integrity.
 
@@ -460,6 +461,7 @@ def validate(
         exp_end=exp_end,
         progress_callback=progress_callback,
         model=model,
+        num_workers=num_workers,
     )
 
     ocr_results = analysis["results"]

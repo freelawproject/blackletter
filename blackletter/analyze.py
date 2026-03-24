@@ -7,6 +7,8 @@ import re
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
+from PIL import Image
+
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 DEFAULT_ANALYZE_MODEL = Path(__file__).resolve().parent / "models" / "large.pt"
@@ -282,12 +284,11 @@ def _process_page(args: tuple) -> dict:
         _process_page._glm_model = None
         _process_page._glm = True
     if not hasattr(_process_page, "_pdf"):
-        import pypdfium2 as pdfium
+        import fitz as _fitz
 
-        _process_page._pdf = pdfium.PdfDocument(pdf_path)
+        _process_page._pdf = _fitz.open(pdf_path)
 
     import io
-    import pypdfium2 as pdfium
 
     ocr = _process_page._ocr
     yolo = _process_page._yolo
@@ -296,8 +297,8 @@ def _process_page(args: tuple) -> dict:
     pdf = _process_page._pdf
 
     page = pdf[page_idx]
-    bitmap = page.render(scale=2)
-    img = bitmap.to_pil().convert("RGB")
+    pix = page.get_pixmap(dpi=144)  # scale=2 at 72dpi = 144dpi
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     img_w, img_h = img.size
 
     def img_to_bytes(pil_img):
@@ -409,6 +410,20 @@ def _process_page(args: tuple) -> dict:
         else:
             page_num = None
 
+    # Capture all YOLO detections (not just page numbers)
+    all_detections = []
+    for box in det[0].boxes:
+        cls_id = int(box.cls[0].item())
+        conf = float(box.conf[0].item())
+        bx1, by1, bx2, by2 = box.xyxy[0].tolist()
+        all_detections.append(
+            {
+                "label_id": cls_id,
+                "confidence": round(conf, 3),
+                "bbox": [round(bx1, 1), round(by1, 1), round(bx2, 1), round(by2, 1)],
+            }
+        )
+
     return {
         "pdf_page": page_idx + 1,
         "detected": page_num["text"] if page_num else None,
@@ -416,6 +431,9 @@ def _process_page(args: tuple) -> dict:
         "type": page_num.get("type") if page_num else None,
         "score": page_num.get("score") if page_num else None,
         "ocr": page_num.get("ocr", "paddle") if page_num else None,
+        "detections": all_detections,
+        "img_width": img_w,
+        "img_height": img_h,
     }
 
 
@@ -448,7 +466,7 @@ def analyze_pdf(
             total_pages, results, seq_issues, duplicates, seen_nums,
             all_nums, missing_pages, ranges_found, not_detected
     """
-    import pypdfium2 as pdfium
+    import fitz as _fitz
 
     pdf_path = str(pdf_path)
     if model is None:
@@ -457,8 +475,9 @@ def analyze_pdf(
     if num_workers is None:
         num_workers = min(4, cpu_count())
 
-    pdf = pdfium.PdfDocument(pdf_path)
+    pdf = _fitz.open(pdf_path)
     total = min(max_pages, len(pdf))
+    pdf.close()
 
     tasks = [(i, pdf_path, exp_start, exp_end, model) for i in range(total)]
 
