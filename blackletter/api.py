@@ -139,7 +139,7 @@ def detect(
     models_dir = Path(__file__).parent / "models"
 
     if models is None:
-        models = ["medium", "large"]
+        models = ["small", "medium", "large"]
 
     model_map = {"small": "small.pt", "medium": "medium.pt", "large": "large.pt"}
 
@@ -197,29 +197,69 @@ def detect(
 
     pdf.close()
 
-    # Merge across models
-    all_raw.sort(key=lambda d: (d["page_index"], d["label_id"], d["bbox"][1]))
+    # Merge across models with label-specific strategies:
+    #   CASE_CAPTION, KEY_ICON: medium model only (large hallucinates)
+    #   CASE_SEQUENCE: all models, overlaps keep smallest box
+    #   Everything else: all models, overlaps keep highest confidence
+    MEDIUM_ONLY = {"CASE_CAPTION", "KEY_ICON"}
+    SMALLEST_BOX = {"CASE_SEQUENCE"}
+
+    # Filter: for medium-only labels, keep only medium model detections
+    filtered = [d for d in all_raw if d["label"] not in MEDIUM_ONLY or d["model"] == "medium"]
+
+    def _bbox_area(bbox):
+        return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+
+    def _iou(a, b):
+        """Intersection over union of two [x0, y0, x1, y1] boxes."""
+        ix0 = max(a[0], b[0])
+        iy0 = max(a[1], b[1])
+        ix1 = min(a[2], b[2])
+        iy1 = min(a[3], b[3])
+        if ix1 <= ix0 or iy1 <= iy0:
+            return 0.0
+        inter = (ix1 - ix0) * (iy1 - iy0)
+        union = _bbox_area(a) + _bbox_area(b) - inter
+        return inter / union if union > 0 else 0.0
+
+    def _contains(outer, inner):
+        """True if outer bbox fully contains inner bbox."""
+        return (
+            outer[0] <= inner[0]
+            and outer[1] <= inner[1]
+            and outer[2] >= inner[2]
+            and outer[3] >= inner[3]
+        )
+
+    filtered.sort(key=lambda d: (d["page_index"], d["label_id"], d["bbox"][1]))
     merged = []
     used = set()
-    for i, d in enumerate(all_raw):
+    for i, d in enumerate(filtered):
         if i in used:
             continue
         used.add(i)
         found_by = [{"model": d["model"], "confidence": d["confidence"]}]
         best = d
-        for j in range(i + 1, len(all_raw)):
+        for j in range(i + 1, len(filtered)):
             if j in used:
                 continue
-            od = all_raw[j]
+            od = filtered[j]
             if od["page_index"] != d["page_index"]:
                 break
             if od["label_id"] != d["label_id"]:
                 continue
-            if abs(od["bbox"][0] - d["bbox"][0]) < 25 and abs(od["bbox"][1] - d["bbox"][1]) < 25:
+            # Match if boxes overlap significantly or one contains the other
+            overlap = _iou(d["bbox"], od["bbox"]) > 0.3
+            contained = _contains(d["bbox"], od["bbox"]) or _contains(od["bbox"], d["bbox"])
+            if overlap or contained:
                 used.add(j)
                 found_by.append({"model": od["model"], "confidence": od["confidence"]})
-                if od["confidence"] > best["confidence"]:
-                    best = od
+                if d["label"] in SMALLEST_BOX:
+                    if _bbox_area(od["bbox"]) < _bbox_area(best["bbox"]):
+                        best = od
+                else:
+                    if od["confidence"] > best["confidence"]:
+                        best = od
         det = dict(best)
         det["found_by"] = found_by
         det["model_count"] = len(found_by)
