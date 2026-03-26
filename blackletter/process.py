@@ -1307,7 +1307,6 @@ def cmd_process(args: argparse.Namespace) -> None:
     opinions = _pair_opinions(document, excluded=excluded)
     print(f"  Found {len(opinions)} opinions ({_time.time() - _t0:.0f}s)", flush=True)
 
-    # ── Save opinions.json for Phase 1 review ──
     pages_by_index = {p.index: p for p in document.pages}
     _src_pdf = fitz.open(str(document.pdf_path))
     opinions_data = []

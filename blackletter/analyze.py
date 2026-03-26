@@ -329,7 +329,7 @@ def _process_page(args: tuple) -> dict:
     pdf = _process_page._pdf
 
     page = pdf[page_idx]
-    pix = page.get_pixmap(dpi=144)  # scale=2 at 72dpi = 144dpi
+    pix = page.get_pixmap(dpi=200)
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     img_w, img_h = img.size
 
