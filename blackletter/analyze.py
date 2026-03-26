@@ -504,6 +504,24 @@ def analyze_pdf(
     if model is None:
         model = DEFAULT_ANALYZE_MODEL
 
+    # Auto-download model from Hugging Face if not present
+    model = Path(model)
+    if not model.exists():
+        try:
+            from huggingface_hub import hf_hub_download
+
+            print(f"  Downloading {model.name} from Hugging Face...", flush=True)
+            downloaded = hf_hub_download(
+                repo_id="flooie/blackletter-large",
+                filename=model.name,
+                local_dir=model.parent,
+            )
+            model = Path(downloaded)
+        except Exception as e:
+            raise FileNotFoundError(
+                f"Model not found at {model} and could not be downloaded: {e}"
+            ) from e
+
     if num_workers is None:
         num_workers = min(4, cpu_count())
 
