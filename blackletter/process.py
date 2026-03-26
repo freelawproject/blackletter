@@ -451,10 +451,12 @@ def compute_redaction_rects(
         # boundary: the leftmost x0 of any right-column HEADNOTE is where the
         # right column starts. The left column ends 10px before that.
         mid_px = page.midpoint
+        # Right-column HEADNOTEs: center in right half, left edge at least 75% across
         right_hn = [
-            d for d in page.detections if d.label == Label.HEADNOTE and d.bbox.center_x > mid_px
+            d
+            for d in page.detections
+            if d.label == Label.HEADNOTE and d.bbox.center_x > mid_px and d.bbox.x1 >= mid_px * 0.75
         ]
-        # Only use HEADNOTE-based column bounds when right column has detections
         right_col_inner_pdf = min(d.bbox.x1 for d in right_hn) * sx if right_hn else None
 
         for rect_page_idx, rect in all_headnote_rects:
