@@ -53,8 +53,31 @@ def _scan_crop(
     tmp_path = f"/tmp/pn_{os.getpid()}_{page_idx}_{zone_name}.png"
     with open(tmp_path, "wb") as f:
         f.write(img_bytes)
-    result = ocr.predict(tmp_path)
     hits, near_misses = [], []
+    if ocr is None:
+        try:
+            import pytesseract
+            from PIL import Image as _I
+
+            pil_img = _I.open(tmp_path)
+            tess_text = pytesseract.image_to_string(pil_img, config="--psm 6").strip()
+            for line in tess_text.splitlines():
+                classified = _classify_text(line.strip())
+                if classified:
+                    clean_text, page_type = classified
+                    hits.append(
+                        {
+                            "text": clean_text,
+                            "score": 0.5,
+                            "zone": zone_name,
+                            "type": page_type,
+                            "poly": None,
+                        }
+                    )
+        except Exception:
+            pass
+        return hits, near_misses
+    result = ocr.predict(tmp_path)
     if not result or not result[0]:
         return hits, near_misses
     r = result[0]
@@ -110,7 +133,10 @@ def _ocr_crop_multi(
     pil_crop.save(tmp_path)
 
     # 1) PaddleOCR
-    result = ocr.predict(tmp_path)
+    if ocr is None:
+        result = None
+    else:
+        result = ocr.predict(tmp_path)
     if result and result[0]:
         r = result[0]
         texts = r.get("rec_texts", []) if isinstance(r, dict) else getattr(r, "rec_texts", [])
@@ -265,15 +291,18 @@ def _process_page(args: tuple) -> dict:
     page_idx, pdf_path, exp_start, exp_end, model_path = args
 
     if not hasattr(_process_page, "_ocr"):
-        from paddleocr import PaddleOCR
+        try:
+            from paddleocr import PaddleOCR
 
-        _process_page._ocr = PaddleOCR(
-            text_detection_model_name="PP-OCRv5_server_det",
-            text_recognition_model_name="PP-OCRv5_server_rec",
-            use_textline_orientation=False,
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-        )
+            _process_page._ocr = PaddleOCR(
+                text_detection_model_name="PP-OCRv5_server_det",
+                text_recognition_model_name="PP-OCRv5_server_rec",
+                use_textline_orientation=False,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+            )
+        except Exception:
+            _process_page._ocr = None
     if not hasattr(_process_page, "_yolo"):
         from ultralytics import YOLO
 

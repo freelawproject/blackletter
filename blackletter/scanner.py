@@ -1691,7 +1691,7 @@ def split_opinions(
         if name_counts[base] > 1:
             seq = name_seq.get(base, 0) + 1
             name_seq[base] = seq
-            name = f"{base}-{seq:02d}.pdf"
+            name = f"{base}-{seq}.pdf"
         else:
             name = f"{base}.pdf"
 
