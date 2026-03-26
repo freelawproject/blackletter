@@ -341,6 +341,7 @@ def _apply_margin_rects(pdf_path: Path, margin_rects_path: Path) -> None:
             page_margin_rects.append((rect, white))
         if is_bitonal and page_margin_rects:
             _redact_bitonal_image(page, doc, page_margin_rects)
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
         else:
             page.apply_redactions()
     doc.save(str(pdf_path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
@@ -1898,6 +1899,22 @@ def generate_files(
     opinions = _pair_opinions(document, excluded=excluded)
     print(f"  Found {len(opinions)} opinions ({_time.time() - _t0:.0f}s)", flush=True)
 
+    # Split unredacted opinions from the clean OCR PDF BEFORE any margin modification
+    unredacted_dir = output / "unredacted"
+    if unredacted:
+        _t0 = _time.time()
+        print(f"\nSplitting unredacted into {unredacted_dir}...", flush=True)
+        split_opinions(
+            document.pdf_path,
+            document,
+            unredacted_dir,
+            first_page=first_page,
+            redact_mode="unredacted",
+            extract_footnotes=footnotes,
+            excluded=excluded,
+        )
+        print(f"  Unredacted done ({_time.time() - _t0:.0f}s)", flush=True)
+
     # Apply margins — use stored margin_rects.json if available, else compute fresh
     margin_rects_path = output / "margin_rects.json"
     _t0 = _time.time()
@@ -1947,24 +1964,9 @@ def generate_files(
         _build_full_redacted(document, opinions, full_redacted_path, excluded=excluded)
     print(f"  Full redacted done ({_time.time() - _t0:.0f}s)", flush=True)
 
-    # Split opinions
-    unredacted_dir = output / "unredacted"
+    # Split redacted and masked opinions
     redacted_dir = output / "redacted"
     masked_dir = output / "masked"
-
-    if unredacted:
-        _t0 = _time.time()
-        print(f"\nSplitting unredacted into {unredacted_dir}...", flush=True)
-        split_opinions(
-            document.pdf_path,
-            document,
-            unredacted_dir,
-            first_page=first_page,
-            redact_mode="unredacted",
-            extract_footnotes=footnotes,
-            excluded=excluded,
-        )
-        print(f"  Unredacted done ({_time.time() - _t0:.0f}s)", flush=True)
 
     _t0 = _time.time()
     print(f"\nSplitting redacted into {redacted_dir}...", flush=True)
