@@ -320,6 +320,33 @@ def _build_masked_opinions(
     return final_paths
 
 
+def _apply_margin_rects(pdf_path: Path, margin_rects_path: Path) -> None:
+    """Apply stored margin_rects.json as white redactions to the PDF in-place."""
+    import json as _json
+
+    margin_data = _json.loads(margin_rects_path.read_text())
+    doc = fitz.open(str(pdf_path))
+    _sample_imgs = doc[0].get_images(full=True) if doc.page_count else []
+    is_bitonal = bool(_sample_imgs and _sample_imgs[0][4] == 1)
+    for entry in margin_data:
+        pi = entry["page_index"]
+        if pi >= doc.page_count:
+            continue
+        page = doc[pi]
+        white = (1, 1, 1)
+        page_margin_rects = []
+        for r in entry.get("rects", []):
+            rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+            page.add_redact_annot(rect, fill=white)
+            page_margin_rects.append((rect, white))
+        if is_bitonal and page_margin_rects:
+            _redact_bitonal_image(page, doc, page_margin_rects)
+        else:
+            page.apply_redactions()
+    doc.save(str(pdf_path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    doc.close()
+
+
 def _redact_bitonal_image(fitz_page, fitz_doc, redaction_rects):
     """Apply redaction rectangles directly to bitonal image pixels.
 
@@ -1871,17 +1898,19 @@ def generate_files(
     opinions = _pair_opinions(document, excluded=excluded)
     print(f"  Found {len(opinions)} opinions ({_time.time() - _t0:.0f}s)", flush=True)
 
-    # Clean margins — skip if margin_rects.json already exists
+    # Apply margins — use stored margin_rects.json if available, else compute fresh
     margin_rects_path = output / "margin_rects.json"
-    if not margin_rects_path.exists():
+    _t0 = _time.time()
+    if margin_rects_path.exists():
+        print("\nApplying stored margin rects...", flush=True)
+        _apply_margin_rects(document.pdf_path, margin_rects_path)
+        print(f"  Margins applied ({_time.time() - _t0:.0f}s)", flush=True)
+    else:
         from blackletter.margins import clean_margins
 
-        _t0 = _time.time()
         print("\nCleaning margins...", flush=True)
         clean_margins(document.pdf_path)
         print(f"  Margins cleaned ({_time.time() - _t0:.0f}s)", flush=True)
-    else:
-        print("\nMargins already computed, skipping clean_margins.", flush=True)
 
     # Extract images
     _t0 = _time.time()
