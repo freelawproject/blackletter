@@ -405,9 +405,9 @@ def pair(
 
     src_pdf.close()
 
-    # Save
-    output_dir = pdf_path.parent
-    (output_dir / "opinions.json").write_text(json.dumps(opinions_data))
+    # # Save
+    # output_dir = pdf_path.parent
+    # (output_dir / "opinions.json").write_text(json.dumps(opinions_data))
 
     return opinions_data
 
@@ -515,18 +515,25 @@ def split_opinions(
     pdf_path: str | Path,
     output_dir: str | Path,
     unredacted: bool = True,
+    opinions: list[dict] | None = None,
 ) -> dict:
     """Split the redacted PDF into individual opinion PDFs.
 
     Creates redacted/, unredacted/, and masked/ subdirectories.
     Returns dict with counts.
+
+    opinions: precomputed opinions list (from api.pair()). If omitted,
+              falls back to reading opinions.json from output_dir.
     """
     from blackletter.process import _split_from_redacted, _build_masked_opinions
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
 
-    opinions_data = json.loads((output_dir / "opinions.json").read_text())
+    if opinions is not None:
+        opinions_data = opinions
+    else:
+        opinions_data = json.loads((output_dir / "opinions.json").read_text())
 
     # Find the redacted PDF
     redacted_pdfs = list(output_dir.glob("*.redacted.pdf"))

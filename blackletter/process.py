@@ -1356,10 +1356,6 @@ def cmd_process(args: argparse.Namespace) -> None:
             }
         )
     _src_pdf.close()
-    opinions_path = base_dir / "opinions.json"
-    with open(opinions_path, "w") as _f:
-        _json.dump(opinions_data, _f)
-    print(f"  Saved {len(opinions_data)} opinions to {opinions_path.name}", flush=True)
 
     # ── Precompute redaction rects (with tightening) for review ──
     _t0 = _time.time()
