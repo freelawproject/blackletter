@@ -306,6 +306,17 @@ def _process_page(args: tuple) -> dict:
     if not hasattr(_process_page, "_yolo"):
         from ultralytics import YOLO
 
+        model_path = Path(model_path)
+        if not model_path.exists():
+            from huggingface_hub import hf_hub_download
+
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            downloaded = hf_hub_download(
+                repo_id="flooie/blackletter-large",
+                filename=model_path.name,
+                local_dir=model_path.parent,
+            )
+            model_path = Path(downloaded)
         _process_page._yolo = YOLO(str(model_path))
     if not hasattr(_process_page, "_glm"):
         # Lazy-load GLM-OCR: don't load the model upfront — only when needed
