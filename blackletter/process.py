@@ -1777,6 +1777,76 @@ def rebuild_full_redacted_from_detections(
     return output_path
 
 
+def _headnote_local_pages_to_delete(
+    caption,
+    key,
+    pages_by_index: dict,
+    mid: float,
+    reporter: str | None = None,
+) -> list[int]:
+    """Return local page indices (0-based within the masked PDF) to delete for one opinion.
+
+    Local index 0 = caption page, 1 = next page, etc.  Pages strictly between
+    the caption page and the headnote-end page are fully headnote and can be removed.
+    Returns an empty list if nothing should be deleted.
+    """
+    if caption.page_index == key.page_index:
+        return []
+
+    cap_key = caption.sort_key(mid)
+    key_key = key.sort_key(mid)
+    opinion_dets = []
+    for src_idx in range(caption.page_index, key.page_index + 1):
+        for d in pages_by_index[src_idx].detections:
+            sk = d.sort_key(mid)
+            if cap_key <= sk <= key_key:
+                opinion_dets.append(d)
+    opinion_dets.sort(key=lambda d: d.sort_key(mid))
+
+    end_marker = _find_redaction_end(opinion_dets, caption, key, mid, reporter=reporter)
+    if end_marker is not None:
+        first_hn = caption.page_index
+        last_hn = end_marker.page_index
+    else:
+        fallback_rects = _headnote_fallback_rects(opinion_dets, caption, pages_by_index, mid)
+        if not fallback_rects:
+            return []
+        first_hn = caption.page_index
+        last_hn = max(r[0] for r in fallback_rects)
+
+    if last_hn - first_hn < 2:
+        return []
+
+    return [
+        local_idx
+        for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1))
+        if first_hn < src_idx < last_hn
+    ]
+
+
+def _delete_headnote_pages(
+    masked_paths: list[Path],
+    opinions: list[tuple],
+    document,
+    rects_path: Path,
+) -> None:
+    """Remove fully-headnote middle pages from masked opinion PDFs."""
+    pages_by_index = {p.index: p for p in document.pages}
+    mid = document.pages[0].midpoint
+
+    for path, (caption, key) in zip(masked_paths, opinions):
+        pages_to_delete = _headnote_local_pages_to_delete(
+            caption, key, pages_by_index, mid, reporter=document.reporter
+        )
+        if pages_to_delete and path.exists():
+            tmp = path.with_suffix(".tmp.pdf")
+            doc = fitz.open(str(path))
+            doc.delete_pages(pages_to_delete)
+            doc.save(str(tmp), garbage=4, deflate=True)
+            doc.close()
+            tmp.replace(path)
+
+
 def generate_files(
     ocr_pdf: str | Path,
     output: str | Path,
@@ -1991,6 +2061,7 @@ def generate_files(
         masked_paths = _split_from_redacted(
             full_redacted_path, document, opinions, masked_dir, first_page
         )
+        _delete_headnote_pages(masked_paths, opinions, document, rects_path)
     else:
         masked_paths = split_opinions(
             document.pdf_path,

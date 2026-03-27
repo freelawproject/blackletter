@@ -101,6 +101,7 @@ dependencies = [
 
 [package.optional-dependencies]
 analyze = [
+    { name = "huggingface-hub" },
     { name = "paddleocr" },
     { name = "pypdfium2" },
 ]
@@ -112,6 +113,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "huggingface-hub", marker = "extra == 'analyze'", specifier = ">=0.20.0" },
     { name = "ocrmypdf", specifier = ">=16.0.0" },
     { name = "opencv-python", specifier = ">=4.8.0" },
     { name = "paddleocr", marker = "extra == 'analyze'", specifier = ">=3.0.0" },
