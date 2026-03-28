@@ -636,38 +636,77 @@ def _split_from_redacted(
 
     Extracts pages for each opinion and applies outside-opinion whiteout.
     This preserves manual redaction adjustments from redaction_rects.json.
+
+    Each opinion spans from its caption page to the page before the next
+    opinion starts (or end of document for the last opinion).
+
+    Filenames use actual page numbers from OCR.  When a page shows a range
+    (e.g. "677-685"): opinion starting on that page uses the end number,
+    opinion ending on that page uses the first number.
     """
     pages_by_index = {p.index: p for p in document.pages}
     redacted = fitz.open(str(redacted_pdf_path))
+    last_page_index = redacted.page_count - 1
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     total = len(opinions)
 
-    # Pre-compute base names and count duplicates so all same-page opinions
-    # get numbered -1, -2, -3 (not first-no-suffix then -02, -03).
+    # Compute full page ranges: each opinion runs from its caption page
+    # to the page before the next opinion's caption (or end of document).
+    page_ranges: list[tuple[int, int]] = []
+    for idx, (caption, _key) in enumerate(opinions):
+        start = caption.page_index
+        if idx + 1 < len(opinions):
+            end = opinions[idx + 1][0].page_index - 1
+        else:
+            end = last_page_index
+        page_ranges.append((start, end))
+
+    # Pre-compute base names using actual page numbers
     from collections import Counter as _Counter
 
     _reporter = document.reporter or ""
     _volume = document.volume or ""
-    _bases = [
-        f"{_reporter}.{_volume}."
-        f"{(pages_by_index[c.page_index].page_number or (c.page_index + first_page)):04d}"
-        f"-{(pages_by_index[k.page_index].page_number or (k.page_index + first_page)):04d}"
-        for c, k in opinions
-    ]
+    _bases: list[str] = []
+    for idx, (caption, _key) in enumerate(opinions):
+        start_idx, end_idx = page_ranges[idx]
+        start_page = pages_by_index.get(start_idx)
+        end_page = pages_by_index.get(end_idx)
+
+        # Opinion starting on a range page → use end number
+        if start_page and start_page.page_number_end:
+            first_num = start_page.page_number_end
+        elif start_page and start_page.page_number:
+            first_num = start_page.page_number
+        else:
+            first_num = start_idx + first_page
+
+        # Opinion ending on a range page → use first number
+        if end_page and end_page.page_number_end:
+            last_num = end_page.page_number
+        elif end_page and end_page.page_number:
+            last_num = end_page.page_number
+        else:
+            last_num = end_idx + first_page
+
+        _bases.append(f"{_reporter}.{_volume}.{first_num:04d}-{last_num:04d}")
+
     _name_counts = _Counter(_bases)
     _name_seq: dict[str, int] = {}
 
     for idx, (caption, key) in enumerate(opinions):
+        start_idx, end_idx = page_ranges[idx]
         out_pdf = fitz.open()
-        out_pdf.insert_pdf(redacted, from_page=caption.page_index, to_page=key.page_index)
+        out_pdf.insert_pdf(redacted, from_page=start_idx, to_page=end_idx)
 
         # Apply outside-opinion whiteout on first/last pages
-        for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1)):
+        for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+            if src_idx not in pages_by_index:
+                continue
             page = pages_by_index[src_idx]
             fitz_page = out_pdf[local_idx]
-            is_first = src_idx == caption.page_index
-            is_last = src_idx == key.page_index
+            is_first = src_idx == start_idx
+            is_last = src_idx == end_idx
 
             if is_first or is_last:
                 for rect in _outside_opinion_rects(
@@ -1905,6 +1944,7 @@ def generate_files(
         if pi not in pages_data:
             pages_data[pi] = {
                 "page_number": entry.get("page_number"),
+                "page_number_end": entry.get("page_number_end"),
                 "img_width": entry.get("img_width", 1),
                 "img_height": entry.get("img_height", 1),
                 "detections": [],
@@ -1930,6 +1970,7 @@ def generate_files(
             img_width=pd["img_width"],
             img_height=pd["img_height"],
             page_number=pd["page_number"],
+            page_number_end=pd.get("page_number_end"),
             col_left_x1=meta.get("col_left_x1", 0),
             col_left_x2=meta.get("col_left_x2", 0),
             col_right_x1=meta.get("col_right_x1", 0),
@@ -2003,16 +2044,22 @@ def generate_files(
     if n_images:
         print(f"\nExtracted {n_images} images ({_time.time() - _t0:.0f}s)", flush=True)
 
-    # Build scan_name
+    # Build scan_name using actual page numbers from OCR
     parts = []
     if reporter:
         parts.append(reporter)
     if volume:
         parts.append(str(volume))
-    page_count = len(pages)
-    last_page = first_page + page_count - 1
-    parts.append(str(first_page))
-    parts.append(str(last_page))
+    # Use actual page numbers: first page's number and last page's number
+    actual_first = pages[0].page_number if pages and pages[0].page_number else first_page
+    last_pg = pages[-1] if pages else None
+    actual_last = (
+        (last_pg.page_number_end or last_pg.page_number)
+        if last_pg and last_pg.page_number
+        else first_page + len(pages) - 1
+    )
+    parts.append(str(actual_first))
+    parts.append(str(actual_last))
     scan_name = ".".join(parts)
 
     # Build full redacted PDF — use precomputed rects if available, else compute them now

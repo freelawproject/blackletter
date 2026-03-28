@@ -304,6 +304,7 @@ def pair(
         if pi not in pages_data:
             pages_data[pi] = {
                 "page_number": entry.get("page_number"),
+                "page_number_end": entry.get("page_number_end"),
                 "img_width": entry.get("img_width", 1),
                 "img_height": entry.get("img_height", 1),
                 "detections": [],
@@ -324,6 +325,7 @@ def pair(
             img_width=pd["img_width"],
             img_height=pd["img_height"],
             page_number=pd["page_number"],
+            page_number_end=pd.get("page_number_end"),
         )
         for d in pd["detections"]:
             b = d.get("bbox", [0, 0, 1, 1])
@@ -353,17 +355,23 @@ def pair(
     opinions = _pair_opinions(document, excluded=excluded)
     print(f"  Paired {len(opinions)} opinions ({time.time() - t0:.0f}s)", flush=True)
 
+    # Each opinion runs from its caption page to its key page.
+    page_ranges: list[tuple[int, int]] = []
+    for idx, (caption, key) in enumerate(opinions):
+        page_ranges.append((caption.page_index, key.page_index))
+
     # Save opinions.json
     pages_by_index = {p.index: p for p in document.pages}
     opinions_data = []
-    for caption, key in opinions:
+    for idx, (caption, key) in enumerate(opinions):
+        start_idx, end_idx = page_ranges[idx]
         outside_rects = []
-        for pi in range(caption.page_index, key.page_index + 1):
+        for pi in range(start_idx, end_idx + 1):
             pg = pages_by_index.get(pi)
             if not pg:
                 continue
-            is_first = pi == caption.page_index
-            is_last = pi == key.page_index
+            is_first = pi == start_idx
+            is_last = pi == end_idx
             pw = src_pdf[pi].rect.width if pi < src_pdf.page_count else 612.0
             for rect in _outside_opinion_rects(pg, pw, caption, key, is_first, is_last):
                 outside_rects.append(
@@ -377,10 +385,28 @@ def pair(
                 )
         has_image = any(
             d.label == Label.IMAGE
-            for pi2 in range(caption.page_index, key.page_index + 1)
+            for pi2 in range(start_idx, end_idx + 1)
             if pi2 in pages_by_index
             for d in pages_by_index[pi2].detections
         )
+
+        # For naming: opinion starting on a range page uses end number,
+        # ending on a range page uses first number
+        start_page = pages_by_index.get(start_idx)
+        end_page = pages_by_index.get(end_idx)
+        if start_page and start_page.page_number_end:
+            first_num = start_page.page_number_end
+        elif start_page and start_page.page_number:
+            first_num = start_page.page_number
+        else:
+            first_num = start_idx + first_page
+        if end_page and end_page.page_number_end:
+            last_num = end_page.page_number
+        elif end_page and end_page.page_number:
+            last_num = end_page.page_number
+        else:
+            last_num = end_idx + first_page
+
         opinions_data.append(
             {
                 "caption_page": caption.page_index,
@@ -397,7 +423,10 @@ def pair(
                     round(key.bbox.x2, 1),
                     round(key.bbox.y2, 1),
                 ],
-                "page_count": key.page_index - caption.page_index + 1,
+                "end_page": end_idx,
+                "page_count": end_idx - start_idx + 1,
+                "first_page_number": first_num,
+                "last_page_number": last_num,
                 "outside_rects": outside_rects,
                 "has_image": has_image,
             }
