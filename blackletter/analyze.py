@@ -300,6 +300,7 @@ def _process_page(args: tuple) -> dict:
                 use_textline_orientation=False,
                 use_doc_orientation_classify=False,
                 use_doc_unwarping=False,
+                enable_mkldnn=False,  # x86 fix
             )
         except Exception:
             _process_page._ocr = None

@@ -489,20 +489,22 @@ def compute_redaction_rects(
 
         for rect_page_idx, rect in all_headnote_rects:
             if rect_page_idx == src_idx:
+                # Determine column from the raw rect center BEFORE tightening
+                mid_pdf = mid_px * sx
+                raw_center_x = (rect.x0 + rect.x1) / 2
+                is_left_col = raw_center_x < mid_pdf
                 # Tighten to text in PDF points first
                 tight = _tighten_to_text(fitz_page, rect)
                 if tight is not None:
                     rect = tight
                 text_bot = _text_bottom(fitz_page, rect)
                 text_left, text_right = _text_x_bounds(fitz_page, rect)
-                mid_pdf = mid_px * sx
-                is_left_col = rect.x0 < mid_pdf
                 if right_col_inner_pdf is not None:
                     if is_left_col:
                         new_x0 = text_left
-                        new_x1 = right_col_inner_pdf - 10 * sx
+                        new_x1 = min(text_right, right_col_inner_pdf)
                     else:
-                        new_x0 = right_col_inner_pdf
+                        new_x0 = max(text_left, right_col_inner_pdf)
                         new_x1 = text_right
                 else:
                     # No right-column headnotes — keep original column x bounds
