@@ -646,21 +646,15 @@ def _split_from_redacted(
     """
     pages_by_index = {p.index: p for p in document.pages}
     redacted = fitz.open(str(redacted_pdf_path))
-    last_page_index = redacted.page_count - 1
+
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     total = len(opinions)
 
-    # Compute full page ranges: each opinion runs from its caption page
-    # to the page before the next opinion's caption (or end of document).
+    # Each opinion runs from its caption page to its key page.
     page_ranges: list[tuple[int, int]] = []
-    for idx, (caption, _key) in enumerate(opinions):
-        start = caption.page_index
-        if idx + 1 < len(opinions):
-            end = opinions[idx + 1][0].page_index - 1
-        else:
-            end = last_page_index
-        page_ranges.append((start, end))
+    for idx, (caption, key) in enumerate(opinions):
+        page_ranges.append((caption.page_index, key.page_index))
 
     # Pre-compute base names using actual page numbers
     from collections import Counter as _Counter

@@ -1309,9 +1309,15 @@ def _find_redaction_end(
     for d in after_caption:
         if d.label == Label.DIVIDER:
             return d
-    for d in after_caption:
-        if d.label == Label.CASE_METADATA:
-            return d
+
+    # Only use CASE_METADATA as a fallback if there are actual headnotes
+    # between the caption and the metadata.  A false CASE_METADATA with
+    # no headnotes would trigger spurious redactions.
+    has_headnotes = any(d.label in (Label.HEADNOTE, Label.BACKGROUND) for d in after_caption)
+    if has_headnotes:
+        for d in after_caption:
+            if d.label == Label.CASE_METADATA:
+                return d
 
     return None
 
@@ -1693,21 +1699,14 @@ def split_opinions(
 
     mid = document.pages[0].midpoint
     pages_by_index = {p.index: p for p in document.pages}
-    last_page_index = max(p.index for p in document.pages)
 
     pdf = fitz.open(pdf_path)
     written: list[Path] = []
 
-    # Compute full page ranges: each opinion runs from its caption page
-    # to the page before the next opinion's caption (or end of document).
+    # Each opinion runs from its caption page to its key page.
     page_ranges: list[tuple[int, int]] = []
-    for idx, (caption, _key) in enumerate(opinions):
-        start = caption.page_index
-        if idx + 1 < len(opinions):
-            end = opinions[idx + 1][0].page_index - 1
-        else:
-            end = last_page_index
-        page_ranges.append((start, end))
+    for idx, (caption, key) in enumerate(opinions):
+        page_ranges.append((caption.page_index, key.page_index))
 
     # Build filename prefix from reporter/volume if available
     prefix = ""

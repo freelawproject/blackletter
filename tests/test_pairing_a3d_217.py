@@ -200,6 +200,28 @@ class TestPairingA3d217:
                 )
         assert not errors, "Backward ranges found:\n" + "\n".join(errors)
 
+    def test_end_page_equals_key_page(self, opinions):
+        """Every opinion's end_page must equal its key_page (caption-to-key range)."""
+        errors = []
+        for i, op in enumerate(opinions):
+            if op["end_page"] != op["key_page"]:
+                errors.append(
+                    f"Opinion {i}: end_page={op['end_page']} != key_page={op['key_page']}"
+                )
+        assert not errors, "end_page/key_page mismatches:\n" + "\n".join(errors)
+
+    def test_page_count_matches_range(self, opinions):
+        """page_count must equal key_page - caption_page + 1."""
+        errors = []
+        for i, op in enumerate(opinions):
+            expected = op["key_page"] - op["caption_page"] + 1
+            if op["page_count"] != expected:
+                errors.append(
+                    f"Opinion {i}: page_count={op['page_count']}, "
+                    f"expected {expected} (caption={op['caption_page']}, key={op['key_page']})"
+                )
+        assert not errors, "page_count mismatches:\n" + "\n".join(errors)
+
     def test_no_giant_opinions(self, opinions):
         """Flag opinions spanning more than 50 pages as likely missed splits."""
         # These are verified as legitimately large opinions
