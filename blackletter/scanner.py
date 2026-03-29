@@ -1301,7 +1301,7 @@ def _find_redaction_end(
     after_caption = [d for d in opinion_dets if d.sort_key(mid) > cap_sk]
 
     # For Supreme Court opinions, prefer SYLLABUS as the boundary
-    if reporter and reporter.lower() == "sct":
+    if reporter and reporter.lower().replace("-", "") == "sct":
         for d in after_caption:
             if d.label == Label.SYLLABUS:
                 return d
