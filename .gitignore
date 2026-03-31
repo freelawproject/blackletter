@@ -167,3 +167,5 @@ output/
 
 # Large model files (hosted on Hugging Face)
 blackletter/models/large.pt
+
+uv.lock
