@@ -344,6 +344,9 @@ def _apply_margin_rects(pdf_path: Path, margin_rects_path: Path) -> None:
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
         else:
             page.apply_redactions()
+        # Overdraw with fill-only rects to cover 1pt stroke from apply_redactions
+        for rect, color in page_margin_rects:
+            page.draw_rect(rect, fill=color, color=None, width=0)
     doc.save(str(pdf_path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
     doc.close()
 
@@ -703,21 +706,19 @@ def _split_from_redacted(
             is_last = src_idx == end_idx
 
             if is_first or is_last:
-                for rect in _outside_opinion_rects(
-                    page, fitz_page.rect.width, caption, key, is_first, is_last
-                ):
+                outside_rects = list(
+                    _outside_opinion_rects(
+                        page, fitz_page.rect.width, caption, key, is_first, is_last
+                    )
+                )
+                for rect in outside_rects:
                     fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
 
                 # Bitonal-safe redaction
                 _sample = fitz_page.get_images(full=True) if out_pdf.page_count else []
                 _is_bit = bool(_sample and _sample[0][4] == 1)
                 if _is_bit:
-                    white_rects = [
-                        (rect, (1, 1, 1))
-                        for rect in _outside_opinion_rects(
-                            page, fitz_page.rect.width, caption, key, is_first, is_last
-                        )
-                    ]
+                    white_rects = [(rect, (1, 1, 1)) for rect in outside_rects]
                     if white_rects:
                         _redact_bitonal_image(fitz_page, out_pdf, white_rects)
                         fitz_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
@@ -725,6 +726,9 @@ def _split_from_redacted(
                         fitz_page.apply_redactions()
                 else:
                     fitz_page.apply_redactions()
+                # Overdraw with fill-only rects to cover 1pt stroke
+                for rect in outside_rects:
+                    fitz_page.draw_rect(rect, fill=(1, 1, 1), color=None, width=0)
 
         # Build filename — use -1/-2/-3 suffix when multiple opinions share the same page range
         base = _bases[idx]

@@ -194,6 +194,9 @@ def clean_margins(
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
         else:
             page.apply_redactions()
+        # Overdraw with fill-only rects to cover 1pt stroke from apply_redactions
+        for rect, color in margin_rects:
+            page.draw_rect(rect, fill=color, color=None, width=0)
         cleaned += 1
 
     if not is_bitonal:
