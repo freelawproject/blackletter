@@ -36,8 +36,10 @@ dev = [
     "ruff>=0.1.0",
 ]
 analyze = [
+    "paddlepaddle>=3.0.0",
     "paddleocr>=3.0.0",
     "pypdfium2>=4.0.0",
+    "huggingface_hub>=0.20.0",
 ]
 
 [project.urls]

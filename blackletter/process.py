@@ -219,6 +219,9 @@ def _build_masked_opinions(
                             add_safe(rect, (0, 0, 0))
 
         # Per-detection redactions (within the mega-span)
+        # STATE_ABBREVIATION lives above the first caption so treat it like
+        # a margin label — always redact regardless of sort-key position.
+        _always_redact = _MARGIN_LABELS | {Label.STATE_ABBREVIATION}
         redact_labels = _REDACT_WHITE | _REDACT_BLACK
         for d in page.detections:
             if d.label not in redact_labels:
@@ -227,7 +230,7 @@ def _build_masked_opinions(
                 continue
             if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
                 continue
-            if d.label not in _MARGIN_LABELS:
+            if d.label not in _always_redact:
                 sk = d.sort_key(mid)
                 if sk < cap_key or sk > key_key:
                     continue
@@ -261,6 +264,45 @@ def _build_masked_opinions(
             else:
                 add_safe(rect, (0, 0, 0))
 
+        # CASE_SEQUENCE: black redaction, clamped to 40-60px, never overlapping captions
+        _caption_rects = []
+        for d in page.detections:
+            if d.label == Label.CASE_CAPTION:
+                b = d.bbox.to_pdf(sx, sy)
+                _caption_rects.append(fitz.Rect(b.x1, b.y1, b.x2, b.y2))
+        _CS_INSET = 3.0
+        _CS_MIN_PX, _CS_MAX_PX = 40, 60
+        for d in page.detections:
+            if d.label != Label.CASE_SEQUENCE:
+                continue
+            if _check_excluded(d, excluded):
+                continue
+            bx0, by0 = d.bbox.x1, d.bbox.y1
+            bx1, by1 = d.bbox.x2, d.bbox.y2
+            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            pw = max(_CS_MIN_PX, min(bx1 - bx0, _CS_MAX_PX))
+            ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
+            bx0, bx1 = cx - pw / 2, cx + pw / 2
+            by0, by1 = cy - ph / 2, cy + ph / 2
+            from blackletter.models import BBox as _BBox
+
+            b = _BBox(bx0, by0, bx1, by1).to_pdf(sx, sy)
+            rect = fitz.Rect(
+                b.x1 + _CS_INSET,
+                b.y1 + _CS_INSET,
+                b.x2 - _CS_INSET,
+                b.y2 - _CS_INSET,
+            )
+            for cap_r in _caption_rects:
+                if rect.intersects(cap_r):
+                    if rect.y0 < cap_r.y0:
+                        rect = fitz.Rect(rect.x0, rect.y0, rect.x1, cap_r.y0)
+                    else:
+                        rect = fitz.Rect(0, 0, 0, 0)
+            if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
+                continue
+            add_safe(rect, (0, 0, 0))
+
         fitz_page.apply_redactions()
         recompress_images(out_pdf)
         out_pdf.save(str(out_path), garbage=4, deflate=True)
@@ -276,6 +318,37 @@ def _build_masked_opinions(
 
     src_pdf.close()
     return final_paths
+
+
+def _apply_margin_rects(pdf_path: Path, margin_rects_path: Path) -> None:
+    """Apply stored margin_rects.json as white redactions to the PDF in-place."""
+    import json as _json
+
+    margin_data = _json.loads(margin_rects_path.read_text())
+    doc = fitz.open(str(pdf_path))
+    _sample_imgs = doc[0].get_images(full=True) if doc.page_count else []
+    is_bitonal = bool(_sample_imgs and _sample_imgs[0][4] == 1)
+    for entry in margin_data:
+        pi = entry["page_index"]
+        if pi >= doc.page_count:
+            continue
+        page = doc[pi]
+        white = (1, 1, 1)
+        page_margin_rects = []
+        for r in entry.get("rects", []):
+            rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+            page.add_redact_annot(rect, fill=white)
+            page_margin_rects.append((rect, white))
+        if is_bitonal and page_margin_rects:
+            _redact_bitonal_image(page, doc, page_margin_rects)
+            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+        else:
+            page.apply_redactions()
+        # Overdraw with fill-only rects to cover 1pt stroke from apply_redactions
+        for rect, color in page_margin_rects:
+            page.draw_rect(rect, fill=color, color=None, width=0)
+    doc.save(str(pdf_path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
+    doc.close()
 
 
 def _redact_bitonal_image(fitz_page, fitz_doc, redaction_rects):
@@ -403,21 +476,56 @@ def compute_redaction_rects(
         sx, sy = page.scale_x, page.scale_y
 
         # Headnote zones — compute in image pixel coords
-        # Convert margin bounds to image pixels
         hb, ft = _margin_bounds(page)
-        hb_px = hb / sy
-        ft_px = ft / sy
+
+        # Use right-column HEADNOTE detections to establish the inner column
+        # boundary: the leftmost x0 of any right-column HEADNOTE is where the
+        # right column starts. The left column ends 10px before that.
+        mid_px = page.midpoint
+        # Right-column HEADNOTEs: center in right half, left edge at least 75% across
+        right_hn = [
+            d
+            for d in page.detections
+            if d.label == Label.HEADNOTE and d.bbox.center_x > mid_px and d.bbox.x1 >= mid_px * 0.75
+        ]
+        right_col_inner_pdf = min(d.bbox.x1 for d in right_hn) * sx if right_hn else None
 
         for rect_page_idx, rect in all_headnote_rects:
             if rect_page_idx == src_idx:
-                # rect is in PDF points — convert to pixels for text_bottom
+                # Determine column from the raw rect center BEFORE tightening
+                mid_pdf = mid_px * sx
+                raw_center_x = (rect.x0 + rect.x1) / 2
+                is_left_col = raw_center_x < mid_pdf
+                # Tighten to text in PDF points first
+                tight = _tighten_to_text(fitz_page, rect)
+                if tight is not None:
+                    rect = tight
                 text_bot = _text_bottom(fitz_page, rect)
-                text_bot_px = text_bot / sy
-                # Convert rect to image pixels
+                text_left, text_right = _text_x_bounds(fitz_page, rect)
+                if right_col_inner_pdf is not None:
+                    if is_left_col:
+                        new_x0 = text_left
+                        new_x1 = min(text_right, right_col_inner_pdf)
+                    else:
+                        new_x0 = max(text_left, right_col_inner_pdf)
+                        new_x1 = text_right
+                else:
+                    # No right-column headnotes — keep original column x bounds
+                    new_x0 = rect.x0
+                    new_x1 = rect.x1
+                rect = fitz.Rect(
+                    new_x0,
+                    max(rect.y0, hb),
+                    new_x1,
+                    min(rect.y1, ft, text_bot),
+                )
+                if rect.is_empty or rect.x0 >= rect.x1 or rect.y0 >= rect.y1:
+                    continue
+                # Convert to image pixels
                 rx0 = rect.x0 / sx
-                ry0 = max(rect.y0 / sy, hb_px)
+                ry0 = rect.y0 / sy
                 rx1 = rect.x1 / sx
-                ry1 = min(rect.y1 / sy, ft_px, text_bot_px)
+                ry1 = rect.y1 / sy
                 _add_px(src_idx, rx0, ry0, rx1, ry1, "black", "headnote")
 
         # Per-detection redactions — output in image pixel coords
@@ -462,30 +570,32 @@ def compute_redaction_rects(
                 caption_rects.append(fitz.Rect(b.x1, b.y1, b.x2, b.y2))
 
         _CS_INSET = 3.0
+        _CS_MIN_PX = 40  # min width/height in image pixels
+        _CS_MAX_PX = 60  # max width/height in image pixels
         for d in page.detections:
             if d.label != Label.CASE_SEQUENCE:
                 continue
             if _check_excluded(d, excluded):
                 continue
-            b = d.bbox.to_pdf(sx, sy)
+            # Clamp raw YOLO bbox to min/max size in pixels, then convert
+            bx0, by0 = d.bbox.x1, d.bbox.y1
+            bx1, by1 = d.bbox.x2, d.bbox.y2
+            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            pw = max(_CS_MIN_PX, min(bx1 - bx0, _CS_MAX_PX))
+            ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
+            bx0, bx1 = cx - pw / 2, cx + pw / 2
+            by0, by1 = cy - ph / 2, cy + ph / 2
+            b = BBox(bx0, by0, bx1, by1).to_pdf(sx, sy)
             rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-            tight = _tighten_to_text(fitz_page, rect, skip=False)
-            if tight is not None:
-                rect = tight
-            else:
-                rect = fitz.Rect(
-                    rect.x0 + _CS_INSET,
-                    rect.y0 + _CS_INSET,
-                    rect.x1 - _CS_INSET,
-                    rect.y1 - _CS_INSET,
-                )
-            for cap_r in caption_rects:
-                if rect.intersects(cap_r):
-                    rect = (
-                        fitz.Rect(rect.x0, rect.y0, rect.x1, cap_r.y0)
-                        if rect.y0 < cap_r.y0
-                        else fitz.Rect(0, 0, 0, 0)
-                    )
+            # Small inset
+            rect = fitz.Rect(
+                rect.x0 + _CS_INSET,
+                rect.y0 + _CS_INSET,
+                rect.x1 - _CS_INSET,
+                rect.y1 - _CS_INSET,
+            )
+            if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
+                continue
             _add_px(
                 src_idx,
                 rect.x0 / sx,
@@ -529,40 +639,86 @@ def _split_from_redacted(
 
     Extracts pages for each opinion and applies outside-opinion whiteout.
     This preserves manual redaction adjustments from redaction_rects.json.
+
+    Each opinion spans from its caption page to the page before the next
+    opinion starts (or end of document for the last opinion).
+
+    Filenames use actual page numbers from OCR.  When a page shows a range
+    (e.g. "677-685"): opinion starting on that page uses the end number,
+    opinion ending on that page uses the first number.
     """
     pages_by_index = {p.index: p for p in document.pages}
     redacted = fitz.open(str(redacted_pdf_path))
+
     output_dir.mkdir(parents=True, exist_ok=True)
     paths = []
     total = len(opinions)
 
+    # Each opinion runs from its caption page to its key page.
+    page_ranges: list[tuple[int, int]] = []
     for idx, (caption, key) in enumerate(opinions):
+        page_ranges.append((caption.page_index, key.page_index))
+
+    # Pre-compute base names using actual page numbers
+    from collections import Counter as _Counter
+
+    _reporter = document.reporter or ""
+    _volume = document.volume or ""
+    _bases: list[str] = []
+    for idx, (caption, _key) in enumerate(opinions):
+        start_idx, end_idx = page_ranges[idx]
+        start_page = pages_by_index.get(start_idx)
+        end_page = pages_by_index.get(end_idx)
+
+        # Opinion starting on a range page → use end number
+        if start_page and start_page.page_number_end:
+            first_num = start_page.page_number_end
+        elif start_page and start_page.page_number:
+            first_num = start_page.page_number
+        else:
+            first_num = start_idx + first_page
+
+        # Opinion ending on a range page → use first number
+        if end_page and end_page.page_number_end:
+            last_num = end_page.page_number
+        elif end_page and end_page.page_number:
+            last_num = end_page.page_number
+        else:
+            last_num = end_idx + first_page
+
+        _bases.append(f"{_reporter}.{_volume}.{first_num:04d}-{last_num:04d}")
+
+    _name_counts = _Counter(_bases)
+    _name_seq: dict[str, int] = {}
+
+    for idx, (caption, key) in enumerate(opinions):
+        start_idx, end_idx = page_ranges[idx]
         out_pdf = fitz.open()
-        out_pdf.insert_pdf(redacted, from_page=caption.page_index, to_page=key.page_index)
+        out_pdf.insert_pdf(redacted, from_page=start_idx, to_page=end_idx)
 
         # Apply outside-opinion whiteout on first/last pages
-        for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1)):
+        for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+            if src_idx not in pages_by_index:
+                continue
             page = pages_by_index[src_idx]
             fitz_page = out_pdf[local_idx]
-            is_first = src_idx == caption.page_index
-            is_last = src_idx == key.page_index
+            is_first = src_idx == start_idx
+            is_last = src_idx == end_idx
 
             if is_first or is_last:
-                for rect in _outside_opinion_rects(
-                    page, fitz_page.rect.width, caption, key, is_first, is_last
-                ):
+                outside_rects = list(
+                    _outside_opinion_rects(
+                        page, fitz_page.rect.width, caption, key, is_first, is_last
+                    )
+                )
+                for rect in outside_rects:
                     fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
 
                 # Bitonal-safe redaction
                 _sample = fitz_page.get_images(full=True) if out_pdf.page_count else []
                 _is_bit = bool(_sample and _sample[0][4] == 1)
                 if _is_bit:
-                    white_rects = [
-                        (rect, (1, 1, 1))
-                        for rect in _outside_opinion_rects(
-                            page, fitz_page.rect.width, caption, key, is_first, is_last
-                        )
-                    ]
+                    white_rects = [(rect, (1, 1, 1)) for rect in outside_rects]
                     if white_rects:
                         _redact_bitonal_image(fitz_page, out_pdf, white_rects)
                         fitz_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
@@ -570,21 +726,18 @@ def _split_from_redacted(
                         fitz_page.apply_redactions()
                 else:
                     fitz_page.apply_redactions()
+                # Overdraw with fill-only rects to cover 1pt stroke
+                for rect in outside_rects:
+                    fitz_page.draw_rect(rect, fill=(1, 1, 1), color=None, width=0)
 
-        # Build filename from page numbers
-        cap_pn = pages_by_index[caption.page_index].page_number or (caption.page_index + first_page)
-        key_pn = pages_by_index[key.page_index].page_number or (key.page_index + first_page)
-        reporter = document.reporter or ""
-        volume = document.volume or ""
-        name = f"{reporter}.{volume}.{cap_pn:04d}-{key_pn:04d}.pdf"
-
-        # Handle same-page opinions (multiple on one page)
+        # Build filename — use -1/-2/-3 suffix when multiple opinions share the same page range
+        base = _bases[idx]
+        if _name_counts[base] > 1:
+            _name_seq[base] = _name_seq.get(base, 0) + 1
+            name = f"{base}-{_name_seq[base]}.pdf"
+        else:
+            name = f"{base}.pdf"
         out_path = output_dir / name
-        suffix = 1
-        while out_path.exists():
-            suffix += 1
-            name_base = f"{reporter}.{volume}.{cap_pn:04d}-{key_pn:04d}-{suffix:02d}.pdf"
-            out_path = output_dir / name_base
 
         out_pdf.save(str(out_path), garbage=4, deflate=True)
         out_pdf.close()
@@ -805,25 +958,32 @@ def _build_full_redacted(
             add_safe(rect, fill)
 
         # CASE_SEQUENCE: redact black, but never overlap CASE_CAPTION
-        _CS_INSET = 3.0  # PDF points (~1mm) — YOLO boxes run a bit large
+        _CS_INSET = 3.0
+        _CS_MIN_PX = 40
+        _CS_MAX_PX = 60
         for d in page.detections:
             if d.label != Label.CASE_SEQUENCE:
                 continue
             if _check_excluded(d, excluded):
                 continue
-            b = d.bbox.to_pdf(sx, sy)
+            # Clamp to min/max pixels, then convert to PDF points
+            bx0, by0 = d.bbox.x1, d.bbox.y1
+            bx1, by1 = d.bbox.x2, d.bbox.y2
+            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+            pw = max(_CS_MIN_PX, min(bx1 - bx0, _CS_MAX_PX))
+            ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
+            bx0, bx1 = cx - pw / 2, cx + pw / 2
+            by0, by1 = cy - ph / 2, cy + ph / 2
+            from blackletter.models import BBox
+
+            b = BBox(bx0, by0, bx1, by1).to_pdf(sx, sy)
             rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-            tight = _tighten_to_text(fitz_page, rect, skip=False)
-            if tight is not None:
-                rect = tight
-            else:
-                # Shrink raw YOLO box slightly
-                rect = fitz.Rect(
-                    rect.x0 + _CS_INSET,
-                    rect.y0 + _CS_INSET,
-                    rect.x1 - _CS_INSET,
-                    rect.y1 - _CS_INSET,
-                )
+            rect = fitz.Rect(
+                rect.x0 + _CS_INSET,
+                rect.y0 + _CS_INSET,
+                rect.x1 - _CS_INSET,
+                rect.y1 - _CS_INSET,
+            )
             # Clip away any overlap with caption rects
             for cap_r in caption_rects:
                 if rect.intersects(cap_r):
@@ -1186,7 +1346,6 @@ def cmd_process(args: argparse.Namespace) -> None:
     opinions = _pair_opinions(document, excluded=excluded)
     print(f"  Found {len(opinions)} opinions ({_time.time() - _t0:.0f}s)", flush=True)
 
-    # ── Save opinions.json for Phase 1 review ──
     pages_by_index = {p.index: p for p in document.pages}
     _src_pdf = fitz.open(str(document.pdf_path))
     opinions_data = []
@@ -1236,10 +1395,6 @@ def cmd_process(args: argparse.Namespace) -> None:
             }
         )
     _src_pdf.close()
-    opinions_path = base_dir / "opinions.json"
-    with open(opinions_path, "w") as _f:
-        _json.dump(opinions_data, _f)
-    print(f"  Saved {len(opinions_data)} opinions to {opinions_path.name}", flush=True)
 
     # ── Precompute redaction rects (with tightening) for review ──
     _t0 = _time.time()
@@ -1657,6 +1812,76 @@ def rebuild_full_redacted_from_detections(
     return output_path
 
 
+def _headnote_local_pages_to_delete(
+    caption,
+    key,
+    pages_by_index: dict,
+    mid: float,
+    reporter: str | None = None,
+) -> list[int]:
+    """Return local page indices (0-based within the masked PDF) to delete for one opinion.
+
+    Local index 0 = caption page, 1 = next page, etc.  Pages strictly between
+    the caption page and the headnote-end page are fully headnote and can be removed.
+    Returns an empty list if nothing should be deleted.
+    """
+    if caption.page_index == key.page_index:
+        return []
+
+    cap_key = caption.sort_key(mid)
+    key_key = key.sort_key(mid)
+    opinion_dets = []
+    for src_idx in range(caption.page_index, key.page_index + 1):
+        for d in pages_by_index[src_idx].detections:
+            sk = d.sort_key(mid)
+            if cap_key <= sk <= key_key:
+                opinion_dets.append(d)
+    opinion_dets.sort(key=lambda d: d.sort_key(mid))
+
+    end_marker = _find_redaction_end(opinion_dets, caption, key, mid, reporter=reporter)
+    if end_marker is not None:
+        first_hn = caption.page_index
+        last_hn = end_marker.page_index
+    else:
+        fallback_rects = _headnote_fallback_rects(opinion_dets, caption, pages_by_index, mid)
+        if not fallback_rects:
+            return []
+        first_hn = caption.page_index
+        last_hn = max(r[0] for r in fallback_rects)
+
+    if last_hn - first_hn < 2:
+        return []
+
+    return [
+        local_idx
+        for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1))
+        if first_hn < src_idx < last_hn
+    ]
+
+
+def _delete_headnote_pages(
+    masked_paths: list[Path],
+    opinions: list[tuple],
+    document,
+    rects_path: Path,
+) -> None:
+    """Remove fully-headnote middle pages from masked opinion PDFs."""
+    pages_by_index = {p.index: p for p in document.pages}
+    mid = document.pages[0].midpoint
+
+    for path, (caption, key) in zip(masked_paths, opinions):
+        pages_to_delete = _headnote_local_pages_to_delete(
+            caption, key, pages_by_index, mid, reporter=document.reporter
+        )
+        if pages_to_delete and path.exists():
+            tmp = path.with_suffix(".tmp.pdf")
+            doc = fitz.open(str(path))
+            doc.delete_pages(pages_to_delete)
+            doc.save(str(tmp), garbage=4, deflate=True)
+            doc.close()
+            tmp.replace(path)
+
+
 def generate_files(
     ocr_pdf: str | Path,
     output: str | Path,
@@ -1717,6 +1942,7 @@ def generate_files(
         if pi not in pages_data:
             pages_data[pi] = {
                 "page_number": entry.get("page_number"),
+                "page_number_end": entry.get("page_number_end"),
                 "img_width": entry.get("img_width", 1),
                 "img_height": entry.get("img_height", 1),
                 "detections": [],
@@ -1742,6 +1968,7 @@ def generate_files(
             img_width=pd["img_width"],
             img_height=pd["img_height"],
             page_number=pd["page_number"],
+            page_number_end=pd.get("page_number_end"),
             col_left_x1=meta.get("col_left_x1", 0),
             col_left_x2=meta.get("col_left_x2", 0),
             col_right_x1=meta.get("col_right_x1", 0),
@@ -1778,50 +2005,8 @@ def generate_files(
     opinions = _pair_opinions(document, excluded=excluded)
     print(f"  Found {len(opinions)} opinions ({_time.time() - _t0:.0f}s)", flush=True)
 
-    # Clean margins
-    from blackletter.margins import clean_margins
-
-    _t0 = _time.time()
-    print("\nCleaning margins...", flush=True)
-    clean_margins(document.pdf_path)
-    print(f"  Margins cleaned ({_time.time() - _t0:.0f}s)", flush=True)
-
-    # Extract images
-    _t0 = _time.time()
-    images_dir = output / "images"
-    n_images = _extract_images(document, images_dir)
-    if n_images:
-        print(f"\nExtracted {n_images} images ({_time.time() - _t0:.0f}s)", flush=True)
-
-    # Build scan_name
-    parts = []
-    if reporter:
-        parts.append(reporter)
-    if volume:
-        parts.append(str(volume))
-    page_count = len(pages)
-    last_page = first_page + page_count - 1
-    parts.append(str(first_page))
-    parts.append(str(last_page))
-    scan_name = ".".join(parts)
-
-    # Build full redacted PDF — use precomputed rects if available
-    full_redacted_path = output / f"{scan_name}.redacted.pdf"
-    _t0 = _time.time()
-    rects_path = output / "redaction_rects.json"
-    if rects_path.exists():
-        print("\nBuilding full redacted PDF from precomputed rects...", flush=True)
-        _build_redacted_from_rects(document, rects_path, full_redacted_path)
-    else:
-        print("\nBuilding full redacted PDF...", flush=True)
-        _build_full_redacted(document, opinions, full_redacted_path, excluded=excluded)
-    print(f"  Full redacted done ({_time.time() - _t0:.0f}s)", flush=True)
-
-    # Split opinions
+    # Split unredacted opinions from the clean OCR PDF BEFORE any margin modification
     unredacted_dir = output / "unredacted"
-    redacted_dir = output / "redacted"
-    masked_dir = output / "masked"
-
     if unredacted:
         _t0 = _time.time()
         print(f"\nSplitting unredacted into {unredacted_dir}...", flush=True)
@@ -1835,6 +2020,65 @@ def generate_files(
             excluded=excluded,
         )
         print(f"  Unredacted done ({_time.time() - _t0:.0f}s)", flush=True)
+
+    # Apply margins — use stored margin_rects.json if available, else compute fresh
+    margin_rects_path = output / "margin_rects.json"
+    _t0 = _time.time()
+    if margin_rects_path.exists():
+        print("\nApplying stored margin rects...", flush=True)
+        _apply_margin_rects(document.pdf_path, margin_rects_path)
+        print(f"  Margins applied ({_time.time() - _t0:.0f}s)", flush=True)
+    else:
+        from blackletter.margins import clean_margins
+
+        print("\nCleaning margins...", flush=True)
+        clean_margins(document.pdf_path)
+        print(f"  Margins cleaned ({_time.time() - _t0:.0f}s)", flush=True)
+
+    # Extract images
+    _t0 = _time.time()
+    images_dir = output / "images"
+    n_images = _extract_images(document, images_dir)
+    if n_images:
+        print(f"\nExtracted {n_images} images ({_time.time() - _t0:.0f}s)", flush=True)
+
+    # Build scan_name using actual page numbers from OCR
+    parts = []
+    if reporter:
+        parts.append(reporter)
+    if volume:
+        parts.append(str(volume))
+    # Use actual page numbers: first page's number and last page's number
+    actual_first = pages[0].page_number if pages and pages[0].page_number else first_page
+    last_pg = pages[-1] if pages else None
+    actual_last = (
+        (last_pg.page_number_end or last_pg.page_number)
+        if last_pg and last_pg.page_number
+        else first_page + len(pages) - 1
+    )
+    parts.append(str(actual_first))
+    parts.append(str(actual_last))
+    scan_name = ".".join(parts)
+
+    # Build full redacted PDF — use precomputed rects if available, else compute them now
+    full_redacted_path = output / f"{scan_name}.redacted.pdf"
+    _t0 = _time.time()
+    rects_path = output / "redaction_rects.json"
+    if not rects_path.exists():
+        print("\nComputing redaction rects...", flush=True)
+        rects = compute_redaction_rects(document, opinions, skip_doctr=True)
+        rects_path.write_text(_json.dumps(rects))
+    if rects_path.exists():
+        print("\nBuilding full redacted PDF from precomputed rects...", flush=True)
+        _build_redacted_from_rects(document, rects_path, full_redacted_path)
+    else:
+        print("\nBuilding full redacted PDF...", flush=True)
+        _build_full_redacted(document, opinions, full_redacted_path, excluded=excluded)
+    print(f"  Full redacted done ({_time.time() - _t0:.0f}s)", flush=True)
+
+    # Split redacted and masked opinions
+    redacted_dir = output / "redacted"
+    masked_dir = output / "masked"
 
     _t0 = _time.time()
     print(f"\nSplitting redacted into {redacted_dir}...", flush=True)
@@ -1860,6 +2104,7 @@ def generate_files(
         masked_paths = _split_from_redacted(
             full_redacted_path, document, opinions, masked_dir, first_page
         )
+        _delete_headnote_pages(masked_paths, opinions, document, rects_path)
     else:
         masked_paths = split_opinions(
             document.pdf_path,

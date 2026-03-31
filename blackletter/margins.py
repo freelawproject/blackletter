@@ -21,7 +21,7 @@ MIN_TEXT_WIDTH_FRACTION = 0.40
 def _text_bounds(
     fitz_page: fitz.Page, page_width: float
 ) -> tuple[float, float, float, float] | None:
-    """Find the bounding box of all text on a page.
+    """Find the bounding box of all text and images on a page.
 
     Returns (left, top, right, bottom) in PDF points, or None if the text
     doesn't span enough of the page to justify margin cleanup.
@@ -39,6 +39,15 @@ def _text_bounds(
     # Skip pages where text is too narrow — likely an appendix or image page
     if (right - left) < page_width * MIN_TEXT_WIDTH_FRACTION:
         return None
+
+    # Extend bounds to include image blocks (e.g. key icons at page bottom)
+    # Only extend vertically — images outside the text column are margin artifacts
+    img_blocks = [b for b in blocks if b[6] == 1]
+    for b in img_blocks:
+        # Only consider images that overlap the text column horizontally
+        if b[2] > left and b[0] < right:
+            top = min(top, b[1])
+            bottom = max(bottom, b[3])
 
     return left, top, right, bottom
 
@@ -185,6 +194,9 @@ def clean_margins(
             page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
         else:
             page.apply_redactions()
+        # Overdraw with fill-only rects to cover 1pt stroke from apply_redactions
+        for rect, color in margin_rects:
+            page.draw_rect(rect, fill=color, color=None, width=0)
         cleaned += 1
 
     if not is_bitonal:

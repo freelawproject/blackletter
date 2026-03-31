@@ -7,6 +7,8 @@ import re
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
+from PIL import Image
+
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
 DEFAULT_ANALYZE_MODEL = Path(__file__).resolve().parent / "models" / "large.pt"
@@ -51,8 +53,31 @@ def _scan_crop(
     tmp_path = f"/tmp/pn_{os.getpid()}_{page_idx}_{zone_name}.png"
     with open(tmp_path, "wb") as f:
         f.write(img_bytes)
-    result = ocr.predict(tmp_path)
     hits, near_misses = [], []
+    if ocr is None:
+        try:
+            import pytesseract
+            from PIL import Image as _I
+
+            pil_img = _I.open(tmp_path)
+            tess_text = pytesseract.image_to_string(pil_img, config="--psm 6").strip()
+            for line in tess_text.splitlines():
+                classified = _classify_text(line.strip())
+                if classified:
+                    clean_text, page_type = classified
+                    hits.append(
+                        {
+                            "text": clean_text,
+                            "score": 0.5,
+                            "zone": zone_name,
+                            "type": page_type,
+                            "poly": None,
+                        }
+                    )
+        except Exception:
+            pass
+        return hits, near_misses
+    result = ocr.predict(tmp_path)
     if not result or not result[0]:
         return hits, near_misses
     r = result[0]
@@ -108,7 +133,10 @@ def _ocr_crop_multi(
     pil_crop.save(tmp_path)
 
     # 1) PaddleOCR
-    result = ocr.predict(tmp_path)
+    if ocr is None:
+        result = None
+    else:
+        result = ocr.predict(tmp_path)
     if result and result[0]:
         r = result[0]
         texts = r.get("rec_texts", []) if isinstance(r, dict) else getattr(r, "rec_texts", [])
@@ -263,31 +291,48 @@ def _process_page(args: tuple) -> dict:
     page_idx, pdf_path, exp_start, exp_end, model_path = args
 
     if not hasattr(_process_page, "_ocr"):
-        from paddleocr import PaddleOCR
+        try:
+            from paddleocr import PaddleOCR
 
-        _process_page._ocr = PaddleOCR(
-            text_detection_model_name="PP-OCRv5_server_det",
-            text_recognition_model_name="PP-OCRv5_server_rec",
-            use_textline_orientation=False,
-            use_doc_orientation_classify=False,
-            use_doc_unwarping=False,
-        )
+            _process_page._ocr = PaddleOCR(
+                text_detection_model_name="PP-OCRv5_server_det",
+                text_recognition_model_name="PP-OCRv5_server_rec",
+                use_textline_orientation=False,
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                enable_mkldnn=False,  # x86 fix
+            )
+        except Exception:
+            _process_page._ocr = None
     if not hasattr(_process_page, "_yolo"):
         from ultralytics import YOLO
 
+        model_path = Path(model_path)
+        if not model_path.exists():
+            from huggingface_hub import hf_hub_download
+
+            model_path.parent.mkdir(parents=True, exist_ok=True)
+            downloaded = hf_hub_download(
+                repo_id="flooie/blackletter-large",
+                filename=model_path.name,
+                local_dir=model_path.parent,
+            )
+            model_path = Path(downloaded)
         _process_page._yolo = YOLO(str(model_path))
     if not hasattr(_process_page, "_glm"):
         # Lazy-load GLM-OCR: don't load the model upfront — only when needed
         _process_page._glm_processor = None
         _process_page._glm_model = None
         _process_page._glm = True
-    if not hasattr(_process_page, "_pdf"):
-        import pypdfium2 as pdfium
+    import fitz as _fitz
 
-        _process_page._pdf = pdfium.PdfDocument(pdf_path)
+    if not hasattr(_process_page, "_pdf") or getattr(_process_page, "_pdf_path", None) != pdf_path:
+        if hasattr(_process_page, "_pdf"):
+            _process_page._pdf.close()
+        _process_page._pdf = _fitz.open(pdf_path)
+        _process_page._pdf_path = pdf_path
 
     import io
-    import pypdfium2 as pdfium
 
     ocr = _process_page._ocr
     yolo = _process_page._yolo
@@ -296,8 +341,8 @@ def _process_page(args: tuple) -> dict:
     pdf = _process_page._pdf
 
     page = pdf[page_idx]
-    bitmap = page.render(scale=2)
-    img = bitmap.to_pil().convert("RGB")
+    pix = page.get_pixmap(dpi=200)
+    img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     img_w, img_h = img.size
 
     def img_to_bytes(pil_img):
@@ -409,6 +454,20 @@ def _process_page(args: tuple) -> dict:
         else:
             page_num = None
 
+    # Capture all YOLO detections (not just page numbers)
+    all_detections = []
+    for box in det[0].boxes:
+        cls_id = int(box.cls[0].item())
+        conf = float(box.conf[0].item())
+        bx1, by1, bx2, by2 = box.xyxy[0].tolist()
+        all_detections.append(
+            {
+                "label_id": cls_id,
+                "confidence": round(conf, 3),
+                "bbox": [round(bx1, 1), round(by1, 1), round(bx2, 1), round(by2, 1)],
+            }
+        )
+
     return {
         "pdf_page": page_idx + 1,
         "detected": page_num["text"] if page_num else None,
@@ -416,6 +475,9 @@ def _process_page(args: tuple) -> dict:
         "type": page_num.get("type") if page_num else None,
         "score": page_num.get("score") if page_num else None,
         "ocr": page_num.get("ocr", "paddle") if page_num else None,
+        "detections": all_detections,
+        "img_width": img_w,
+        "img_height": img_h,
     }
 
 
@@ -448,17 +510,36 @@ def analyze_pdf(
             total_pages, results, seq_issues, duplicates, seen_nums,
             all_nums, missing_pages, ranges_found, not_detected
     """
-    import pypdfium2 as pdfium
+    import fitz as _fitz
 
     pdf_path = str(pdf_path)
     if model is None:
         model = DEFAULT_ANALYZE_MODEL
 
+    # Auto-download model from Hugging Face if not present
+    model = Path(model)
+    if not model.exists():
+        try:
+            from huggingface_hub import hf_hub_download
+
+            print(f"  Downloading {model.name} from Hugging Face...", flush=True)
+            downloaded = hf_hub_download(
+                repo_id="flooie/blackletter-large",
+                filename=model.name,
+                local_dir=model.parent,
+            )
+            model = Path(downloaded)
+        except Exception as e:
+            raise FileNotFoundError(
+                f"Model not found at {model} and could not be downloaded: {e}"
+            ) from e
+
     if num_workers is None:
         num_workers = min(4, cpu_count())
 
-    pdf = pdfium.PdfDocument(pdf_path)
+    pdf = _fitz.open(pdf_path)
     total = min(max_pages, len(pdf))
+    pdf.close()
 
     tasks = [(i, pdf_path, exp_start, exp_end, model) for i in range(total)]
 

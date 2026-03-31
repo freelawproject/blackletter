@@ -1190,6 +1190,29 @@ def _text_x_bounds(fitz_page, clip: fitz.Rect, padding: float = 2.0) -> tuple[fl
     )
 
 
+def _column_bounds_pdf(page: Page) -> tuple[float, float, float, float, float] | None:
+    """Return (left_x0, left_x1, right_x0, right_x1, col_boundary) in PDF points.
+
+    Uses TEXT_COLUMN detections — the same source of truth used for
+    headnote redaction snapping.  Returns None if no TEXT_COLUMN
+    detections are available (caller should skip masking for that page).
+
+    col_boundary is the midpoint of the gap between columns — used to
+    decide which column a detection belongs to.
+    """
+    sx, sy = page.scale_x, page.scale_y
+    tc_dets = [d for d in page.detections if d.label == Label.TEXT_COLUMN]
+
+    if len(tc_dets) < 2:
+        return None
+
+    tc_sorted = sorted(tc_dets, key=lambda d: d.bbox.center_x)
+    left = tc_sorted[0].bbox.to_pdf(sx, sy)
+    right = tc_sorted[-1].bbox.to_pdf(sx, sy)
+    col_boundary = (left.x2 + right.x1) / 2
+    return left.x1, left.x2, right.x1, right.x2, col_boundary
+
+
 def _outside_opinion_rects(
     page: Page,
     page_width: float,
@@ -1198,30 +1221,45 @@ def _outside_opinion_rects(
     is_first: bool,
     is_last: bool,
 ) -> list[fitz.Rect]:
-    """Return rects for content outside the opinion span on this page."""
-    sx = page.scale_x
-    w = page_width
-    mid_pdf = page.midpoint * sx
+    """Return rects for content outside the opinion span on this page.
+
+    Uses TEXT_COLUMN detection boundaries so masks align with actual
+    column edges rather than an arbitrary midpoint.
+
+    Reading order: left column top-to-bottom, then right column top-to-bottom.
+
+    First page masks everything before the caption in reading order.
+    Last page masks everything after the key in reading order.
+    """
+    sx, sy = page.scale_x, page.scale_y
     header_bottom, footer_top = _margin_bounds(page)
+    bounds = _column_bounds_pdf(page)
+    if bounds is None:
+        return []
+    left_x0, left_x1, right_x0, right_x1, col_boundary = bounds
     rects: list[fitz.Rect] = []
 
     if is_first:
-        cap_box = caption.bbox.to_pdf(page.scale_x, page.scale_y)
-        cap_col = "LEFT" if cap_box.center_x < mid_pdf else "RIGHT"
+        cap_box = caption.bbox.to_pdf(sx, sy)
+        cap_col = "LEFT" if cap_box.center_x < col_boundary else "RIGHT"
         if cap_col == "LEFT":
-            rects.append(fitz.Rect(0, header_bottom, mid_pdf, cap_box.y1))
+            # Mask left column above caption only
+            rects.append(fitz.Rect(left_x0, header_bottom, left_x1, cap_box.y1))
         else:
-            rects.append(fitz.Rect(0, header_bottom, mid_pdf, footer_top))
-            rects.append(fitz.Rect(mid_pdf, header_bottom, w, cap_box.y1))
+            # Mask entire left column + right column above caption
+            rects.append(fitz.Rect(left_x0, header_bottom, left_x1, footer_top))
+            rects.append(fitz.Rect(right_x0, header_bottom, right_x1, cap_box.y1))
 
     if is_last:
-        key_box = key.bbox.to_pdf(page.scale_x, page.scale_y)
-        key_col = "LEFT" if key_box.center_x < mid_pdf else "RIGHT"
+        key_box = key.bbox.to_pdf(sx, sy)
+        key_col = "LEFT" if key_box.center_x < col_boundary else "RIGHT"
         if key_col == "RIGHT":
-            rects.append(fitz.Rect(mid_pdf, key_box.y2, w, footer_top))
+            # Mask right column below key only
+            rects.append(fitz.Rect(right_x0, key_box.y2, right_x1, footer_top))
         else:
-            rects.append(fitz.Rect(0, key_box.y2, mid_pdf, footer_top))
-            rects.append(fitz.Rect(mid_pdf, header_bottom, w, footer_top))
+            # Mask left column below key + entire right column
+            rects.append(fitz.Rect(left_x0, key_box.y2, left_x1, footer_top))
+            rects.append(fitz.Rect(right_x0, header_bottom, right_x1, footer_top))
 
     return [r for r in rects if r.y0 < r.y1 and r.x0 < r.x1]
 
@@ -1263,7 +1301,7 @@ def _find_redaction_end(
     after_caption = [d for d in opinion_dets if d.sort_key(mid) > cap_sk]
 
     # For Supreme Court opinions, prefer SYLLABUS as the boundary
-    if reporter and reporter.lower() == "sct":
+    if reporter and reporter.lower().replace("-", "") == "sct":
         for d in after_caption:
             if d.label == Label.SYLLABUS:
                 return d
@@ -1271,9 +1309,15 @@ def _find_redaction_end(
     for d in after_caption:
         if d.label == Label.DIVIDER:
             return d
-    for d in after_caption:
-        if d.label == Label.CASE_METADATA:
-            return d
+
+    # Only use CASE_METADATA as a fallback if there are actual headnotes
+    # between the caption and the metadata.  A false CASE_METADATA with
+    # no headnotes would trigger spurious redactions.
+    has_headnotes = any(d.label in (Label.HEADNOTE, Label.BACKGROUND) for d in after_caption)
+    if has_headnotes:
+        for d in after_caption:
+            if d.label == Label.CASE_METADATA:
+                return d
 
     return None
 
@@ -1659,46 +1703,60 @@ def split_opinions(
     pdf = fitz.open(pdf_path)
     written: list[Path] = []
 
+    # Each opinion runs from its caption page to its key page.
+    page_ranges: list[tuple[int, int]] = []
+    for idx, (caption, key) in enumerate(opinions):
+        page_ranges.append((caption.page_index, key.page_index))
+
     # Build filename prefix from reporter/volume if available
     prefix = ""
     if document.reporter and document.volume:
         prefix = f"{document.reporter}.{document.volume}."
 
-    # Compute base names for each opinion
+    # Compute base names for each opinion using full page range
     from collections import Counter
 
     base_names: list[str] = []
-    for caption, key in opinions:
-        cap_page = pages_by_index[caption.page_index]
-        key_page = pages_by_index[key.page_index]
-        # For opinion start: use higher number if page shows a range
-        first_num = cap_page.page_number_end or cap_page.page_number
-        # For opinion end: use lower number if page shows a range
-        last_num = key_page.page_number
+    for idx, (caption, _key) in enumerate(opinions):
+        start_idx, end_idx = page_ranges[idx]
+        start_page = pages_by_index.get(start_idx)
+        end_page = pages_by_index.get(end_idx)
 
-        if first_num is not None and last_num is not None:
-            base_names.append(f"{prefix}{first_num:04d}-{last_num:04d}")
+        # Opinion starting on a range page → use end number
+        if start_page and start_page.page_number_end:
+            first_num = start_page.page_number_end
+        elif start_page and start_page.page_number:
+            first_num = start_page.page_number
         else:
-            fb_first = caption.page_index + first_page
-            fb_last = key.page_index + first_page
-            base_names.append(f"{prefix}{fb_first:04d}-{fb_last:04d}")
+            first_num = start_idx + first_page
+
+        # Opinion ending on a range page → use first number
+        if end_page and end_page.page_number_end:
+            last_num = end_page.page_number
+        elif end_page and end_page.page_number:
+            last_num = end_page.page_number
+        else:
+            last_num = end_idx + first_page
+
+        base_names.append(f"{prefix}{first_num:04d}-{last_num:04d}")
 
     name_counts = Counter(base_names)
     name_seq: dict[str, int] = {}
 
     for i, (caption, key) in enumerate(opinions):
+        start_idx, end_idx = page_ranges[i]
         base = base_names[i]
         if name_counts[base] > 1:
             seq = name_seq.get(base, 0) + 1
             name_seq[base] = seq
-            name = f"{base}-{seq:02d}.pdf"
+            name = f"{base}-{seq}.pdf"
         else:
             name = f"{base}.pdf"
 
         out_path = output_dir / name
 
         out_pdf = fitz.open()
-        out_pdf.insert_pdf(pdf, from_page=caption.page_index, to_page=key.page_index)
+        out_pdf.insert_pdf(pdf, from_page=start_idx, to_page=end_idx)
 
         # Detect bitonal for safe redaction
         _s_imgs = out_pdf[0].get_images(full=True) if out_pdf.page_count else []
@@ -1709,7 +1767,9 @@ def split_opinions(
 
         # Gather all detections in this opinion's span
         opinion_dets = []
-        for src_idx in range(caption.page_index, key.page_index + 1):
+        for src_idx in range(start_idx, end_idx + 1):
+            if src_idx not in pages_by_index:
+                continue
             for d in pages_by_index[src_idx].detections:
                 sk = d.sort_key(mid)
                 if cap_key <= sk <= key_key:
@@ -1749,11 +1809,13 @@ def split_opinions(
 
                 headnote_rects = refine_headnote_rects(pdf, headnote_rects, pages_by_index)
 
-        for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1)):
+        for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+            if src_idx not in pages_by_index:
+                continue
             page = pages_by_index[src_idx]
             fitz_page = out_pdf[local_idx]
-            is_first = src_idx == caption.page_index
-            is_last = src_idx == key.page_index
+            is_first = src_idx == start_idx
+            is_last = src_idx == end_idx
 
             if redact:
                 # ── Actual redaction mode ──────────────────────────
@@ -1993,7 +2055,9 @@ def split_opinions(
         # have gaps between lines and won't reliably sum to >=95%.
         if redact_mode == "masked" and block_headnote_rects:
             pages_to_delete: list[int] = []
-            for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1)):
+            for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+                if src_idx not in pages_by_index:
+                    continue
                 page = pages_by_index[src_idx]
                 header_bottom, footer_top = _margin_bounds(page)
                 sx = page.scale_x
@@ -2047,7 +2111,8 @@ def split_opinions(
         if extract_footnotes:
             fn_dets = [
                 d
-                for src_idx in range(caption.page_index, key.page_index + 1)
+                for src_idx in range(start_idx, end_idx + 1)
+                if src_idx in pages_by_index
                 for d in pages_by_index[src_idx].detections
                 if d.label == Label.FOOTNOTES
             ]
