@@ -605,6 +605,8 @@ def generate(
     pdf_path: str | Path,
     redactions: str | Path | dict,
     output_dir: str | Path,
+    reporter: str = "",
+    volume: str = "",
     unredacted: bool = False,
     progress_callback=None,
 ) -> dict:
@@ -620,11 +622,15 @@ def generate(
         pdf_path: Path to the source (OCR'd) PDF.
         redactions: Path to redactions.json, or the parsed dict.
         output_dir: Base output directory.
+        reporter: Reporter abbreviation for filenames (e.g. "a3d").
+        volume: Volume number for filenames (e.g. "214").
         unredacted: Also generate unredacted opinion PDFs.
         progress_callback: Optional callable(current, total, message).
 
     Returns dict with keys: redacted_dir, masked_dir, full_redacted, opinion_count.
     """
+    import re as _re
+
     # Labels to white-out in masked output instead of black
     WHITE_IN_MASKED = {"PAGE_HEADER", "STATE_ABBREVIATION"}
 
@@ -639,6 +645,36 @@ def generate(
 
     opinions = data["opinions"]
     pages_rects = data["pages"]
+
+    # Build prefix from reporter/volume
+    prefix = ""
+    if reporter:
+        prefix += f"{reporter}."
+    if volume:
+        prefix += f"{volume}."
+
+    def _opinion_filename(op):
+        """Build filename from opinion page numbers."""
+        first = op.get("first_page_number")
+        last = op.get("last_page_number")
+        if first is not None and last is not None:
+            return f"{prefix}{first:04d}-{last:04d}.pdf"
+        # Fall back to existing filename
+        return op.get("filename", f"{op['caption_page']:04d}-{op['end_page']:04d}.pdf")
+
+    # Detect duplicate filenames and add -1/-2/-3 suffixes
+    from collections import Counter as _Counter
+
+    raw_names = [_opinion_filename(op) for op in opinions]
+    name_counts = _Counter(raw_names)
+    name_seq: dict[str, int] = {}
+    filenames = []
+    for name in raw_names:
+        if name_counts[name] > 1:
+            name_seq[name] = name_seq.get(name, 0) + 1
+            filenames.append(_re.sub(r"\.pdf$", f"-{name_seq[name]}.pdf", name))
+        else:
+            filenames.append(name)
 
     src = fitz.open(str(pdf_path))
 
@@ -686,7 +722,10 @@ def generate(
         if progress_callback and ((page_idx + 1) % 20 == 0 or page_idx == full_out.page_count - 1):
             progress_callback(page_idx + 1, full_out.page_count, "Redacting pages...")
 
-    full_name = f"{pdf_path.stem}.redacted.pdf"
+    # Name: reporter.volume.first_page.last_page.redacted.pdf
+    first_pn = opinions[0].get("first_page_number", 1)
+    last_pn = opinions[-1].get("last_page_number", first_pn)
+    full_name = f"{prefix}{first_pn}.{last_pn}.redacted.pdf"
     full_path = output_dir / full_name
     full_out.save(str(full_path), garbage=4, deflate=True)
     full_out.close()
@@ -711,7 +750,7 @@ def generate(
     for i, op in enumerate(opinions):
         start_idx = op["caption_page"]
         end_idx = op["end_page"]
-        filename = op.get("filename", f"{start_idx:04d}-{end_idx:04d}.pdf")
+        filename = filenames[i]
 
         out = fitz.open()
         out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
@@ -769,7 +808,7 @@ def generate(
             op = opinions[group[0]]
             start_idx = op["caption_page"]
             end_idx = op["end_page"]
-            filename = op.get("filename", f"{start_idx:04d}-{end_idx:04d}.pdf")
+            filename = filenames[group[0]]
 
             out = fitz.open()
             out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
@@ -809,12 +848,9 @@ def generate(
                             new_result.append(intersection)
                 result_rects = new_result
 
-            # Filename: strip the -1/-2/-3 suffix from first opinion's name
-            base_name = first_op.get("filename", f"{src_page_idx:04d}-{src_page_idx:04d}.pdf")
-            # Remove trailing -N before .pdf (e.g. "a3d.214.0001-0001-1.pdf" → "a3d.214.0001-0001.pdf")
-            import re
-
-            base_name = re.sub(r"-\d+\.pdf$", ".pdf", base_name)
+            # Filename: strip the -1/-2/-3 suffix from first opinion's computed name
+            base_name = filenames[group[0]]
+            base_name = _re.sub(r"-\d+\.pdf$", ".pdf", base_name)
 
             out = fitz.open()
             out.insert_pdf(src, from_page=src_page_idx, to_page=src_page_idx)
