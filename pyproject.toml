@@ -55,7 +55,7 @@ where = ["."]
 include = ["blackletter*"]
 
 [tool.setuptools.package-data]
-blackletter = ["models/*.pt"]
+blackletter = ["weights/*.pt"]
 
 [tool.ruff]
 line-length = 100

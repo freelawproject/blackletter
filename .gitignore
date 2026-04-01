@@ -166,6 +166,6 @@ dmypy.json
 output/
 
 # Large model files (hosted on Hugging Face)
-blackletter/models/large.pt
+blackletter/weights/large.pt
 
 uv.lock

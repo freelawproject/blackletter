@@ -136,7 +136,7 @@ def detect(
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
-    models_dir = Path(__file__).parent / "models"
+    models_dir = Path(__file__).parent / "weights"
 
     if models is None:
         models = ["small", "medium", "large"]
@@ -598,6 +598,259 @@ def split_opinions(
         "redacted": len(redacted_files),
         "unredacted": len(list((output_dir / "unredacted").glob("*.pdf"))) if unredacted else 0,
         "masked": len(list(masked_dir.glob("*.pdf"))),
+    }
+
+
+def generate(
+    pdf_path: str | Path,
+    redactions: str | Path | dict,
+    output_dir: str | Path,
+    unredacted: bool = False,
+    progress_callback=None,
+) -> dict:
+    """Generate all output PDFs from a source PDF and a single redactions.json.
+
+    redactions.json contains:
+      - "opinions": list of opinion dicts with outside_rects, page ranges, filenames
+      - "pages": dict of page_index → list of rects (margins + redaction rects, all PDF points)
+
+    Builds in one pass per page — no layering.
+
+    Args:
+        pdf_path: Path to the source (OCR'd) PDF.
+        redactions: Path to redactions.json, or the parsed dict.
+        output_dir: Base output directory.
+        unredacted: Also generate unredacted opinion PDFs.
+        progress_callback: Optional callable(current, total, message).
+
+    Returns dict with keys: redacted_dir, masked_dir, full_redacted, opinion_count.
+    """
+    # Labels to white-out in masked output instead of black
+    WHITE_IN_MASKED = {"PAGE_HEADER", "STATE_ABBREVIATION"}
+
+    pdf_path = Path(pdf_path)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    if isinstance(redactions, (str, Path)):
+        data = json.loads(Path(redactions).read_text())
+    else:
+        data = redactions
+
+    opinions = data["opinions"]
+    pages_rects = data["pages"]
+
+    src = fitz.open(str(pdf_path))
+
+    def _apply_page(fitz_page, src_idx, opinion, mode):
+        """Apply all rects for one page in one pass.
+
+        mode: 'full'     — all rects as specified, no outside-opinion whiteout
+              'redacted' — all rects as specified + outside-opinion whiteout
+              'masked'   — WHITE_IN_MASKED → white + outside-opinion whiteout
+        """
+        # Page rects (margins + redactions) — all PDF points
+        for r in pages_rects.get(str(src_idx), []):
+            rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+            if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
+                continue
+            if r["type"] == "margin":
+                fill = (1, 1, 1)
+
+            elif mode == "masked" and r["type"] in WHITE_IN_MASKED:
+                fill = (1, 1, 1)
+            elif mode != "masked" and r["type"] in WHITE_IN_MASKED:
+                fill = (0, 0, 0)
+
+            else:
+                fill = (0, 0, 0) if r["fill"] == "black" else (1, 1, 1)
+            fitz_page.add_redact_annot(rect, fill=fill)
+
+        # Outside-opinion whiteout (skip for full redacted)
+        if opinion is not None and mode != "full":
+            for orect in opinion.get("outside_rects", []):
+                if orect["page_index"] != src_idx:
+                    continue
+                rect = fitz.Rect(orect["x0"], orect["y0"] + 3, orect["x1"], orect["y1"])
+                if not rect.is_empty:
+                    fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
+
+        fitz_page.apply_redactions()
+
+    # ── Full redacted PDF ──
+    t0 = time.time()
+    full_out = fitz.open()
+    full_out.insert_pdf(src)
+    for page_idx in range(full_out.page_count):
+        _apply_page(full_out[page_idx], page_idx, None, "full")
+        if progress_callback and ((page_idx + 1) % 20 == 0 or page_idx == full_out.page_count - 1):
+            progress_callback(page_idx + 1, full_out.page_count, "Redacting pages...")
+
+    full_name = f"{pdf_path.stem}.redacted.pdf"
+    full_path = output_dir / full_name
+    full_out.save(str(full_path), garbage=4, deflate=True)
+    full_out.close()
+    print(
+        f"  Full redacted: {full_path.name} ({full_path.stat().st_size / 1024 / 1024:.1f} MB, {time.time() - t0:.0f}s)",
+        flush=True,
+    )
+
+    # ── Split opinions ──
+    redacted_dir = output_dir / "redacted"
+    masked_dir = output_dir / "masked"
+    redacted_dir.mkdir(exist_ok=True)
+    masked_dir.mkdir(exist_ok=True)
+
+    if unredacted:
+        unredacted_dir = output_dir / "unredacted"
+        unredacted_dir.mkdir(exist_ok=True)
+
+    t0 = time.time()
+
+    # ── Redacted + unredacted: one PDF per opinion ──
+    for i, op in enumerate(opinions):
+        start_idx = op["caption_page"]
+        end_idx = op["end_page"]
+        filename = op.get("filename", f"{start_idx:04d}-{end_idx:04d}.pdf")
+
+        out = fitz.open()
+        out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
+        for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+            _apply_page(out[local_idx], src_idx, op, "redacted")
+        out.save(str(redacted_dir / filename), garbage=4, deflate=True)
+        out.close()
+
+        if unredacted:
+            out = fitz.open()
+            out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
+            for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+                for orect in op.get("outside_rects", []):
+                    if orect["page_index"] != src_idx:
+                        continue
+                    rect = fitz.Rect(orect["x0"], orect["y0"], orect["x1"], orect["y1"])
+                    if not rect.is_empty:
+                        out[local_idx].add_redact_annot(rect, fill=(1, 1, 1))
+                out[local_idx].apply_redactions()
+            out.save(str(unredacted_dir / filename), garbage=4, deflate=True)
+            out.close()
+
+        done = i + 1
+        if done % 20 == 0 or done == len(opinions):
+            print(f"    Redacted {done}/{len(opinions)}", flush=True)
+
+    # ── Masked: group same-page opinions together ──
+    # Build groups of consecutive single-page opinions on the same source page
+    groups: list[list[int]] = []
+    i = 0
+    while i < len(opinions):
+        op = opinions[i]
+        if op["caption_page"] == op["end_page"]:
+            group = [i]
+            j = i + 1
+            while j < len(opinions):
+                next_op = opinions[j]
+                if (
+                    next_op["caption_page"] == next_op["end_page"]
+                    and next_op["caption_page"] == op["caption_page"]
+                ):
+                    group.append(j)
+                    j += 1
+                else:
+                    break
+            groups.append(group)
+            i = j
+        else:
+            groups.append([i])
+            i += 1
+
+    for group in groups:
+        if len(group) == 1:
+            # Single opinion (single-page or multi-page) — build normally
+            op = opinions[group[0]]
+            start_idx = op["caption_page"]
+            end_idx = op["end_page"]
+            filename = op.get("filename", f"{start_idx:04d}-{end_idx:04d}.pdf")
+
+            out = fitz.open()
+            out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
+            for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+                _apply_page(out[local_idx], src_idx, op, "masked")
+            out.save(str(masked_dir / filename), garbage=4, deflate=True)
+            out.close()
+        else:
+            # Multiple same-page opinions — consolidate into one PDF
+            # Only white out areas that ALL opinions consider "outside"
+            first_op = opinions[group[0]]
+            src_page_idx = first_op["caption_page"]
+
+            # Intersect outside_rects across all opinions in the group:
+            # start with the first opinion's rects, then intersect with each
+            # subsequent opinion's rects. Only areas outside ALL opinions remain.
+            result_rects = [
+                fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+                for r in first_op.get("outside_rects", [])
+                if r["page_index"] == src_page_idx
+            ]
+            for idx in group[1:]:
+                other_rects = [
+                    fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+                    for r in opinions[idx].get("outside_rects", [])
+                    if r["page_index"] == src_page_idx
+                ]
+                new_result = []
+                for r in result_rects:
+                    for o in other_rects:
+                        intersection = r & o
+                        if (
+                            not intersection.is_empty
+                            and intersection.x0 < intersection.x1
+                            and intersection.y0 < intersection.y1
+                        ):
+                            new_result.append(intersection)
+                result_rects = new_result
+
+            # Filename: strip the -1/-2/-3 suffix from first opinion's name
+            base_name = first_op.get("filename", f"{src_page_idx:04d}-{src_page_idx:04d}.pdf")
+            # Remove trailing -N before .pdf (e.g. "a3d.214.0001-0001-1.pdf" → "a3d.214.0001-0001.pdf")
+            import re
+
+            base_name = re.sub(r"-\d+\.pdf$", ".pdf", base_name)
+
+            out = fitz.open()
+            out.insert_pdf(src, from_page=src_page_idx, to_page=src_page_idx)
+            fitz_page = out[0]
+
+            # Apply page rects (margins + redactions) in masked mode
+            for r in pages_rects.get(str(src_page_idx), []):
+                rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+                if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
+                    continue
+                if r["type"] in WHITE_IN_MASKED:
+                    fill = (1, 1, 1)
+                else:
+                    fill = (0, 0, 0) if r["fill"] == "black" else (1, 1, 1)
+                fitz_page.add_redact_annot(rect, fill=fill)
+
+            # Apply intersected outside rects
+            for rect in result_rects:
+                if not rect.is_empty:
+                    fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
+
+            fitz_page.apply_redactions()
+            out.save(str(masked_dir / base_name), garbage=4, deflate=True)
+            out.close()
+
+    masked_count = len(list(masked_dir.glob("*.pdf")))
+    print(f"    Masked {masked_count} files ({len(opinions)} opinions)", flush=True)
+
+    src.close()
+    print(f"  Split complete ({time.time() - t0:.0f}s)", flush=True)
+
+    return {
+        "full_redacted": full_path,
+        "redacted_dir": redacted_dir,
+        "masked_dir": masked_dir,
+        "opinion_count": len(opinions),
     }
 
 
