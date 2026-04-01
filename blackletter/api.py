@@ -136,7 +136,7 @@ def detect(
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
-    models_dir = Path(__file__).parent / "models"
+    models_dir = Path(__file__).parent / "weights"
 
     if models is None:
         models = ["small", "medium", "large"]

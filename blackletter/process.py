@@ -37,7 +37,7 @@ from blackletter.scanner import (
 
 logger = logging.getLogger("blackletter")
 
-DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "small.pt"
+DEFAULT_MODEL = Path(__file__).resolve().parent / "weights" / "small.pt"
 
 
 def _build_output_dir(args: argparse.Namespace) -> Path:
@@ -1292,7 +1292,7 @@ def cmd_process(args: argparse.Namespace) -> None:
             flush=True,
         )
         _t0 = _time.time()
-        large_model_path = Path(__file__).resolve().parent / "models" / "large.pt"
+        large_model_path = Path(__file__).resolve().parent / "weights" / "large.pt"
         if large_model_path.exists():
             from PIL import Image as _PILImage
             from blackletter.scanner import DPI

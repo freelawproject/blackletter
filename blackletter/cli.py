@@ -18,9 +18,9 @@ from blackletter.scanner import (
 logger = logging.getLogger("blackletter")
 
 
-DEFAULT_MODEL = Path(__file__).resolve().parent / "models" / "small.pt"
-MEDIUM_MODEL = Path(__file__).resolve().parent / "models" / "medium.pt"
-LARGE_MODEL = Path(__file__).resolve().parent / "models" / "large.pt"
+DEFAULT_MODEL = Path(__file__).resolve().parent / "weights" / "small.pt"
+MEDIUM_MODEL = Path(__file__).resolve().parent / "weights" / "medium.pt"
+LARGE_MODEL = Path(__file__).resolve().parent / "weights" / "large.pt"
 
 # Hugging Face repo for models not bundled in the package
 _HF_SOURCES = {
