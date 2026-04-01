@@ -2,11 +2,15 @@
 
 ## Current
 
+0.0.7 (2026-04-01)
+
+- Simplify API call for generating file
+
+## Past
+
 0.0.6 (2026-04-01)
 
 - Re-release: v0.0.5 was tagged before #27 was merged
-
-## Past
 
 0.0.5 (2026-04-01)
 
