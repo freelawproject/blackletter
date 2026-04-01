@@ -2,11 +2,15 @@
 
 ## Current
 
+0.0.5 (2026-04-01)
+
+- Skip multiprocessing Pool for single worker (#27)
+
+## Past
+
 0.0.4 (2026-03-20)
 
 - Feature 'Add API and remove threading'
-
-## Past
 
 0.0.3 (2026-03-20)
 
