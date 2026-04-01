@@ -547,12 +547,24 @@ def analyze_pdf(
         progress_callback(0, total, "Starting OCR...")
 
     results = []
-    with Pool(num_workers) as pool:
-        for r in pool.imap(_process_page, tasks):
+    if num_workers == 1:
+        # Skip multiprocessing.Pool when single-threaded. fork() duplicates
+        # PyTorch's C++ runtime (oneDNN/MKL), and when PaddlePaddle then
+        # initializes its own oneDNN in the child, the two conflict,
+        # causing segfaults or deadlocks.
+        for task in tasks:
+            r = _process_page(task)
             results.append(r)
             if progress_callback:
                 detected = r["detected"] or "none"
                 progress_callback(len(results), total, f"Page {r['pdf_page']}/{total}: {detected}")
+    else:
+        with Pool(num_workers) as pool:
+            for r in pool.imap(_process_page, tasks):
+                results.append(r)
+                if progress_callback:
+                    detected = r["detected"] or "none"
+                    progress_callback(len(results), total, f"Page {r['pdf_page']}/{total}: {detected}")
 
     # Build mapping: page number → PDF page(s)
     seen_nums: dict[int, list[int]] = {}
