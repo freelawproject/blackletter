@@ -564,7 +564,9 @@ def analyze_pdf(
                 results.append(r)
                 if progress_callback:
                     detected = r["detected"] or "none"
-                    progress_callback(len(results), total, f"Page {r['pdf_page']}/{total}: {detected}")
+                    progress_callback(
+                        len(results), total, f"Page {r['pdf_page']}/{total}: {detected}"
+                    )
 
     # Build mapping: page number → PDF page(s)
     seen_nums: dict[int, list[int]] = {}
