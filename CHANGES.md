@@ -2,11 +2,16 @@
 
 ## Current
 
+0.0.8 (2026-04-01)
+
+- Update api generate file names
+
+## Past
+
 0.0.7 (2026-04-01)
 
 - Simplify API call for generating file
 
-## Past
 
 0.0.6 (2026-04-01)
 
