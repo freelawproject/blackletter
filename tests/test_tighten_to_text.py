@@ -6,7 +6,7 @@ we introduce per-page word caching.
 
 import fitz
 
-from blackletter.scanner import _tighten_to_text, _text_bottom, _text_x_bounds
+from blackletter.scanner import _tighten_to_text, _text_bottom, _text_x_bounds, _words_in_rect
 
 
 # ── Helpers ─────────────────────────────────────────────────────────────
@@ -102,6 +102,90 @@ class TestTightenToText:
         result = _tighten_to_text(page, rect)
 
         assert result is None
+
+
+# ── _words_in_rect equivalence ─────────────────────────────────────────
+
+
+class TestWordsInRectEquivalence:
+    """Verify _words_in_rect matches fitz get_text("words", clip=rect)."""
+
+    def _get_text_words(self, page, rect):
+        """Reference implementation: direct fitz extraction, stripped."""
+        return [w for w in page.get_text("words", clip=rect) if w[4].strip()]
+
+    def test_single_text_region(self):
+        page = _make_page([(100, 200, "Hello World")])
+        rect = fitz.Rect(50, 150, 400, 300)
+
+        cached = _words_in_rect(page, rect)
+        direct = self._get_text_words(page, rect)
+
+        assert len(cached) == len(direct)
+        for c, d in zip(cached, direct):
+            assert c[:5] == d[:5]
+
+    def test_no_text_in_rect(self):
+        page = _make_page([(100, 200, "Hello")])
+        rect = fitz.Rect(400, 400, 600, 600)
+
+        assert _words_in_rect(page, rect) == []
+        assert self._get_text_words(page, rect) == []
+
+    def test_partial_overlap_multiple_lines(self):
+        page = _make_page(
+            [
+                (100, 100, "Line one"),
+                (100, 300, "Line two"),
+                (100, 500, "Line three"),
+            ]
+        )
+        # Clip that covers only the middle line
+        rect = fitz.Rect(50, 250, 400, 400)
+
+        cached = _words_in_rect(page, rect)
+        direct = self._get_text_words(page, rect)
+
+        assert len(cached) == len(direct)
+        for c, d in zip(cached, direct):
+            assert c[:5] == d[:5]
+
+    def test_tight_rect_around_text(self):
+        page = _make_page([(200, 400, "Exact")])
+        # Get the actual word bounds first, then use them as the clip
+        all_words = [w for w in page.get_text("words") if w[4].strip()]
+        assert len(all_words) >= 1
+        w = all_words[0]
+        rect = fitz.Rect(w[0], w[1], w[2], w[3])
+
+        cached = _words_in_rect(page, rect)
+        direct = self._get_text_words(page, rect)
+
+        assert len(cached) == len(direct)
+
+    def test_multiple_rects_same_page(self):
+        """Multiple clip rects on the same page all match direct extraction."""
+        page = _make_page(
+            [
+                (80, 100, "Top left"),
+                (350, 100, "Top right"),
+                (80, 600, "Bottom left"),
+                (350, 600, "Bottom right"),
+            ]
+        )
+        rects = [
+            fitz.Rect(50, 50, 250, 200),  # top-left quadrant
+            fitz.Rect(300, 50, 500, 200),  # top-right quadrant
+            fitz.Rect(50, 500, 250, 700),  # bottom-left quadrant
+            fitz.Rect(300, 500, 500, 700),  # bottom-right quadrant
+            fitz.Rect(0, 0, 612, 792),  # full page
+        ]
+        for rect in rects:
+            cached = _words_in_rect(page, rect)
+            direct = self._get_text_words(page, rect)
+            assert len(cached) == len(direct), (
+                f"Mismatch for rect {rect}: cached={len(cached)}, direct={len(direct)}"
+            )
 
 
 # ── _text_bottom ───────────────────────────────────────────────────────

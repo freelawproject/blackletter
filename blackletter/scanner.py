@@ -1001,6 +1001,35 @@ def _pair_opinions(
     return opinions
 
 
+_WORD_CACHE_ATTR = "_blackletter_word_cache"
+
+
+def _get_page_words(fitz_page) -> list[tuple]:
+    """Return all non-empty words on the page, caching the result.
+
+    The cache is stored on the parent fitz.Document keyed by page number.
+    It is populated lazily on first call and remains valid until
+    apply_redactions() modifies the page content.
+    """
+    doc = fitz_page.parent
+    cache = getattr(doc, _WORD_CACHE_ATTR, None)
+    if cache is None:
+        cache = {}
+        setattr(doc, _WORD_CACHE_ATTR, cache)
+    page_num = fitz_page.number
+    if page_num not in cache:
+        words = fitz_page.get_text("words")
+        cache[page_num] = [w for w in words if w[4].strip()]
+    return cache[page_num]
+
+
+def _words_in_rect(fitz_page, rect: fitz.Rect) -> list[tuple]:
+    """Return cached words whose bounding box intersects the given rect."""
+    all_words = _get_page_words(fitz_page)
+    rx0, ry0, rx1, ry1 = rect.x0, rect.y0, rect.x1, rect.y1
+    return [w for w in all_words if w[0] < rx1 and w[2] > rx0 and w[1] < ry1 and w[3] > ry0]
+
+
 def _tighten_to_text(
     fitz_page,
     rect: fitz.Rect,
@@ -1017,9 +1046,8 @@ def _tighten_to_text(
     """
     if skip:
         return None
-    words = fitz_page.get_text("words", clip=rect)
     # words = [(x0, y0, x1, y1, word, block_no, line_no, word_no), ...]
-    words = [w for w in words if w[4].strip()]
+    words = _words_in_rect(fitz_page, rect)
     if not words:
         return None
     return fitz.Rect(
@@ -1165,28 +1193,20 @@ def _margin_bounds(page: Page) -> tuple[float, float]:
 
 def _text_bottom(fitz_page, clip: fitz.Rect) -> float:
     """Return the y-coordinate of the bottom of the last text in clip."""
-    blocks = fitz_page.get_text("blocks", clip=clip)
-    if not blocks:
+    words = _words_in_rect(fitz_page, clip)
+    if not words:
         return clip.y0
-    # blocks are (x0, y0, x1, y1, text, block_no, block_type)
-    # type 0 = text
-    text_blocks = [b for b in blocks if b[6] == 0 and b[4].strip()]
-    if not text_blocks:
-        return clip.y0
-    return max(b[3] for b in text_blocks)
+    return max(w[3] for w in words)
 
 
 def _text_x_bounds(fitz_page, clip: fitz.Rect, padding: float = 2.0) -> tuple[float, float]:
     """Return (left, right) x-coordinates of the text extent within clip."""
-    blocks = fitz_page.get_text("blocks", clip=clip)
-    if not blocks:
-        return clip.x0, clip.x1
-    text_blocks = [b for b in blocks if b[6] == 0 and b[4].strip()]
-    if not text_blocks:
+    words = _words_in_rect(fitz_page, clip)
+    if not words:
         return clip.x0, clip.x1
     return (
-        min(b[0] for b in text_blocks) - padding,
-        max(b[2] for b in text_blocks) + padding,
+        min(w[0] for w in words) - padding,
+        max(w[2] for w in words) + padding,
     )
 
 
