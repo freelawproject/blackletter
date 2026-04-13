@@ -966,22 +966,24 @@ def _pair_opinions(
     def _is_excluded(d):
         return _check_excluded(d, excluded)
 
-    captions = [
-        d
-        for d in document.by_label(Label.CASE_CAPTION)
-        if d.confidence >= LABEL_CONFIDENCE.get(Label.CASE_CAPTION, CONFIDENCE_THRESHOLD)
-        and not _is_excluded(d)
-    ]
-    all_keys = [
-        d
-        for d in document.by_label(Label.KEY_ICON)
-        if d.confidence >= LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
-        and not _is_excluded(d)
-    ]
-    keys = [d for d in _filter_key_icons_by_size(all_keys) if d.label == Label.KEY_ICON]
-
     if not document.pages:
         return []
+
+    caption_thresh = LABEL_CONFIDENCE.get(Label.CASE_CAPTION, CONFIDENCE_THRESHOLD)
+    key_thresh = LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
+
+    captions: list[Detection] = []
+    all_keys: list[Detection] = []
+    for page in document.pages:
+        for d in page.detections:
+            if _is_excluded(d):
+                continue
+            if d.label == Label.CASE_CAPTION and d.confidence >= caption_thresh:
+                captions.append(d)
+            elif d.label == Label.KEY_ICON and d.confidence >= key_thresh:
+                all_keys.append(d)
+
+    keys = [d for d in _filter_key_icons_by_size(all_keys) if d.label == Label.KEY_ICON]
 
     mid = document.pages[0].midpoint
     markers = [(d, "C") for d in captions] + [(d, "K") for d in keys]
