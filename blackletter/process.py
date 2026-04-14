@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import logging
 import sys
 from pathlib import Path
@@ -49,6 +50,32 @@ def _build_output_dir(args: argparse.Namespace) -> Path:
         base = base / str(args.volume)
     base = base / str(args.first_page)
     return base
+
+
+def _sorted_detections(
+    document, mid: float
+) -> tuple[list[tuple[int, int, float]], list[Detection]]:
+    """Pre-sort all detections by reading-order key for binary search.
+
+    Returns (keys, detections) where both lists share the same index.
+    """
+    pairs = [(d.sort_key(mid), d) for p in document.pages for d in p.detections]
+    pairs.sort(key=lambda x: x[0])
+    keys = [sk for sk, _ in pairs]
+    dets = [d for _, d in pairs]
+    return keys, dets
+
+
+def _detections_in_range(
+    all_keys: list[tuple[int, int, float]],
+    all_dets: list[Detection],
+    lo_key: tuple[int, int, float],
+    hi_key: tuple[int, int, float],
+) -> list[Detection]:
+    """Return detections with sort_key in [lo_key, hi_key], already sorted."""
+    lo = bisect.bisect_left(all_keys, lo_key)
+    hi = bisect.bisect_right(all_keys, hi_key)
+    return all_dets[lo:hi]
 
 
 def _build_masked_opinions(
@@ -420,15 +447,12 @@ def compute_redaction_rects(
     src_pdf = fitz.open(str(document.pdf_path))
 
     # Pre-compute headnote rects
+    all_keys, all_dets = _sorted_detections(document, mid)
     all_headnote_rects = []
     for caption, key in opinions:
-        opinion_dets = []
-        for p in document.pages:
-            for d in p.detections:
-                sk = d.sort_key(mid)
-                if caption.sort_key(mid) <= sk <= key.sort_key(mid):
-                    opinion_dets.append(d)
-        opinion_dets.sort(key=lambda d: d.sort_key(mid))
+        opinion_dets = _detections_in_range(
+            all_keys, all_dets, caption.sort_key(mid), key.sort_key(mid)
+        )
         end_marker = _find_redaction_end(
             opinion_dets, caption, key, mid, reporter=document.reporter
         )
@@ -846,16 +870,13 @@ def _build_full_redacted(
     is_bitonal = bool(_sample_imgs and _sample_imgs[0][4] == 1)
 
     # Pre-compute headnote rects for every opinion
+    all_keys, all_dets = _sorted_detections(document, mid)
     all_headnote_rects: list[tuple[int, fitz.Rect]] = []
     for caption, key in opinions:
         page = pages_by_index[caption.page_index]
-        opinion_dets = []
-        for p in document.pages:
-            for d in p.detections:
-                sk = d.sort_key(mid)
-                if caption.sort_key(mid) <= sk <= key.sort_key(mid):
-                    opinion_dets.append(d)
-        opinion_dets.sort(key=lambda d: d.sort_key(mid))
+        opinion_dets = _detections_in_range(
+            all_keys, all_dets, caption.sort_key(mid), key.sort_key(mid)
+        )
         end_marker = _find_redaction_end(
             opinion_dets, caption, key, mid, reporter=document.reporter
         )
