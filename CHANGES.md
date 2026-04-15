@@ -1,5 +1,17 @@
 # Change Log
 
+## Coming up
+
+The following changes are not yet released, but are code complete:
+
+- Add rST docstrings (`:param:` / `:returns:`) across all public and internal functions in `api.py`, `margins.py`, `models.py`, `analyze.py`, `scanner.py`, and `validate.py`
+- Add `Callable` type hints for `progress_callback` parameters in `api.py`, `analyze.py`, `scanner.py`, and `validate.py`
+- Fix resource leak in `api.ocr()` where `fitz.open()` was never closed
+- Remove dead `list[dict]` type from `api.build_redacted()` rects parameter
+- Fix stale module-level usage examples in `api.py`
+- Remove unnecessary import aliases (`_re`, `_Counter`, `_fitz`, `_I`) across `api.py` and `analyze.py`
+- Remove em dashes from comments and strings project-wide
+
 ## Current
 
 0.0.8 (2026-04-01)

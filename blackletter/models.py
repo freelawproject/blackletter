@@ -78,7 +78,11 @@ class BBox:
 
     @classmethod
     def from_xyxy(cls, coords: list[float]) -> BBox:
-        """Create from YOLO xyxy output: [x1, y1, x2, y2]."""
+        """Create from YOLO xyxy output: [x1, y1, x2, y2].
+
+        :param coords: Flat list of four floats [x1, y1, x2, y2].
+        :returns: A new BBox instance.
+        """
         return cls(coords[0], coords[1], coords[2], coords[3])
 
     @property
@@ -102,7 +106,12 @@ class BBox:
         return self.width * self.height
 
     def to_pdf(self, scale_x: float, scale_y: float) -> BBox:
-        """Convert pixel coordinates to PDF points."""
+        """Convert pixel coordinates to PDF points.
+
+        :param scale_x: Horizontal pixels-to-points ratio.
+        :param scale_y: Vertical pixels-to-points ratio.
+        :returns: A new BBox in PDF point coordinates.
+        """
         return BBox(
             x1=self.x1 * scale_x,
             y1=self.y1 * scale_y,
@@ -111,7 +120,11 @@ class BBox:
         )
 
     def iou(self, other: BBox) -> float:
-        """Intersection over union with another box."""
+        """Intersection over union with another box.
+
+        :param other: The box to compare against.
+        :returns: IoU value in the range [0, 1].
+        """
         ix1 = max(self.x1, other.x1)
         iy1 = max(self.y1, other.y1)
         ix2 = min(self.x2, other.x2)
@@ -121,7 +134,12 @@ class BBox:
         return inter / union if union > 0 else 0.0
 
     def contains(self, other: BBox, threshold: float = 0.8) -> bool:
-        """True if `other` is mostly inside this box."""
+        """True if ``other`` is mostly inside this box.
+
+        :param other: The candidate inner box.
+        :param threshold: Minimum fraction of ``other`` that must overlap.
+        :returns: Whether the overlap fraction meets the threshold.
+        """
         ix1 = max(self.x1, other.x1)
         iy1 = max(self.y1, other.y1)
         ix2 = min(self.x2, other.x2)
@@ -144,11 +162,19 @@ class Detection:
         return self.label.is_copyrighted
 
     def column(self, midpoint: float) -> str:
-        """Which column this detection falls in relative to a midpoint (pixels)."""
+        """Which column this detection falls in relative to a midpoint.
+
+        :param midpoint: Horizontal pixel coordinate dividing left/right columns.
+        :returns: ``"LEFT"`` or ``"RIGHT"``.
+        """
         return "LEFT" if self.bbox.center_x < midpoint else "RIGHT"
 
     def sort_key(self, midpoint: float) -> tuple[int, int, float]:
-        """Key for reading order: page, then column (L=0, R=1), then y position."""
+        """Key for reading order: page, then column (L=0, R=1), then y position.
+
+        :param midpoint: Horizontal pixel coordinate dividing left/right columns.
+        :returns: Tuple of (page_index, column_ordinal, y1).
+        """
         col_ord = 0 if self.bbox.center_x < midpoint else 1
         return (self.page_index, col_ord, self.bbox.y1)
 
@@ -197,7 +223,11 @@ class Page:
         return self.pdf_height / self.img_height
 
     def by_label(self, *labels: Label) -> list[Detection]:
-        """Filter detections by one or more labels."""
+        """Filter detections by one or more labels.
+
+        :param labels: One or more Label values to keep.
+        :returns: List of matching detections.
+        """
         label_set = set(labels)
         return [d for d in self.detections if d.label in label_set]
 
@@ -222,7 +252,11 @@ class Document:
     ocr_applied: bool = False
 
     def by_label(self, *labels: Label) -> list[Detection]:
-        """All detections matching the given labels, in reading order."""
+        """All detections matching the given labels, in reading order.
+
+        :param labels: One or more Label values to keep.
+        :returns: List of matching detections sorted in reading order.
+        """
         hits = [d for p in self.pages for d in p.by_label(*labels)]
         if self.pages:
             mid = self.pages[0].midpoint

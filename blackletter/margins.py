@@ -23,8 +23,11 @@ def _text_bounds(
 ) -> tuple[float, float, float, float] | None:
     """Find the bounding box of all text and images on a page.
 
-    Returns (left, top, right, bottom) in PDF points, or None if the text
-    doesn't span enough of the page to justify margin cleanup.
+    :param fitz_page: A PyMuPDF page object.
+    :param page_width: Width of the page in PDF points.
+    :returns: ``(left, top, right, bottom)`` in PDF points, or ``None``
+        if the text doesn't span enough of the page to justify margin
+        cleanup.
     """
     blocks = fitz_page.get_text("blocks")
     text_blocks = [b for b in blocks if b[6] == 0 and b[4].strip()]
@@ -36,12 +39,12 @@ def _text_bounds(
     right = max(b[2] for b in text_blocks)
     bottom = max(b[3] for b in text_blocks)
 
-    # Skip pages where text is too narrow — likely an appendix or image page
+    # Skip pages where text is too narrow, likely an appendix or image page
     if (right - left) < page_width * MIN_TEXT_WIDTH_FRACTION:
         return None
 
-    # Extend bounds to include image blocks (e.g. key icons at page bottom)
-    # Only extend vertically — images outside the text column are margin artifacts
+    # Extend bounds to include image blocks (e.g. key icons at page bottom).
+    # Only extend vertically; images outside the text column are margin artifacts
     img_blocks = [b for b in blocks if b[6] == 1]
     for b in img_blocks:
         # Only consider images that overlap the text column horizontally
@@ -58,7 +61,10 @@ def compute_margin_rects(
 ) -> list[dict]:
     """Compute margin rects for each page without applying them.
 
-    Returns list of {page_index, rects: [{x0, y0, x1, y1}]}.
+    :param pdf_path: Path to the input PDF file.
+    :param buffer: Safety buffer in PDF points around the content area.
+    :returns: List of dicts with ``page_index`` and ``rects`` keys, where
+        each rect is a dict with ``x0``, ``y0``, ``x1``, ``y1``.
     """
     pdf_path = Path(pdf_path)
     doc = fitz.open(str(pdf_path))
@@ -121,9 +127,11 @@ def clean_margins(
     applies white redactions to the four margin strips (left, right,
     top, bottom) with a safety buffer around the content.
 
-    Modifies the PDF in-place if output_path is None.
-
-    Returns the output path.
+    :param pdf_path: Path to the input PDF file.
+    :param buffer: Safety buffer in PDF points around the content area.
+    :param output_path: Where to write the cleaned PDF. If ``None``,
+        modifies the PDF in-place.
+    :returns: The output path.
     """
     pdf_path = Path(pdf_path)
     if output_path is None:
@@ -132,7 +140,7 @@ def clean_margins(
     doc = fitz.open(str(pdf_path))
     cleaned = 0
 
-    # Detect bitonal — apply_redactions corrupts CCITT G4 streams
+    # Detect bitonal. apply_redactions corrupts CCITT G4 streams
     _sample_imgs = doc[0].get_images(full=True) if doc.page_count else []
     is_bitonal = bool(_sample_imgs and _sample_imgs[0][4] == 1)
 
@@ -200,7 +208,7 @@ def clean_margins(
         cleaned += 1
 
     if not is_bitonal:
-        # Recompress images — apply_redactions converts JPEGs to PNG, inflating size
+        # Recompress images. apply_redactions converts JPEGs to PNG, inflating size
         from blackletter.scanner import recompress_images
 
         recompress_images(doc, quality=65)
@@ -208,7 +216,7 @@ def clean_margins(
     total = len(doc)
 
     if output_path == pdf_path:
-        # Can't save over the source directly — use temp file
+        # Can't save over the source directly, use temp file
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False, dir=pdf_path.parent) as tmp:
             tmp_path = Path(tmp.name)
         doc.save(str(tmp_path), garbage=4, deflate=True)

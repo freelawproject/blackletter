@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
@@ -677,7 +678,7 @@ def generate(
     :returns: Dict with keys ``redacted_dir``, ``masked_dir``,
         ``full_redacted``, and ``opinion_count``.
     """
-    import re as _re
+    import re
 
     # Labels to white-out in masked output instead of black
     WHITE_IN_MASKED = {"PAGE_HEADER", "STATE_ABBREVIATION"}
@@ -716,16 +717,14 @@ def generate(
         return op.get("filename", f"{op['caption_page']:04d}-{op['end_page']:04d}.pdf")
 
     # Detect duplicate filenames and add -1/-2/-3 suffixes
-    from collections import Counter as _Counter
-
     raw_names = [_opinion_filename(op) for op in opinions]
-    name_counts = _Counter(raw_names)
+    name_counts = Counter(raw_names)
     name_seq: dict[str, int] = {}
     filenames = []
     for name in raw_names:
         if name_counts[name] > 1:
             name_seq[name] = name_seq.get(name, 0) + 1
-            filenames.append(_re.sub(r"\.pdf$", f"-{name_seq[name]}.pdf", name))
+            filenames.append(re.sub(r"\.pdf$", f"-{name_seq[name]}.pdf", name))
         else:
             filenames.append(name)
 
@@ -907,7 +906,7 @@ def generate(
 
             # Filename: strip the -1/-2/-3 suffix from first opinion's computed name
             base_name = filenames[group[0]]
-            base_name = _re.sub(r"-\d+\.pdf$", ".pdf", base_name)
+            base_name = re.sub(r"-\d+\.pdf$", ".pdf", base_name)
 
             out = fitz.open()
             out.insert_pdf(src, from_page=src_page_idx, to_page=src_page_idx)

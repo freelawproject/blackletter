@@ -9,6 +9,7 @@ from __future__ import annotations
 import itertools
 import re
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 import fitz
@@ -20,7 +21,11 @@ RANGE_RE = re.compile(r"^(\d{1,4})\s*[–\-]\s*(\d{1,4})$")
 
 
 def _parse_expected_range(pdf_path: str | Path) -> tuple[int | None, int | None]:
-    """Extract expected first/last page numbers from filename."""
+    """Extract expected first/last page numbers from filename.
+
+    :param pdf_path: Path to the PDF file.
+    :returns: Tuple of (first_page, last_page), either may be ``None``.
+    """
     info = _infer_from_filename(Path(pdf_path))
     if info:
         return info.get("first_page"), info.get("last_page")
@@ -34,8 +39,10 @@ def _split_in_out_of_range(
 ) -> tuple[list[dict], dict[int, list[int]]]:
     """Separate OCR results into out-of-range and in-range buckets.
 
-    Returns:
-        (out_of_range_results, seen_nums_dict)
+    :param results: List of per-page OCR result dicts.
+    :param exp_start: Expected first page number, or ``None``.
+    :param exp_end: Expected last page number, or ``None``.
+    :returns: Tuple of (out_of_range_results, seen_nums_dict).
     """
     out_of_range: list[dict] = []
     seen_nums: dict[int, list[int]] = {}
@@ -68,9 +75,13 @@ def _auto_correct(
     If a consistent offset is detected (e.g. all bad readings are +800 from
     expected), apply the correction and return updated results.
 
-    Returns:
-        (updated_ocr_results, list_of_corrections)
-        Each correction is (pdf_page, old_value, new_value).
+    :param ocr_results: Full list of per-page OCR result dicts.
+    :param out_of_range: Subset of results whose detected numbers fall
+        outside the expected range.
+    :param seen_nums: Mapping of detected page number to list of PDF pages
+        where it was seen.
+    :returns: Tuple of (updated_ocr_results, list_of_corrections) where
+        each correction is (pdf_page, old_value, new_value).
     """
     corrections: list[tuple[int, str, str]] = []
     if not out_of_range or not seen_nums:
@@ -126,9 +137,17 @@ def _build_issues(
 ) -> dict:
     """Convert raw analysis into issues, page_map, and missing_pages.
 
-    This is the core validation logic — sequence issues become structured
+    This is the core validation logic. Sequence issues become structured
     issue dicts, large gaps are collapsed into warnings, and a page_map
     is built for viewer display.
+
+    :param analysis: Dict of filtered OCR analysis data (results,
+        seq_issues, duplicates, missing_pages, etc.).
+    :param pdf_page_count: Total number of pages in the PDF.
+    :param exp_start: Expected first page number, or ``None``.
+    :param exp_end: Expected last page number, or ``None``.
+    :returns: Dict with keys ``page_count``, ``page_map``,
+        ``missing_pages``, ``issues``, and ``ocr_results``.
     """
     issues: list[dict] = []
 
@@ -165,7 +184,7 @@ def _build_issues(
                         "severity": "warning",
                         "message": (
                             f"Large jump from page {prev_num} to {num} ({len(gap)} pages) "
-                            f"— likely an OCR misread. Correct the page number and "
+                            f", likely an OCR misread. Correct the page number and "
                             f"recalculate."
                         ),
                     }
@@ -220,7 +239,7 @@ def _build_issues(
                 "severity": "warning",
                 "message": (
                     f"PDF page {r['pdf_page']} detected as '{r['detected']}' which is "
-                    f"outside the expected page range — likely a stray number."
+                    f"outside the expected page range, likely a stray number."
                 ),
             }
         )
@@ -265,7 +284,7 @@ def _build_issues(
                     "severity": "warning",
                     "message": (
                         f"PDF page {r['pdf_page']} covers page range "
-                        f"{r['detected']} — verify this is expected."
+                        f"{r['detected']}. Verify this is expected."
                     ),
                 }
             )
@@ -288,7 +307,7 @@ def _build_issues(
                             "severity": "warning",
                             "message": (
                                 f"Large gap: pages {run[0]}–{run[-1]} ({len(run)} pages) "
-                                f"not found — likely an OCR misread rather than genuinely "
+                                f"not found, likely an OCR misread rather than genuinely "
                                 f"missing pages."
                             ),
                         }
@@ -370,7 +389,11 @@ def _build_issues(
 
 
 def _structural_checks(file_path: str | Path) -> list[dict]:
-    """Quick PyMuPDF checks for blank pages and orientation changes."""
+    """Quick PyMuPDF checks for blank pages and orientation changes.
+
+    :param file_path: Path to the PDF file.
+    :returns: List of issue dicts for any blank pages or orientation changes.
+    """
     doc = fitz.open(str(file_path))
     issues: list[dict] = []
     first_is_landscape = None
@@ -416,7 +439,7 @@ def validate(
     exp_start: int | None = None,
     exp_end: int | None = None,
     auto_correct: bool = True,
-    progress_callback=None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
     model: str | Path | None = None,
     num_workers: int | None = None,
 ) -> dict:
@@ -426,22 +449,19 @@ def validate(
     missing pages, duplicates, gaps, and numbering errors. Optionally
     auto-corrects consistent OCR misreadings.
 
-    Args:
-        pdf_path: Path to the PDF file.
-        exp_start: Expected first page number (inferred from filename if omitted).
-        exp_end: Expected last page number (inferred from filename if omitted).
-        auto_correct: Attempt to fix consistent out-of-range OCR readings.
-        progress_callback: Optional callable(current, total, message).
-        model: Path to YOLO model for page number detection.
-
-    Returns:
-        Dict with keys:
-            page_count: Total pages in PDF.
-            page_map: Ordered list of page entries for viewer display.
-            missing_pages: List of missing logical page numbers.
-            issues: List of issue dicts (page_number, check_name, severity, message).
-            ocr_results: Raw per-page OCR results.
-            auto_corrections: List of (pdf_page, old_value, new_value) if any.
+    :param pdf_path: Path to the PDF file.
+    :param exp_start: Expected first page number (inferred from filename
+        if omitted).
+    :param exp_end: Expected last page number (inferred from filename
+        if omitted).
+    :param auto_correct: Attempt to fix consistent out-of-range OCR
+        readings.
+    :param progress_callback: Optional callable(current, total, message).
+    :param model: Path to YOLO model for page number detection.
+    :param num_workers: Number of parallel workers for OCR.
+    :returns: Dict with keys ``page_count``, ``page_map``,
+        ``missing_pages``, ``issues``, ``ocr_results``, and
+        ``auto_corrections``.
     """
     pdf_path = str(pdf_path)
 
@@ -564,7 +584,7 @@ def validate(
                 "severity": "warning",
                 "message": (
                     f"PDF page {pdf_page}: OCR read '{old_val}', auto-corrected "
-                    f"to '{new_val}' based on surrounding page numbers — verify "
+                    f"to '{new_val}' based on surrounding page numbers. Verify "
                     f"this is correct."
                 ),
             }
