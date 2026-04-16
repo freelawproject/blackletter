@@ -22,12 +22,6 @@ PAGE_NUMBER_CLASS = 8
 RANGE_RE = re.compile(r"^(\d{1,4})\s*[–\-]\s*(\d{1,4})$")
 
 
-def _page_num_base(text: str) -> int | None:
-    """Extract the leading integer from a string, or return ``None``."""
-    m = re.match(r"^(\d+)", str(text))
-    return int(m.group(1)) if m else None
-
-
 def _classify_text(stripped: str) -> tuple[str, str] | None:
     """Classify text as a page number (``"single"`` or ``"range"``), or ``None``."""
     if RANGE_RE.match(stripped):

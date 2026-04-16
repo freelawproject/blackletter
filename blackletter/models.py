@@ -119,17 +119,21 @@ class BBox:
             y2=self.y2 * scale_y,
         )
 
+    def _intersection_area(self, other: BBox) -> float:
+        """Return the area of the overlap rectangle with ``other`` (``0`` if disjoint)."""
+        ix1 = max(self.x1, other.x1)
+        iy1 = max(self.y1, other.y1)
+        ix2 = min(self.x2, other.x2)
+        iy2 = min(self.y2, other.y2)
+        return max(0, ix2 - ix1) * max(0, iy2 - iy1)
+
     def iou(self, other: BBox) -> float:
         """Intersection over union with another box.
 
         :param other: The box to compare against.
         :returns: IoU value in the range [0, 1].
         """
-        ix1 = max(self.x1, other.x1)
-        iy1 = max(self.y1, other.y1)
-        ix2 = min(self.x2, other.x2)
-        iy2 = min(self.y2, other.y2)
-        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        inter = self._intersection_area(other)
         union = self.area + other.area - inter
         return inter / union if union > 0 else 0.0
 
@@ -140,11 +144,7 @@ class BBox:
         :param threshold: Minimum fraction of ``other`` that must overlap.
         :returns: Whether the overlap fraction meets the threshold.
         """
-        ix1 = max(self.x1, other.x1)
-        iy1 = max(self.y1, other.y1)
-        ix2 = min(self.x2, other.x2)
-        iy2 = min(self.y2, other.y2)
-        inter = max(0, ix2 - ix1) * max(0, iy2 - iy1)
+        inter = self._intersection_area(other)
         return (inter / other.area) >= threshold if other.area > 0 else False
 
 

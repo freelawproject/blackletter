@@ -33,6 +33,42 @@ DEFAULT_TARGET_KB = 148
 # Don't go below this DPI — text becomes unreadable
 MIN_DPI = 100
 
+_NOISY_OCR_LOGGERS = ("pikepdf", "fontTools", "fontTools.subset", "fontTools.ttLib", "ocrmypdf")
+
+
+def _silence_ocr_loggers() -> None:
+    """Raise noisy ocrmypdf/pikepdf/fontTools loggers to ERROR level."""
+    for name in _NOISY_OCR_LOGGERS:
+        logging.getLogger(name).setLevel(logging.ERROR)
+    for name in list(logging.root.manager.loggerDict):
+        if name.startswith("ocrmypdf"):
+            logging.getLogger(name).setLevel(logging.ERROR)
+
+
+def _render_bitonal_page(
+    src_page: fitz.Page,
+    out_doc: fitz.Document,
+    dpi: int,
+    threshold: int,
+) -> None:
+    """Render ``src_page`` as a 1-bit CCITT G4 TIFF and append it to ``out_doc``.
+
+    :param src_page: Source page to rasterize.
+    :param out_doc: Destination ``fitz.Document`` the rendered page is
+        appended to (via ``new_page`` + ``insert_image``).
+    :param dpi: Render DPI.
+    :param threshold: Grayscale threshold (0-255) for binarisation.
+    """
+    import numpy as np
+
+    new_page = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
+    pix = src_page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
+    gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+    bw = Image.fromarray((gray > threshold).astype(np.uint8) * 255).convert("1")
+    buf = io.BytesIO()
+    bw.save(buf, format="TIFF", compression="group4")
+    new_page.insert_image(new_page.rect, stream=buf.getvalue())
+
 
 def needs_ocr(pdf_path: Path, sample_pages: int = 3) -> bool:
     """Check if a PDF needs OCR (has no usable text layer).
@@ -359,13 +395,9 @@ print("DONE", flush=True)
 
         # Merge chunks back into one PDF
         print("  OCR: merging chunks...", flush=True)
-        merged = fitz.open()
-        for c_out in chunk_outputs:
-            chunk_doc = fitz.open(str(c_out))
-            merged.insert_pdf(chunk_doc)
-            chunk_doc.close()
-        merged.save(str(output_path), garbage=4, deflate=True)
-        merged.close()
+        from blackletter.tasks import merge_pdfs
+
+        merge_pdfs(chunk_outputs, output_path)
 
         # Cleanup
         for f in chunk_inputs + chunk_outputs:
@@ -373,12 +405,7 @@ print("DONE", flush=True)
     else:
         # ── Single-process OCR for small documents ──
         print(f"  OCR step 2: Adding text layer (tesseract) — {n_pages} pages...", flush=True)
-        for name in ("pikepdf", "fontTools", "fontTools.subset", "fontTools.ttLib"):
-            logging.getLogger(name).setLevel(logging.ERROR)
-        logging.getLogger("ocrmypdf").setLevel(logging.ERROR)
-        for _log_name in list(logging.root.manager.loggerDict):
-            if _log_name.startswith("ocrmypdf"):
-                logging.getLogger(_log_name).setLevel(logging.ERROR)
+        _silence_ocr_loggers()
 
         import ocrmypdf as _ocrmypdf
         from ocrmypdf import hookimpl as _hookimpl
@@ -548,32 +575,19 @@ def bitonal_convert(
                 _time.sleep(0.5)
 
         # Merge chunks
-        merged = fitz.open()
-        for chunk_out in chunk_outputs:
-            chunk_doc = fitz.open(str(chunk_out))
-            merged.insert_pdf(chunk_doc)
-            chunk_doc.close()
-        merged.save(str(dst_path), garbage=4, deflate=True)
-        merged.close()
+        from blackletter.tasks import merge_pdfs
+
+        merge_pdfs(chunk_outputs, dst_path)
 
         for f in chunk_outputs:
             f.unlink(missing_ok=True)
         worker_script.unlink(missing_ok=True)
     else:
         # Single-process for small docs
-        import numpy as np
-
         src = fitz.open(str(src_path))
         out = fitz.open()
         for i in range(total):
-            page = src[i]
-            new_page = out.new_page(width=page.rect.width, height=page.rect.height)
-            pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
-            gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-            bw = Image.fromarray((gray > threshold).astype(np.uint8) * 255).convert("1")
-            buf = io.BytesIO()
-            bw.save(buf, format="TIFF", compression="group4")
-            new_page.insert_image(new_page.rect, stream=buf.getvalue())
+            _render_bitonal_page(src[i], out, dpi, threshold)
             if (i + 1) % 20 == 0 or (i + 1) == total:
                 print(f"  Bitonal: {i + 1}/{total}", flush=True)
         out.save(str(dst_path), garbage=4, deflate=True)

@@ -43,9 +43,7 @@ def bitonal(
         invoked during processing.
     :returns: Path to the bitonal PDF.
     """
-    import io
-    import numpy as np
-    from PIL import Image
+    from blackletter.ocr import _render_bitonal_page
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -57,14 +55,7 @@ def bitonal(
     total = src.page_count
 
     for i in range(total):
-        page = src[i]
-        new_page = out.new_page(width=page.rect.width, height=page.rect.height)
-        pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
-        gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-        bw = Image.fromarray((gray > threshold).astype(np.uint8) * 255).convert("1")
-        buf = io.BytesIO()
-        bw.save(buf, format="TIFF", compression="group4")
-        new_page.insert_image(new_page.rect, stream=buf.getvalue())
+        _render_bitonal_page(src[i], out, dpi, threshold)
         if progress_callback and ((i + 1) % 10 == 0 or i == total - 1):
             progress_callback(i + 1, total, f"Bitonal: {i + 1}/{total} pages")
         if (i + 1) % 50 == 0 or i == total - 1:
@@ -95,7 +86,7 @@ def ocr(
     :param language: Tesseract language code.
     :returns: Path to the OCR'd PDF.
     """
-    import logging
+    from blackletter.ocr import _silence_ocr_loggers
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -108,11 +99,7 @@ def ocr(
     scan_name = ".".join(parts) if parts else pdf_path.stem
     output_path = output_dir / f"{scan_name}.pdf"
 
-    for name in ("pikepdf", "fontTools", "fontTools.subset", "fontTools.ttLib", "ocrmypdf"):
-        logging.getLogger(name).setLevel(logging.ERROR)
-    for _n in list(logging.root.manager.loggerDict):
-        if _n.startswith("ocrmypdf"):
-            logging.getLogger(_n).setLevel(logging.ERROR)
+    _silence_ocr_loggers()
 
     import ocrmypdf
 
@@ -944,34 +931,3 @@ def generate(
         "masked_dir": masked_dir,
         "opinion_count": len(opinions),
     }
-
-
-def margins(
-    pdf_path: str | Path,
-    output_dir: str | Path,
-) -> list[dict]:
-    """Compute margin rects and save margin_rects.json.
-
-    Skips computation if margin_rects.json already exists in
-    *output_dir*.
-
-    :param pdf_path: Path to the source PDF.
-    :param output_dir: Directory to write margin_rects.json into.
-    :returns: List of margin rect dicts.
-    """
-    from blackletter.margins import compute_margin_rects
-
-    pdf_path = Path(pdf_path)
-    output_dir = Path(output_dir)
-
-    margin_path = output_dir / "margin_rects.json"
-    if margin_path.exists():
-        print("  Margins already computed, skipping.", flush=True)
-        return json.loads(margin_path.read_text())
-
-    t0 = time.time()
-    print("  Computing margins...", flush=True)
-    rects = compute_margin_rects(pdf_path)
-    margin_path.write_text(json.dumps(rects))
-    print(f"  Margins done ({time.time() - t0:.0f}s)", flush=True)
-    return rects

@@ -7,7 +7,7 @@ import logging
 import re
 import subprocess
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import cv2
@@ -264,6 +264,24 @@ def detect_columns(
     )
 
 
+def _safe_detect_columns(
+    img_rgb: Image.Image,
+) -> tuple[float, float, float, float, float]:
+    """Convert RGB PIL image to BGR and run :func:`detect_columns`.
+
+    Returns ``(0, 0, 0, 0, 0)`` if detection fails, so callers can keep
+    processing pages without a hard failure.
+
+    :param img_rgb: Page image as a PIL ``Image`` in RGB.
+    :returns: Column-bound tuple matching :func:`detect_columns`.
+    """
+    img_bgr = cv2.cvtColor(np.array(img_rgb), cv2.COLOR_RGB2BGR)
+    try:
+        return detect_columns(img_bgr)
+    except Exception:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+
+
 def _ocr_region(fitz_page, rect: fitz.Rect, psm: int = 7) -> str:
     """Run tesseract OCR on a page region, digits only.
 
@@ -354,15 +372,22 @@ def _extract_page_number(
     # Determine max expected digits from the hint
     max_digits = max(4, len(str(hint)) + 1) if hint > 0 else 5
 
+    def _range_if_plausible(text: str) -> tuple[int, int] | None:
+        """Return a plausible (a, b) range parsed from ``text``, else None."""
+        parsed = _parse_page_range(text)
+        if parsed and len(parsed) == 2:
+            a, b = parsed
+            if _plausible(a, hint, max_digits) or _plausible(b, hint, max_digits):
+                return (a, b)
+        return None
+
     # Method 1: PDF text layer, fast, try this first
     pdf_text = fitz_page.get_text("text", clip=rect).strip()
 
     # Check for page range first
-    parsed = _parse_page_range(pdf_text)
-    if parsed and len(parsed) == 2:
-        a, b = parsed
-        if _plausible(a, hint, max_digits) or _plausible(b, hint, max_digits):
-            return (a, b)
+    rng = _range_if_plausible(pdf_text)
+    if rng is not None:
+        return rng
 
     pdf_digits = re.sub(r"\D", "", pdf_text)
 
@@ -379,11 +404,9 @@ def _extract_page_number(
         raw = _ocr_region(fitz_page, rect, psm=psm)
         if raw:
             # Check for range in OCR output too
-            parsed = _parse_page_range(raw)
-            if parsed and len(parsed) == 2:
-                a, b = parsed
-                if _plausible(a, hint, max_digits) or _plausible(b, hint, max_digits):
-                    return (a, b)
+            rng = _range_if_plausible(raw)
+            if rng is not None:
+                return rng
             digits = re.sub(r"\D", "", raw)
             if digits:
                 n = int(digits)
@@ -403,38 +426,6 @@ def _extract_page_number(
             n = min(candidates, key=lambda n: len(str(n)))
         return (n, None)
     return None
-
-
-def validate_page_numbers(document: Document) -> list[str]:
-    """Check page number sequence for gaps and mismatches.
-
-    Returns a list of warning strings (empty if everything looks good).
-    """
-    warnings: list[str] = []
-
-    numbered = [(p.index, p.page_number) for p in document.pages if p.page_number is not None]
-
-    if not numbered:
-        warnings.append("No page numbers detected in document")
-        return warnings
-
-    # Check for pages with no detected number
-    for p in document.pages:
-        if p.page_number is None:
-            warnings.append(f"Page index {p.index}: no page number detected")
-
-    # Check sequential consistency, look for gaps
-    for i in range(1, len(numbered)):
-        prev_idx, prev_num = numbered[i - 1]
-        curr_idx, curr_num = numbered[i]
-        expected = prev_num + (curr_idx - prev_idx)
-        if curr_num != expected:
-            warnings.append(
-                f"Page index {curr_idx}: expected page {expected}, "
-                f"got {curr_num} (gap or misnumber after index {prev_idx}={prev_num})"
-            )
-
-    return warnings
 
 
 def _fix_rotated_pages(pdf_path: Path, dest_dir: Path, stem: str) -> Path:
@@ -480,7 +471,7 @@ from PIL import Image
 from ultralytics import YOLO
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from blackletter.scanner import detect_columns, _extract_page_number, DPI
+from blackletter.scanner import _safe_detect_columns, _extract_page_number, DPI
 from blackletter.models import Label
 
 pdf_path, model_path = sys.argv[1], sys.argv[2]
@@ -502,11 +493,7 @@ for bs in range(page_start, page_end, BATCH):
         pix = fp.get_pixmap(matrix=mat)
         img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
         imgs.append(img)
-        img_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        try:
-            lx1, lx2, rx1, rx2, mid = detect_columns(img_bgr)
-        except Exception:
-            lx1, lx2, rx1, rx2, mid = 0, 0, 0, 0, 0
+        lx1, lx2, rx1, rx2, mid = _safe_detect_columns(img)
         meta.append((pi, fp.rect.width, fp.rect.height, pix.width, pix.height, (lx1, lx2, rx1, rx2, mid)))
 
     results = model(imgs, conf=confidence, verbose=False, device=None)
@@ -656,13 +643,9 @@ def scan(
         model_path = (
             Path(model.ckpt_path) if hasattr(model, "ckpt_path") else Path(str(model.model))
         )
-        chunk_size = (total_pages + n_workers - 1) // n_workers
-        chunks = []
-        for i in range(n_workers):
-            s = i * chunk_size
-            e = min(s + chunk_size, total_pages)
-            if s < e:
-                chunks.append((s, e))
+        from blackletter.tasks import split_page_ranges
+
+        chunks = split_page_ranges(total_pages, n_workers)
 
         # Write worker script to temp file
         worker_script = Path(tempfile.gettempdir()) / "_bl_scan_worker.py"
@@ -778,11 +761,7 @@ def scan(
                 pix = fitz_page.get_pixmap(matrix=mat)
                 img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
                 imgs.append(img)
-                img_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-                try:
-                    lx1, lx2, rx1, rx2, mid = detect_columns(img_bgr)
-                except (ValueError, Exception):
-                    lx1, lx2, rx1, rx2, mid = 0, 0, 0, 0, 0
+                lx1, lx2, rx1, rx2, mid = _safe_detect_columns(img)
                 meta.append((page_idx, fitz_page, pix.width, pix.height, (lx1, lx2, rx1, rx2, mid)))
             return imgs, meta
 
@@ -852,13 +831,29 @@ def scan(
     return doc
 
 
-def _page_num_for_sequence(page: Page) -> int | None:
-    """Return the best page_number to use for sequential checks.
+def _nearest_numbered_neighbor(
+    pages: list[Page],
+    i: int,
+    step: int,
+    max_look: int,
+) -> tuple[int | None, int]:
+    """Scan up to ``max_look`` pages in direction ``step`` from index ``i``.
 
-    For a range like 31-32, both are valid; callers pick based on context.
-    For sequence checking, use page_number (the lower/first value).
+    :param pages: Pages to scan over.
+    :param i: Index to start from (exclusive).
+    :param step: ``-1`` to scan before, ``+1`` to scan after.
+    :param max_look: Maximum distance to search.
+    :returns: ``(page_number, distance)`` of the nearest page with a
+        non-null ``page_number``, or ``(None, 0)`` if none is found.
     """
-    return page.page_number
+    n = len(pages)
+    for dist in range(1, max_look + 1):
+        j = i + step * dist
+        if not 0 <= j < n:
+            return None, 0
+        if pages[j].page_number is not None:
+            return pages[j].page_number, dist
+    return None, 0
 
 
 def _correct_page_numbers(pages: list[Page]) -> None:
@@ -881,23 +876,8 @@ def _correct_page_numbers(pages: list[Page]) -> None:
     for _pass in range(5):  # up to 5 correction passes
         corrections = 0
         for i in range(n):
-            # Find nearest valid neighbor before
-            prev_num = None
-            prev_dist = 0
-            for j in range(i - 1, max(i - max_look - 1, -1), -1):
-                if pages[j].page_number is not None:
-                    prev_num = pages[j].page_number
-                    prev_dist = i - j
-                    break
-
-            # Find nearest valid neighbor after
-            next_num = None
-            next_dist = 0
-            for j in range(i + 1, min(i + max_look + 1, n)):
-                if pages[j].page_number is not None:
-                    next_num = pages[j].page_number
-                    next_dist = j - i
-                    break
+            prev_num, prev_dist = _nearest_numbered_neighbor(pages, i, -1, max_look)
+            next_num, next_dist = _nearest_numbered_neighbor(pages, i, +1, max_look)
 
             if prev_num is None or next_num is None:
                 continue
@@ -1300,6 +1280,279 @@ def _outside_opinion_rects(
             rects.append(fitz.Rect(right_x0, header_bottom, right_x1, footer_top))
 
     return [r for r in rects if r.y0 < r.y1 and r.x0 < r.x1]
+
+
+def _build_opinions_data(
+    opinions: list[tuple[Detection, Detection]],
+    pages_by_index: dict[int, Page],
+    src_pdf: fitz.Document,
+) -> list[dict]:
+    """Serialise paired opinions to the opinions.json dict shape.
+
+    For each ``(caption, key)`` pair this computes the per-page
+    ``_outside_opinion_rects`` and assembles the metadata dict written
+    to ``opinions.json``.
+
+    :param opinions: Paired ``(caption, key)`` detections from
+        :func:`_pair_opinions`.
+    :param pages_by_index: Mapping of page index to :class:`Page`.
+    :param src_pdf: Open source PDF used to look up per-page widths.
+    :returns: List of opinion dicts ready for JSON serialisation.
+    """
+    opinions_data: list[dict] = []
+    for caption, key in opinions:
+        outside_rects: list[dict] = []
+        for pi in range(caption.page_index, key.page_index + 1):
+            page = pages_by_index.get(pi)
+            if page is None:
+                continue
+            is_first = pi == caption.page_index
+            is_last = pi == key.page_index
+            pw = src_pdf[pi].rect.width
+            for rect in _outside_opinion_rects(page, pw, caption, key, is_first, is_last):
+                outside_rects.append(
+                    {
+                        "page_index": pi,
+                        "x0": round(rect.x0, 1),
+                        "y0": round(rect.y0, 1),
+                        "x1": round(rect.x1, 1),
+                        "y1": round(rect.y1, 1),
+                    }
+                )
+        has_image = any(
+            d.label == Label.IMAGE
+            for pi2 in range(caption.page_index, key.page_index + 1)
+            if pi2 in pages_by_index
+            for d in pages_by_index[pi2].detections
+        )
+        opinions_data.append(
+            {
+                "caption_page": caption.page_index,
+                "caption_label": caption.label.name,
+                "caption_bbox": [
+                    round(caption.bbox.x1, 1),
+                    round(caption.bbox.y1, 1),
+                    round(caption.bbox.x2, 1),
+                    round(caption.bbox.y2, 1),
+                ],
+                "key_page": key.page_index,
+                "key_label": key.label.name,
+                "key_bbox": [
+                    round(key.bbox.x1, 1),
+                    round(key.bbox.y1, 1),
+                    round(key.bbox.x2, 1),
+                    round(key.bbox.y2, 1),
+                ],
+                "page_count": key.page_index - caption.page_index + 1,
+                "outside_rects": outside_rects,
+                "has_image": has_image,
+            }
+        )
+    return opinions_data
+
+
+def _make_add_safe(
+    fitz_page,
+    pn_rects: list[fitz.Rect],
+    collector: list[tuple[fitz.Rect, tuple]] | None = None,
+) -> Callable[[fitz.Rect, tuple], None]:
+    """Build a recursive rect-adder that clips around page-number boxes.
+
+    The returned closure adds ``(rect, fill)`` as a PyMuPDF redaction
+    annotation unless the rect intersects any page-number rect, in which
+    case it splits the rect into up-to-four non-overlapping slices and
+    recurses.
+
+    :param fitz_page: Page to attach redaction annotations to.
+    :param pn_rects: Page-number rectangles to preserve (never redact).
+    :param collector: If provided, each ``(rect, fill)`` pair that ends
+        up annotated is also appended here (used for bitonal-safe
+        redaction where the image pixels must be overwritten directly).
+    :returns: The ``add_safe`` closure.
+    """
+
+    def add_safe(rect: fitz.Rect, fill) -> None:
+        if rect.is_empty:
+            return
+        for pn in pn_rects:
+            if rect.intersects(pn):
+                if rect.y0 < pn.y0:
+                    add_safe(fitz.Rect(rect.x0, rect.y0, rect.x1, pn.y0), fill)
+                if rect.y1 > pn.y1:
+                    add_safe(fitz.Rect(rect.x0, pn.y1, rect.x1, rect.y1), fill)
+                top = max(rect.y0, pn.y0)
+                bot = min(rect.y1, pn.y1)
+                if rect.x0 < pn.x0 and top < bot:
+                    add_safe(fitz.Rect(rect.x0, top, pn.x0, bot), fill)
+                if rect.x1 > pn.x1 and top < bot:
+                    add_safe(fitz.Rect(pn.x1, top, rect.x1, bot), fill)
+                return
+        if collector is not None:
+            collector.append((fitz.Rect(rect), fill))
+        fitz_page.add_redact_annot(rect, fill=fill)
+
+    return add_safe
+
+
+_CS_INSET = 3.0
+_CS_MIN_PX = 40
+_CS_MAX_PX = 60
+
+
+def _iter_case_sequence_rects(
+    page: Page,
+    sx: float,
+    sy: float,
+    caption_rects: list[fitz.Rect],
+    excluded: set | None,
+) -> Iterator[fitz.Rect]:
+    """Yield PDF-point redaction rects for every CASE_SEQUENCE detection.
+
+    Applies the 40-60 px clamp, 3 pt inset, and caption-overlap clipping.
+    Skips excluded detections and rects that end up empty.
+
+    :param page: Page whose detections are scanned.
+    :param sx: Horizontal image-to-PDF scale factor.
+    :param sy: Vertical image-to-PDF scale factor.
+    :param caption_rects: PDF-point CASE_CAPTION rects on this page; any
+        CASE_SEQUENCE rect that overlaps a caption is trimmed to the
+        area above it or dropped entirely.
+    :param excluded: Set of excluded detection-bbox tuples, or ``None``.
+    """
+    from blackletter.models import BBox
+
+    for d in page.detections:
+        if d.label != Label.CASE_SEQUENCE:
+            continue
+        if _check_excluded(d, excluded):
+            continue
+        bx0, by0 = d.bbox.x1, d.bbox.y1
+        bx1, by1 = d.bbox.x2, d.bbox.y2
+        cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+        pw = max(_CS_MIN_PX, min(bx1 - bx0, _CS_MAX_PX))
+        ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
+        bx0, bx1 = cx - pw / 2, cx + pw / 2
+        by0, by1 = cy - ph / 2, cy + ph / 2
+        b = BBox(bx0, by0, bx1, by1).to_pdf(sx, sy)
+        rect = fitz.Rect(
+            b.x1 + _CS_INSET,
+            b.y1 + _CS_INSET,
+            b.x2 - _CS_INSET,
+            b.y2 - _CS_INSET,
+        )
+        for cap_r in caption_rects:
+            if rect.intersects(cap_r):
+                if rect.y0 < cap_r.y0:
+                    rect = fitz.Rect(rect.x0, rect.y0, rect.x1, cap_r.y0)
+                else:
+                    rect = fitz.Rect(0, 0, 0, 0)
+        if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
+            continue
+        yield rect
+
+
+def _clip_headnote_rect(
+    fitz_page,
+    rect: fitz.Rect,
+    header_bottom: float,
+    footer_top: float,
+    ocr_applied: bool,
+) -> fitz.Rect | None:
+    """Tighten a headnote rect to page text and clamp it to margin bounds.
+
+    When ``ocr_applied`` is True the rect is only clamped to
+    ``(header_bottom, footer_top)``; when False it is further
+    ``_tighten_to_text``-adjusted and clipped to text bounds on all four
+    sides. Returns ``None`` when the resulting rect has no area.
+
+    :param fitz_page: PyMuPDF page used to measure text bounds.
+    :param rect: Input rect in PDF points.
+    :param header_bottom: Upper Y cut-off (from :func:`_margin_bounds`).
+    :param footer_top: Lower Y cut-off (from :func:`_margin_bounds`).
+    :param ocr_applied: Whether the PDF has a reliable text layer.
+    :returns: The clipped rect, or ``None`` if degenerate.
+    """
+    if not ocr_applied:
+        tight = _tighten_to_text(fitz_page, rect)
+        if tight is not None:
+            rect = tight
+        text_bot = _text_bottom(fitz_page, rect)
+        text_left, text_right = _text_x_bounds(fitz_page, rect)
+        rect = fitz.Rect(
+            max(rect.x0, text_left),
+            max(rect.y0, header_bottom),
+            min(rect.x1, text_right),
+            min(rect.y1, footer_top, text_bot),
+        )
+    else:
+        rect = fitz.Rect(
+            rect.x0,
+            max(rect.y0, header_bottom),
+            rect.x1,
+            min(rect.y1, footer_top),
+        )
+    if rect.y0 < rect.y1 and rect.x0 < rect.x1:
+        return rect
+    return None
+
+
+def _write_detections_sidecar(document: Document, output_dir: Path) -> int:
+    """Serialise all detections to ``output_dir/detections.json``.
+
+    :param document: Source document whose pages/detections are dumped.
+    :param output_dir: Directory to write the sidecar into; created if
+        necessary.
+    :returns: Number of detection rows written.
+    """
+    import json as _json
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rows: list[dict] = []
+    for page in document.pages:
+        for det in page.detections:
+            rows.append(
+                {
+                    "page_index": det.page_index,
+                    "label": det.label.name,
+                    "label_id": int(det.label),
+                    "confidence": round(det.confidence, 3),
+                    "bbox": [
+                        round(det.bbox.x1, 1),
+                        round(det.bbox.y1, 1),
+                        round(det.bbox.x2, 1),
+                        round(det.bbox.y2, 1),
+                    ],
+                    "page_number": page.page_number,
+                    "img_width": page.img_width,
+                    "img_height": page.img_height,
+                }
+            )
+    (output_dir / "detections.json").write_text(_json.dumps(rows))
+    return len(rows)
+
+
+def _write_pages_meta_sidecar(document: Document, output_dir: Path) -> None:
+    """Serialise column bounds and midpoint to ``output_dir/pages_meta.json``.
+
+    :param document: Source document.
+    :param output_dir: Directory to write the sidecar into; created if
+        necessary.
+    """
+    import json as _json
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    meta: dict[int, dict] = {}
+    for page in document.pages:
+        meta[page.index] = {
+            "col_left_x1": page.col_left_x1,
+            "col_left_x2": page.col_left_x2,
+            "col_right_x1": page.col_right_x1,
+            "col_right_x2": page.col_right_x2,
+            "midpoint": page.midpoint,
+        }
+    (output_dir / "pages_meta.json").write_text(_json.dumps(meta))
 
 
 def _mask_outside_opinion(
@@ -1868,64 +2121,8 @@ def split_opinions(
                         tight = _tighten_to_text(fitz_page, r, skip=False)
                         pn_rects.append(tight if tight is not None else r)
 
-                _page_redact_rects = []
-
-                def add_safe(rect: fitz.Rect, fill) -> None:
-                    """Add redaction annotation, clipping around page numbers."""
-                    if rect.is_empty:
-                        return
-                    for pn in pn_rects:
-                        if rect.intersects(pn):
-                            # Split: add parts above/below/left/right of PN
-                            # Top slice
-                            if rect.y0 < pn.y0:
-                                add_safe(
-                                    fitz.Rect(
-                                        rect.x0,
-                                        rect.y0,
-                                        rect.x1,
-                                        pn.y0,
-                                    ),
-                                    fill,
-                                )
-                            # Bottom slice
-                            if rect.y1 > pn.y1:
-                                add_safe(
-                                    fitz.Rect(
-                                        rect.x0,
-                                        pn.y1,
-                                        rect.x1,
-                                        rect.y1,
-                                    ),
-                                    fill,
-                                )
-                            # Left slice (middle band only)
-                            top = max(rect.y0, pn.y0)
-                            bot = min(rect.y1, pn.y1)
-                            if rect.x0 < pn.x0 and top < bot:
-                                add_safe(
-                                    fitz.Rect(
-                                        rect.x0,
-                                        top,
-                                        pn.x0,
-                                        bot,
-                                    ),
-                                    fill,
-                                )
-                            # Right slice (middle band only)
-                            if rect.x1 > pn.x1 and top < bot:
-                                add_safe(
-                                    fitz.Rect(
-                                        pn.x1,
-                                        top,
-                                        rect.x1,
-                                        bot,
-                                    ),
-                                    fill,
-                                )
-                            return
-                    _page_redact_rects.append((fitz.Rect(rect), fill))
-                    fitz_page.add_redact_annot(rect, fill=fill)
+                _page_redact_rects: list[tuple[fitz.Rect, tuple]] = []
+                add_safe = _make_add_safe(fitz_page, pn_rects, collector=_page_redact_rects)
 
                 # White redact: content outside opinion (redacted + masked)
                 if is_first or is_last:
@@ -1942,29 +2139,13 @@ def split_opinions(
                 # Black redact: headnote zone (clipped to actual text)
                 header_bottom, footer_top = _margin_bounds(page)
                 for rect_page_idx, rect in headnote_rects:
-                    if rect_page_idx == src_idx:
-                        if not document.ocr_applied:
-                            tight = _tighten_to_text(fitz_page, rect)
-                            if tight is not None:
-                                rect = tight
-                            text_bot = _text_bottom(fitz_page, rect)
-                            text_left, text_right = _text_x_bounds(fitz_page, rect)
-                            rect = fitz.Rect(
-                                max(rect.x0, text_left),
-                                max(rect.y0, header_bottom),
-                                min(rect.x1, text_right),
-                                min(rect.y1, footer_top, text_bot),
-                            )
-                        else:
-                            # No reliable text layer, just clip to margins
-                            rect = fitz.Rect(
-                                rect.x0,
-                                max(rect.y0, header_bottom),
-                                rect.x1,
-                                min(rect.y1, footer_top),
-                            )
-                        if rect.y0 < rect.y1 and rect.x0 < rect.x1:
-                            add_safe(rect, (0, 0, 0))
+                    if rect_page_idx != src_idx:
+                        continue
+                    clipped = _clip_headnote_rect(
+                        fitz_page, rect, header_bottom, footer_top, document.ocr_applied
+                    )
+                    if clipped is not None:
+                        add_safe(clipped, (0, 0, 0))
 
                 # Per-detection redactions (skip black outside opinion bounds)
                 redact_labels = _REDACT_WHITE | _REDACT_BLACK
