@@ -21,6 +21,8 @@ from blackletter.scanner import (
     _check_excluded,
     _outside_opinion_rects,
     _group_detections_by_page,
+    _collect_page_number_rects,
+    _opinion_page_bounds,
     _make_add_safe,
     _iter_case_sequence_rects,
     _clip_headnote_rect,
@@ -161,13 +163,7 @@ def _build_masked_opinions(
         sx, sy = page.scale_x, page.scale_y
 
         # Collect page number rects — never redact these
-        pn_rects = []
-        for d in page.detections:
-            if d.label == Label.PAGE_NUMBER:
-                b = d.bbox.to_pdf(sx, sy)
-                r = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-                tight = _tighten_to_text(fitz_page, r, skip=False)
-                pn_rects.append(tight if tight is not None else r)
+        pn_rects = _collect_page_number_rects(page, fitz_page, sx, sy)
 
         add_safe = _make_add_safe(fitz_page, pn_rects)
 
@@ -235,8 +231,7 @@ def _build_masked_opinions(
                 sk = d.sort_key(mid)
                 if sk < cap_key or sk > key_key:
                     continue
-            b = d.bbox.to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
             tight = _tighten_to_text(fitz_page, rect, skip=False)
             if tight is not None:
                 rect = tight
@@ -257,8 +252,7 @@ def _build_masked_opinions(
                 continue
             if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
                 continue
-            b = d.bbox.to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
             sk = d.sort_key(mid)
             if sk < cap_key or sk > key_key:
                 add_safe(rect, (1, 1, 1))
@@ -269,8 +263,7 @@ def _build_masked_opinions(
         _caption_rects = []
         for d in page.detections:
             if d.label == Label.CASE_CAPTION:
-                b = d.bbox.to_pdf(sx, sy)
-                _caption_rects.append(fitz.Rect(b.x1, b.y1, b.x2, b.y2))
+                _caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
         for rect in _iter_case_sequence_rects(page, sx, sy, _caption_rects, excluded):
             add_safe(rect, (0, 0, 0))
 
@@ -514,8 +507,7 @@ def compute_redaction_rects(
                 _add_px(src_idx, d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, fill, d.label.name)
             else:
                 # Tighten in PDF coords, convert back to pixels
-                b = d.bbox.to_pdf(sx, sy)
-                rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+                rect = d.bbox.to_fitz_pdf_rect(sx, sy)
                 tight = _tighten_to_text(fitz_page, rect, skip=False)
                 if tight is not None:
                     rect = tight
@@ -534,8 +526,7 @@ def compute_redaction_rects(
         caption_rects = []
         for d in page.detections:
             if d.label == Label.CASE_CAPTION:
-                b = d.bbox.to_pdf(sx, sy)
-                caption_rects.append(fitz.Rect(b.x1, b.y1, b.x2, b.y2))
+                caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
 
         _CS_INSET = 3.0
         _CS_MIN_PX = 40  # min width/height in image pixels
@@ -553,8 +544,7 @@ def compute_redaction_rects(
             ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
             bx0, bx1 = cx - pw / 2, cx + pw / 2
             by0, by1 = cy - ph / 2, cy + ph / 2
-            b = BBox(bx0, by0, bx1, by1).to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            rect = BBox(bx0, by0, bx1, by1).to_fitz_pdf_rect(sx, sy)
             # Small inset
             rect = fitz.Rect(
                 rect.x0 + _CS_INSET,
@@ -635,25 +625,13 @@ def _split_from_redacted(
     _bases: list[str] = []
     for idx, (caption, _key) in enumerate(opinions):
         start_idx, end_idx = page_ranges[idx]
-        start_page = pages_by_index.get(start_idx)
-        end_page = pages_by_index.get(end_idx)
-
-        # Opinion starting on a range page → use end number
-        if start_page and start_page.page_number_end:
-            first_num = start_page.page_number_end
-        elif start_page and start_page.page_number:
-            first_num = start_page.page_number
-        else:
-            first_num = start_idx + first_page
-
-        # Opinion ending on a range page → use first number
-        if end_page and end_page.page_number_end:
-            last_num = end_page.page_number
-        elif end_page and end_page.page_number:
-            last_num = end_page.page_number
-        else:
-            last_num = end_idx + first_page
-
+        first_num, last_num = _opinion_page_bounds(
+            pages_by_index.get(start_idx),
+            pages_by_index.get(end_idx),
+            start_idx,
+            end_idx,
+            first_page,
+        )
         _bases.append(f"{_reporter}.{_volume}.{first_num:04d}-{last_num:04d}")
 
     _name_counts = _Counter(_bases)
@@ -850,20 +828,13 @@ def _build_full_redacted(
         sx, sy = page.scale_x, page.scale_y
 
         # Collect page number rects — never redact these
-        pn_rects = []
-        for d in page.detections:
-            if d.label == Label.PAGE_NUMBER:
-                b = d.bbox.to_pdf(sx, sy)
-                r = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-                tight = _tighten_to_text(fitz_page, r, skip=False)
-                pn_rects.append(tight if tight is not None else r)
+        pn_rects = _collect_page_number_rects(page, fitz_page, sx, sy)
 
         # Collect caption rects — CASE_SEQUENCE must not overlap these
         caption_rects = []
         for d in page.detections:
             if d.label == Label.CASE_CAPTION:
-                b = d.bbox.to_pdf(sx, sy)
-                caption_rects.append(fitz.Rect(b.x1, b.y1, b.x2, b.y2))
+                caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
 
         page_redact_rects: list[tuple[fitz.Rect, tuple]] = []
         add_safe = _make_add_safe(fitz_page, pn_rects, collector=page_redact_rects)
@@ -890,8 +861,7 @@ def _build_full_redacted(
                 continue
             if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
                 continue
-            b = d.bbox.to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
             _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
             if not _skip_tighten:
                 tight = _tighten_to_text(fitz_page, rect, skip=False)
@@ -920,8 +890,7 @@ def _build_full_redacted(
                 continue
             if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
                 continue
-            b = d.bbox.to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
             add_safe(rect, (0, 0, 0))
 
         if is_bitonal and page_redact_rects:
@@ -986,8 +955,7 @@ def _extract_images(document, output_dir: Path) -> int:
         images.sort(key=lambda d: d.sort_key(page.midpoint))
 
         for seq, det in enumerate(images, start=1):
-            b = det.bbox.to_pdf(sx, sy)
-            clip = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            clip = det.bbox.to_fitz_pdf_rect(sx, sy)
             pix = fitz_page.get_pixmap(matrix=mat, clip=clip)
 
             # Use detected page number, fall back to index + first_page

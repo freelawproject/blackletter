@@ -175,16 +175,15 @@ def yolo_scan_chunk(
     from ultralytics import YOLO
 
     from blackletter.models import Label
-    from blackletter.scanner import _safe_detect_columns, _extract_page_number, DPI
+    from blackletter.scanner import _safe_detect_columns, _extract_page_number, DPI, YOLO_BATCH
 
     model = YOLO(str(model_path))
     pdf = fitz.open(str(pdf_path))
     mat = fitz.Matrix(DPI / 72, DPI / 72)
-    BATCH = 4
     pages_data = []
 
-    for bs in range(page_start, page_end, BATCH):
-        be = min(bs + BATCH, page_end)
+    for bs in range(page_start, page_end, YOLO_BATCH):
+        be = min(bs + YOLO_BATCH, page_end)
         imgs = []
         meta = []
         for pi in range(bs, be):

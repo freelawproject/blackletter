@@ -3,6 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import fitz
 
 
 class Label(IntEnum):
@@ -118,6 +122,21 @@ class BBox:
             x2=self.x2 * scale_x,
             y2=self.y2 * scale_y,
         )
+
+    def to_fitz_pdf_rect(self, scale_x: float, scale_y: float) -> fitz.Rect:
+        """Scale to PDF points and wrap as a ``fitz.Rect``.
+
+        Combines :meth:`to_pdf` and ``fitz.Rect(...)`` for the common
+        redaction-pipeline idiom.
+
+        :param scale_x: Horizontal pixels-to-points ratio.
+        :param scale_y: Vertical pixels-to-points ratio.
+        :returns: ``fitz.Rect`` in PDF point coordinates.
+        """
+        import fitz
+
+        b = self.to_pdf(scale_x, scale_y)
+        return fitz.Rect(b.x1, b.y1, b.x2, b.y2)
 
     def _intersection_area(self, other: BBox) -> float:
         """Return the area of the overlap rectangle with ``other`` (``0`` if disjoint)."""

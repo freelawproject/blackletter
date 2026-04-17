@@ -148,8 +148,9 @@ def detect(
 
     model_map = {"small": "small.pt", "medium": "medium.pt", "large": "large.pt"}
 
+    from blackletter.scanner import DPI, YOLO_BATCH
+
     pdf = fitz.open(str(pdf_path))
-    DPI = 200
     mat = fitz.Matrix(DPI / 72, DPI / 72)
     total = pdf.page_count
 
@@ -164,9 +165,8 @@ def detect(
         print(f"  Detecting with {model_name}...", flush=True)
         t0 = time.time()
 
-        BATCH = 4
-        for bs in range(0, total, BATCH):
-            be = min(bs + BATCH, total)
+        for bs in range(0, total, YOLO_BATCH):
+            be = min(bs + YOLO_BATCH, total)
             imgs = []
             metas = []
             for i in range(bs, be):
@@ -195,8 +195,8 @@ def detect(
                             "model": model_name,
                         }
                     )
-            if (bs + BATCH) % 100 == 0 or bs + BATCH >= total:
-                print(f"    {min(bs + BATCH, total)}/{total} pages", flush=True)
+            if (bs + YOLO_BATCH) % 100 == 0 or bs + YOLO_BATCH >= total:
+                print(f"    {min(bs + YOLO_BATCH, total)}/{total} pages", flush=True)
 
         print(f"    {model_name} done ({time.time() - t0:.0f}s)", flush=True)
 
@@ -307,8 +307,8 @@ def pair(
     :returns: List of opinion dicts with page ranges, bboxes, and
         outside_rects.
     """
-    from blackletter.models import Detection as BLDetection, Document, Label, Page
-    from blackletter.scanner import _pair_opinions, _outside_opinion_rects
+    from blackletter.models import Detection as BLDetection, Document, Page
+    from blackletter.scanner import _pair_opinions
 
     pdf_path = Path(pdf_path)
 
@@ -366,76 +366,24 @@ def pair(
         page_ranges.append((caption.page_index, key.page_index))
 
     # Save opinions.json
+    from blackletter.scanner import _build_opinions_data, _opinion_page_bounds
+
     pages_by_index = {p.index: p for p in document.pages}
-    opinions_data = []
-    for idx, (caption, key) in enumerate(opinions):
+    opinions_data = _build_opinions_data(opinions, pages_by_index, src_pdf)
+
+    # Augment each entry with filename-inference fields unique to this API
+    for idx, entry in enumerate(opinions_data):
         start_idx, end_idx = page_ranges[idx]
-        outside_rects = []
-        for pi in range(start_idx, end_idx + 1):
-            pg = pages_by_index.get(pi)
-            if not pg:
-                continue
-            is_first = pi == start_idx
-            is_last = pi == end_idx
-            pw = src_pdf[pi].rect.width if pi < src_pdf.page_count else 612.0
-            for rect in _outside_opinion_rects(pg, pw, caption, key, is_first, is_last):
-                outside_rects.append(
-                    {
-                        "page_index": pi,
-                        "x0": round(rect.x0, 1),
-                        "y0": round(rect.y0, 1),
-                        "x1": round(rect.x1, 1),
-                        "y1": round(rect.y1, 1),
-                    }
-                )
-        has_image = any(
-            d.label == Label.IMAGE
-            for pi2 in range(start_idx, end_idx + 1)
-            if pi2 in pages_by_index
-            for d in pages_by_index[pi2].detections
+        first_num, last_num = _opinion_page_bounds(
+            pages_by_index.get(start_idx),
+            pages_by_index.get(end_idx),
+            start_idx,
+            end_idx,
+            first_page,
         )
-
-        # For naming: opinion starting on a range page uses end number,
-        # ending on a range page uses first number
-        start_page = pages_by_index.get(start_idx)
-        end_page = pages_by_index.get(end_idx)
-        if start_page and start_page.page_number_end:
-            first_num = start_page.page_number_end
-        elif start_page and start_page.page_number:
-            first_num = start_page.page_number
-        else:
-            first_num = start_idx + first_page
-        if end_page and end_page.page_number_end:
-            last_num = end_page.page_number
-        elif end_page and end_page.page_number:
-            last_num = end_page.page_number
-        else:
-            last_num = end_idx + first_page
-
-        opinions_data.append(
-            {
-                "caption_page": caption.page_index,
-                "caption_bbox": [
-                    round(caption.bbox.x1, 1),
-                    round(caption.bbox.y1, 1),
-                    round(caption.bbox.x2, 1),
-                    round(caption.bbox.y2, 1),
-                ],
-                "key_page": key.page_index,
-                "key_bbox": [
-                    round(key.bbox.x1, 1),
-                    round(key.bbox.y1, 1),
-                    round(key.bbox.x2, 1),
-                    round(key.bbox.y2, 1),
-                ],
-                "end_page": end_idx,
-                "page_count": end_idx - start_idx + 1,
-                "first_page_number": first_num,
-                "last_page_number": last_num,
-                "outside_rects": outside_rects,
-                "has_image": has_image,
-            }
-        )
+        entry["end_page"] = end_idx
+        entry["first_page_number"] = first_num
+        entry["last_page_number"] = last_num
 
     src_pdf.close()
 

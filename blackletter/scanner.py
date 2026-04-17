@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 
 DPI = 200
 CONFIDENCE_THRESHOLD = 0.20
+YOLO_BATCH = 4
 
 # Per-label minimum confidence for drawing/output (overrides default).
 LABEL_CONFIDENCE: dict[Label, float] = {
@@ -750,7 +751,6 @@ def scan(
 
     else:
         # Single-process path for small documents
-        BATCH_SIZE = 4
         mat = fitz.Matrix(DPI / 72, DPI / 72)
 
         def _render_batch(start: int, end: int):
@@ -801,8 +801,7 @@ def scan(
                 ]
                 pn_dets.sort(key=lambda d: d.confidence, reverse=True)
                 for pn_det in pn_dets:
-                    b = pn_det.bbox.to_pdf(page.scale_x, page.scale_y)
-                    rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+                    rect = pn_det.bbox.to_fitz_pdf_rect(page.scale_x, page.scale_y)
                     result = _extract_page_number(fitz_page, rect, hint=page_idx + first_page)
                     if result is not None:
                         page.page_number, page.page_number_end = result
@@ -810,7 +809,7 @@ def scan(
 
         from concurrent.futures import ThreadPoolExecutor
 
-        batches = [(s, min(s + BATCH_SIZE, total_pages)) for s in range(0, total_pages, BATCH_SIZE)]
+        batches = [(s, min(s + YOLO_BATCH, total_pages)) for s in range(0, total_pages, YOLO_BATCH)]
         with ThreadPoolExecutor(max_workers=1) as render_pool:
             next_future = render_pool.submit(_render_batch, *batches[0])
             for i, (batch_start, batch_end) in enumerate(batches):
@@ -1109,8 +1108,7 @@ def _draw_boxes(
     # First pass: compute all rects (tightened where possible)
     items: list[tuple[Detection, fitz.Rect]] = []
     for det in dets:
-        b = det.bbox.to_pdf(page.scale_x, page.scale_y)
-        rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+        rect = det.bbox.to_fitz_pdf_rect(page.scale_x, page.scale_y)
         if fitz_page is not None and det.label != Label.KEY_ICON:
             tight = _tighten_to_text(fitz_page, rect)
             if tight is not None:
@@ -1349,6 +1347,72 @@ def _build_opinions_data(
             }
         )
     return opinions_data
+
+
+def _opinion_page_bounds(
+    start_page: Page | None,
+    end_page: Page | None,
+    start_idx: int,
+    end_idx: int,
+    first_page: int,
+) -> tuple[int, int]:
+    """Infer the ``(first_num, last_num)`` pair for an opinion's filename.
+
+    When a page reports a numeric range (via ``page_number_end``), an
+    opinion starting on that page uses the **end** of the range and one
+    ending on that page uses the **start** of the range. Pages with no
+    OCR'd page number fall back to ``index + first_page``.
+
+    :param start_page: Page where the opinion's caption lives (``None``
+        if the page is missing from ``pages_by_index``).
+    :param end_page: Page where the opinion's key lives.
+    :param start_idx: 0-based page index of the opinion's first page.
+    :param end_idx: 0-based page index of the opinion's last page.
+    :param first_page: Logical first page number of the document.
+    :returns: ``(first_num, last_num)`` pair for the filename.
+    """
+    if start_page is not None and start_page.page_number_end:
+        first_num = start_page.page_number_end
+    elif start_page is not None and start_page.page_number:
+        first_num = start_page.page_number
+    else:
+        first_num = start_idx + first_page
+
+    if end_page is not None and end_page.page_number_end and end_page.page_number is not None:
+        last_num = end_page.page_number
+    elif end_page is not None and end_page.page_number is not None and end_page.page_number:
+        last_num = end_page.page_number
+    else:
+        last_num = end_idx + first_page
+
+    return first_num, last_num
+
+
+def _collect_page_number_rects(
+    page: Page,
+    fitz_page,
+    sx: float,
+    sy: float,
+) -> list[fitz.Rect]:
+    """Return PDF-point rects for every ``PAGE_NUMBER`` detection on ``page``.
+
+    Each rect is tightened to the actual page-number text (via
+    :func:`_tighten_to_text`) when possible, falling back to the raw
+    scaled bbox otherwise. Callers use the result to protect page-number
+    regions from being redacted (see :func:`_make_add_safe`).
+
+    :param page: Source page.
+    :param fitz_page: Corresponding PyMuPDF page for text-tightening.
+    :param sx: Horizontal pixel-to-PDF scale factor.
+    :param sy: Vertical pixel-to-PDF scale factor.
+    """
+    pn_rects: list[fitz.Rect] = []
+    for d in page.detections:
+        if d.label == Label.PAGE_NUMBER:
+            r = d.bbox.to_fitz_pdf_rect(sx, sy)
+            tight = _tighten_to_text(fitz_page, r, skip=False)
+            pn_rects.append(tight if tight is not None else r)
+    return pn_rects
 
 
 def _make_add_safe(
@@ -1882,8 +1946,7 @@ def _extract_opinion_footnotes(
     for det in deduped:
         page = pages_by_index[det.page_index]
         sx, sy = page.scale_x, page.scale_y
-        b = det.bbox.to_pdf(sx, sy)
-        full_clip = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+        full_clip = det.bbox.to_fitz_pdf_rect(sx, sy)
 
         if full_clip.is_empty:
             continue
@@ -2044,25 +2107,13 @@ def split_opinions(
     base_names: list[str] = []
     for idx, (caption, _key) in enumerate(opinions):
         start_idx, end_idx = page_ranges[idx]
-        start_page = pages_by_index.get(start_idx)
-        end_page = pages_by_index.get(end_idx)
-
-        # Opinion starting on a range page → use end number
-        if start_page and start_page.page_number_end:
-            first_num = start_page.page_number_end
-        elif start_page and start_page.page_number:
-            first_num = start_page.page_number
-        else:
-            first_num = start_idx + first_page
-
-        # Opinion ending on a range page → use first number
-        if end_page and end_page.page_number_end:
-            last_num = end_page.page_number
-        elif end_page and end_page.page_number:
-            last_num = end_page.page_number
-        else:
-            last_num = end_idx + first_page
-
+        first_num, last_num = _opinion_page_bounds(
+            pages_by_index.get(start_idx),
+            pages_by_index.get(end_idx),
+            start_idx,
+            end_idx,
+            first_page,
+        )
         base_names.append(f"{prefix}{first_num:04d}-{last_num:04d}")
 
     name_counts = Counter(base_names)
@@ -2147,13 +2198,7 @@ def split_opinions(
                 sx, sy = page.scale_x, page.scale_y
 
                 # Collect page number rects (these must never be redacted)
-                pn_rects = []
-                for d in page.detections:
-                    if d.label == Label.PAGE_NUMBER:
-                        b = d.bbox.to_pdf(sx, sy)
-                        r = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-                        tight = _tighten_to_text(fitz_page, r, skip=False)
-                        pn_rects.append(tight if tight is not None else r)
+                pn_rects = _collect_page_number_rects(page, fitz_page, sx, sy)
 
                 _page_redact_rects: list[tuple[fitz.Rect, tuple]] = []
                 add_safe = _make_add_safe(fitz_page, pn_rects, collector=_page_redact_rects)
@@ -2199,8 +2244,7 @@ def split_opinions(
                         sk = d.sort_key(mid)
                         if sk < cap_key or sk > key_key:
                             continue
-                    b = d.bbox.to_pdf(sx, sy)
-                    rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+                    rect = d.bbox.to_fitz_pdf_rect(sx, sy)
                     tight = _tighten_to_text(fitz_page, rect, skip=False)
                     if tight is not None:
                         rect = tight
@@ -2227,8 +2271,7 @@ def split_opinions(
                         CONFIDENCE_THRESHOLD,
                     ):
                         continue
-                    b = d.bbox.to_pdf(sx, sy)
-                    rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+                    rect = d.bbox.to_fitz_pdf_rect(sx, sy)
                     sk = d.sort_key(mid)
                     if sk < cap_key or sk > key_key:
                         # Outside opinion bounds, always white
