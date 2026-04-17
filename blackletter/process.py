@@ -20,6 +20,13 @@ from blackletter.scanner import (
     _pair_opinions,
     _check_excluded,
     _outside_opinion_rects,
+    _group_detections_by_page,
+    _collect_page_number_rects,
+    _opinion_page_bounds,
+    _make_add_safe,
+    _iter_case_sequence_rects,
+    _clip_headnote_rect,
+    _write_pages_meta_sidecar,
     _margin_bounds,
     _find_redaction_end,
     _headnote_fallback_rects,
@@ -156,31 +163,9 @@ def _build_masked_opinions(
         sx, sy = page.scale_x, page.scale_y
 
         # Collect page number rects — never redact these
-        pn_rects = []
-        for d in page.detections:
-            if d.label == Label.PAGE_NUMBER:
-                b = d.bbox.to_pdf(sx, sy)
-                r = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-                tight = _tighten_to_text(fitz_page, r, skip=False)
-                pn_rects.append(tight if tight is not None else r)
+        pn_rects = _collect_page_number_rects(page, fitz_page, sx, sy)
 
-        def add_safe(rect: fitz.Rect, fill) -> None:
-            if rect.is_empty:
-                return
-            for pn in pn_rects:
-                if rect.intersects(pn):
-                    if rect.y0 < pn.y0:
-                        add_safe(fitz.Rect(rect.x0, rect.y0, rect.x1, pn.y0), fill)
-                    if rect.y1 > pn.y1:
-                        add_safe(fitz.Rect(rect.x0, pn.y1, rect.x1, rect.y1), fill)
-                    top = max(rect.y0, pn.y0)
-                    bot = min(rect.y1, pn.y1)
-                    if rect.x0 < pn.x0 and top < bot:
-                        add_safe(fitz.Rect(rect.x0, top, pn.x0, bot), fill)
-                    if rect.x1 > pn.x1 and top < bot:
-                        add_safe(fitz.Rect(pn.x1, top, rect.x1, bot), fill)
-                    return
-            fitz_page.add_redact_annot(rect, fill=fill)
+        add_safe = _make_add_safe(fitz_page, pn_rects)
 
         # Outside-opinion whiteout: treat the group as one mega-opinion
         # from first caption to last key
@@ -222,28 +207,13 @@ def _build_masked_opinions(
             if headnote_rects:
                 header_bottom, footer_top = _margin_bounds(page)
                 for rect_page_idx, rect in headnote_rects:
-                    if rect_page_idx == src_page_idx:
-                        if not document.ocr_applied:
-                            tight = _tighten_to_text(fitz_page, rect)
-                            if tight is not None:
-                                rect = tight
-                            text_bot = _text_bottom(fitz_page, rect)
-                            text_left, text_right = _text_x_bounds(fitz_page, rect)
-                            rect = fitz.Rect(
-                                max(rect.x0, text_left),
-                                max(rect.y0, header_bottom),
-                                min(rect.x1, text_right),
-                                min(rect.y1, footer_top, text_bot),
-                            )
-                        else:
-                            rect = fitz.Rect(
-                                rect.x0,
-                                max(rect.y0, header_bottom),
-                                rect.x1,
-                                min(rect.y1, footer_top),
-                            )
-                        if rect.y0 < rect.y1 and rect.x0 < rect.x1:
-                            add_safe(rect, (0, 0, 0))
+                    if rect_page_idx != src_page_idx:
+                        continue
+                    clipped = _clip_headnote_rect(
+                        fitz_page, rect, header_bottom, footer_top, document.ocr_applied
+                    )
+                    if clipped is not None:
+                        add_safe(clipped, (0, 0, 0))
 
         # Per-detection redactions (within the mega-span)
         # STATE_ABBREVIATION lives above the first caption so treat it like
@@ -261,8 +231,7 @@ def _build_masked_opinions(
                 sk = d.sort_key(mid)
                 if sk < cap_key or sk > key_key:
                     continue
-            b = d.bbox.to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
             tight = _tighten_to_text(fitz_page, rect, skip=False)
             if tight is not None:
                 rect = tight
@@ -283,8 +252,7 @@ def _build_masked_opinions(
                 continue
             if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
                 continue
-            b = d.bbox.to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
             sk = d.sort_key(mid)
             if sk < cap_key or sk > key_key:
                 add_safe(rect, (1, 1, 1))
@@ -295,39 +263,8 @@ def _build_masked_opinions(
         _caption_rects = []
         for d in page.detections:
             if d.label == Label.CASE_CAPTION:
-                b = d.bbox.to_pdf(sx, sy)
-                _caption_rects.append(fitz.Rect(b.x1, b.y1, b.x2, b.y2))
-        _CS_INSET = 3.0
-        _CS_MIN_PX, _CS_MAX_PX = 40, 60
-        for d in page.detections:
-            if d.label != Label.CASE_SEQUENCE:
-                continue
-            if _check_excluded(d, excluded):
-                continue
-            bx0, by0 = d.bbox.x1, d.bbox.y1
-            bx1, by1 = d.bbox.x2, d.bbox.y2
-            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
-            pw = max(_CS_MIN_PX, min(bx1 - bx0, _CS_MAX_PX))
-            ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
-            bx0, bx1 = cx - pw / 2, cx + pw / 2
-            by0, by1 = cy - ph / 2, cy + ph / 2
-            from blackletter.models import BBox as _BBox
-
-            b = _BBox(bx0, by0, bx1, by1).to_pdf(sx, sy)
-            rect = fitz.Rect(
-                b.x1 + _CS_INSET,
-                b.y1 + _CS_INSET,
-                b.x2 - _CS_INSET,
-                b.y2 - _CS_INSET,
-            )
-            for cap_r in _caption_rects:
-                if rect.intersects(cap_r):
-                    if rect.y0 < cap_r.y0:
-                        rect = fitz.Rect(rect.x0, rect.y0, rect.x1, cap_r.y0)
-                    else:
-                        rect = fitz.Rect(0, 0, 0, 0)
-            if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
-                continue
+                _caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
+        for rect in _iter_case_sequence_rects(page, sx, sy, _caption_rects, excluded):
             add_safe(rect, (0, 0, 0))
 
         fitz_page.apply_redactions()
@@ -570,8 +507,7 @@ def compute_redaction_rects(
                 _add_px(src_idx, d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, fill, d.label.name)
             else:
                 # Tighten in PDF coords, convert back to pixels
-                b = d.bbox.to_pdf(sx, sy)
-                rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+                rect = d.bbox.to_fitz_pdf_rect(sx, sy)
                 tight = _tighten_to_text(fitz_page, rect, skip=False)
                 if tight is not None:
                     rect = tight
@@ -590,8 +526,7 @@ def compute_redaction_rects(
         caption_rects = []
         for d in page.detections:
             if d.label == Label.CASE_CAPTION:
-                b = d.bbox.to_pdf(sx, sy)
-                caption_rects.append(fitz.Rect(b.x1, b.y1, b.x2, b.y2))
+                caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
 
         _CS_INSET = 3.0
         _CS_MIN_PX = 40  # min width/height in image pixels
@@ -609,8 +544,7 @@ def compute_redaction_rects(
             ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
             bx0, bx1 = cx - pw / 2, cx + pw / 2
             by0, by1 = cy - ph / 2, cy + ph / 2
-            b = BBox(bx0, by0, bx1, by1).to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            rect = BBox(bx0, by0, bx1, by1).to_fitz_pdf_rect(sx, sy)
             # Small inset
             rect = fitz.Rect(
                 rect.x0 + _CS_INSET,
@@ -691,25 +625,13 @@ def _split_from_redacted(
     _bases: list[str] = []
     for idx, (caption, _key) in enumerate(opinions):
         start_idx, end_idx = page_ranges[idx]
-        start_page = pages_by_index.get(start_idx)
-        end_page = pages_by_index.get(end_idx)
-
-        # Opinion starting on a range page → use end number
-        if start_page and start_page.page_number_end:
-            first_num = start_page.page_number_end
-        elif start_page and start_page.page_number:
-            first_num = start_page.page_number
-        else:
-            first_num = start_idx + first_page
-
-        # Opinion ending on a range page → use first number
-        if end_page and end_page.page_number_end:
-            last_num = end_page.page_number
-        elif end_page and end_page.page_number:
-            last_num = end_page.page_number
-        else:
-            last_num = end_idx + first_page
-
+        first_num, last_num = _opinion_page_bounds(
+            pages_by_index.get(start_idx),
+            pages_by_index.get(end_idx),
+            start_idx,
+            end_idx,
+            first_page,
+        )
         _bases.append(f"{_reporter}.{_volume}.{first_num:04d}-{last_num:04d}")
 
     _name_counts = _Counter(_bases)
@@ -906,59 +828,30 @@ def _build_full_redacted(
         sx, sy = page.scale_x, page.scale_y
 
         # Collect page number rects — never redact these
-        pn_rects = []
-        for d in page.detections:
-            if d.label == Label.PAGE_NUMBER:
-                b = d.bbox.to_pdf(sx, sy)
-                r = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-                tight = _tighten_to_text(fitz_page, r, skip=False)
-                pn_rects.append(tight if tight is not None else r)
+        pn_rects = _collect_page_number_rects(page, fitz_page, sx, sy)
 
         # Collect caption rects — CASE_SEQUENCE must not overlap these
         caption_rects = []
         for d in page.detections:
             if d.label == Label.CASE_CAPTION:
-                b = d.bbox.to_pdf(sx, sy)
-                caption_rects.append(fitz.Rect(b.x1, b.y1, b.x2, b.y2))
+                caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
 
-        page_redact_rects = []
-
-        def add_safe(rect: fitz.Rect, fill) -> None:
-            if rect.is_empty:
-                return
-            for pn in pn_rects:
-                if rect.intersects(pn):
-                    if rect.y0 < pn.y0:
-                        add_safe(fitz.Rect(rect.x0, rect.y0, rect.x1, pn.y0), fill)
-                    if rect.y1 > pn.y1:
-                        add_safe(fitz.Rect(rect.x0, pn.y1, rect.x1, rect.y1), fill)
-                    top = max(rect.y0, pn.y0)
-                    bot = min(rect.y1, pn.y1)
-                    if rect.x0 < pn.x0 and top < bot:
-                        add_safe(fitz.Rect(rect.x0, top, pn.x0, bot), fill)
-                    if rect.x1 > pn.x1 and top < bot:
-                        add_safe(fitz.Rect(pn.x1, top, rect.x1, bot), fill)
-                    return
-            page_redact_rects.append((fitz.Rect(rect), fill))
-            fitz_page.add_redact_annot(rect, fill=fill)
+        page_redact_rects: list[tuple[fitz.Rect, tuple]] = []
+        add_safe = _make_add_safe(fitz_page, pn_rects, collector=page_redact_rects)
 
         # Headnote blackout
         header_bottom, footer_top = _margin_bounds(page)
         for rect_page_idx, rect in all_headnote_rects:
-            if rect_page_idx == src_idx:
-                tight = _tighten_to_text(fitz_page, rect)
-                if tight is not None:
-                    rect = tight
-                text_bot = _text_bottom(fitz_page, rect)
-                text_left, text_right = _text_x_bounds(fitz_page, rect)
-                rect = fitz.Rect(
-                    max(rect.x0, text_left),
-                    max(rect.y0, header_bottom),
-                    min(rect.x1, text_right),
-                    min(rect.y1, footer_top, text_bot),
-                )
-                if rect.y0 < rect.y1 and rect.x0 < rect.x1:
-                    add_safe(rect, (0, 0, 0))
+            if rect_page_idx != src_idx:
+                continue
+            # `_build_full_redacted` always runs on post-OCR PDFs so text bounds
+            # are reliable; match that by passing ocr_applied=False to get the
+            # text-tightening branch.
+            clipped = _clip_headnote_rect(
+                fitz_page, rect, header_bottom, footer_top, ocr_applied=False
+            )
+            if clipped is not None:
+                add_safe(clipped, (0, 0, 0))
 
         # Per-detection redactions
         for d in page.detections:
@@ -968,8 +861,7 @@ def _build_full_redacted(
                 continue
             if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
                 continue
-            b = d.bbox.to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
             _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
             if not _skip_tighten:
                 tight = _tighten_to_text(fitz_page, rect, skip=False)
@@ -979,43 +871,7 @@ def _build_full_redacted(
             add_safe(rect, fill)
 
         # CASE_SEQUENCE: redact black, but never overlap CASE_CAPTION
-        _CS_INSET = 3.0
-        _CS_MIN_PX = 40
-        _CS_MAX_PX = 60
-        for d in page.detections:
-            if d.label != Label.CASE_SEQUENCE:
-                continue
-            if _check_excluded(d, excluded):
-                continue
-            # Clamp to min/max pixels, then convert to PDF points
-            bx0, by0 = d.bbox.x1, d.bbox.y1
-            bx1, by1 = d.bbox.x2, d.bbox.y2
-            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
-            pw = max(_CS_MIN_PX, min(bx1 - bx0, _CS_MAX_PX))
-            ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
-            bx0, bx1 = cx - pw / 2, cx + pw / 2
-            by0, by1 = cy - ph / 2, cy + ph / 2
-            from blackletter.models import BBox
-
-            b = BBox(bx0, by0, bx1, by1).to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
-            rect = fitz.Rect(
-                rect.x0 + _CS_INSET,
-                rect.y0 + _CS_INSET,
-                rect.x1 - _CS_INSET,
-                rect.y1 - _CS_INSET,
-            )
-            # Clip away any overlap with caption rects
-            for cap_r in caption_rects:
-                if rect.intersects(cap_r):
-                    if rect.y0 < cap_r.y0:
-                        # Sequence box hangs into the caption from above — trim its bottom
-                        rect = fitz.Rect(rect.x0, rect.y0, rect.x1, cap_r.y0)
-                    else:
-                        # Sequence box starts inside the caption — skip entirely
-                        rect = fitz.Rect(0, 0, 0, 0)
-            if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
-                continue
+        for rect in _iter_case_sequence_rects(page, sx, sy, caption_rects, excluded):
             add_safe(rect, (0, 0, 0))
 
         # Key icon redactions (always black, ratio-filtered only)
@@ -1034,8 +890,7 @@ def _build_full_redacted(
                 continue
             if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
                 continue
-            b = d.bbox.to_pdf(sx, sy)
-            rect = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
             add_safe(rect, (0, 0, 0))
 
         if is_bitonal and page_redact_rects:
@@ -1100,8 +955,7 @@ def _extract_images(document, output_dir: Path) -> int:
         images.sort(key=lambda d: d.sort_key(page.midpoint))
 
         for seq, det in enumerate(images, start=1):
-            b = det.bbox.to_pdf(sx, sy)
-            clip = fitz.Rect(b.x1, b.y1, b.x2, b.y2)
+            clip = det.bbox.to_fitz_pdf_rect(sx, sy)
             pix = fitz_page.get_pixmap(matrix=mat, clip=clip)
 
             # Use detected page number, fall back to index + first_page
@@ -1215,7 +1069,8 @@ def cmd_process(args: argparse.Namespace) -> None:
     shrink = not getattr(args, "no_shrink", False)
 
     # Build output name: reporter.volume.firstpage.lastpage
-    page_count = len(fitz.open(str(args.pdf)))
+    with fitz.open(str(args.pdf)) as _pdf_for_count:
+        page_count = len(_pdf_for_count)
     # Prefer the last_page from filename parsing over computing from page count
     last_page = inferred.get("last_page") or (args.first_page + page_count - 1)
     parts = []
@@ -1280,17 +1135,7 @@ def cmd_process(args: argparse.Namespace) -> None:
     print(f"  Saved {len(detections_data)} detections to {detections_path.name}")
 
     # Save page metadata (column bounds, midpoint) for re-pair
-    pages_meta = {}
-    for _page in document.pages:
-        pages_meta[_page.index] = {
-            "col_left_x1": _page.col_left_x1,
-            "col_left_x2": _page.col_left_x2,
-            "col_right_x1": _page.col_right_x1,
-            "col_right_x2": _page.col_right_x2,
-            "midpoint": _page.midpoint,
-        }
-    with open(base_dir / "pages_meta.json", "w") as _f:
-        _json.dump(pages_meta, _f)
+    _write_pages_meta_sidecar(document, base_dir)
 
     # ── Auto-fill missing STATE_ABBREVIATION with large model ──
     _pages_by_idx = {p.index: p for p in document.pages}
@@ -1366,56 +1211,6 @@ def cmd_process(args: argparse.Namespace) -> None:
     print("\nPairing opinions...", flush=True)
     opinions = _pair_opinions(document, excluded=excluded)
     print(f"  Found {len(opinions)} opinions ({_time.time() - _t0:.0f}s)", flush=True)
-
-    pages_by_index = {p.index: p for p in document.pages}
-    _src_pdf = fitz.open(str(document.pdf_path))
-    opinions_data = []
-    for caption, key in opinions:
-        # Compute outside-opinion rects for each page in this opinion
-        outside_rects = []
-        for pi in range(caption.page_index, key.page_index + 1):
-            page = pages_by_index[pi]
-            is_first = pi == caption.page_index
-            is_last = pi == key.page_index
-            pw = _src_pdf[pi].rect.width
-            for rect in _outside_opinion_rects(page, pw, caption, key, is_first, is_last):
-                outside_rects.append(
-                    {
-                        "page_index": pi,
-                        "x0": round(rect.x0, 1),
-                        "y0": round(rect.y0, 1),
-                        "x1": round(rect.x1, 1),
-                        "y1": round(rect.y1, 1),
-                    }
-                )
-        opinions_data.append(
-            {
-                "caption_page": caption.page_index,
-                "caption_label": caption.label.name,
-                "caption_bbox": [
-                    round(caption.bbox.x1, 1),
-                    round(caption.bbox.y1, 1),
-                    round(caption.bbox.x2, 1),
-                    round(caption.bbox.y2, 1),
-                ],
-                "key_page": key.page_index,
-                "key_label": key.label.name,
-                "key_bbox": [
-                    round(key.bbox.x1, 1),
-                    round(key.bbox.y1, 1),
-                    round(key.bbox.x2, 1),
-                    round(key.bbox.y2, 1),
-                ],
-                "page_count": key.page_index - caption.page_index + 1,
-                "outside_rects": outside_rects,
-                "has_image": any(
-                    d.label == Label.IMAGE
-                    for pi2 in range(caption.page_index, key.page_index + 1)
-                    for d in pages_by_index[pi2].detections
-                ),
-            }
-        )
-    _src_pdf.close()
 
     # ── Precompute redaction rects (with tightening) for review ──
     _t0 = _time.time()
@@ -1765,7 +1560,7 @@ def rebuild_full_redacted_from_detections(
     (with optional exclusions), and calls _build_full_redacted.
     """
     import json as _json
-    from blackletter.models import BBox, Detection, Document, Label, Page
+    from blackletter.models import Detection, Document, Page
 
     detections_json_path = Path(detections_json_path)
     ocr_pdf_path = Path(ocr_pdf_path)
@@ -1782,17 +1577,7 @@ def rebuild_full_redacted_from_detections(
     src_pdf.close()
 
     # Group detections by page_index
-    pages_data: dict[int, dict] = {}
-    for entry in raw:
-        pi = entry["page_index"]
-        if pi not in pages_data:
-            pages_data[pi] = {
-                "page_number": entry.get("page_number"),
-                "img_width": entry.get("img_width", 1),
-                "img_height": entry.get("img_height", 1),
-                "detections": [],
-            }
-        pages_data[pi]["detections"].append(entry)
+    pages_data = _group_detections_by_page(raw)
 
     pages = []
     for pi in sorted(pages_data.keys()):
@@ -1807,15 +1592,7 @@ def rebuild_full_redacted_from_detections(
             page_number=pd["page_number"],
         )
         for d in pd["detections"]:
-            bbox = d["bbox"]
-            page.detections.append(
-                Detection(
-                    bbox=BBox(bbox[0], bbox[1], bbox[2], bbox[3]),
-                    label=Label(d["label_id"]),
-                    confidence=d["confidence"],
-                    page_index=pi,
-                )
-            )
+            page.detections.append(Detection.from_raw_dict(d, pi))
         pages.append(page)
 
     document = Document(
@@ -1921,7 +1698,7 @@ def generate_files(
     """
     import json as _json
     import time as _time
-    from blackletter.models import BBox, Detection, Document, Label, Page
+    from blackletter.models import Detection, Document, Page
 
     _t_total = _time.time()
     ocr_pdf = Path(ocr_pdf)
@@ -1957,18 +1734,7 @@ def generate_files(
         page_dims[i] = (r.width, r.height)
     src_pdf.close()
 
-    pages_data: dict[int, dict] = {}
-    for entry in raw:
-        pi = entry["page_index"]
-        if pi not in pages_data:
-            pages_data[pi] = {
-                "page_number": entry.get("page_number"),
-                "page_number_end": entry.get("page_number_end"),
-                "img_width": entry.get("img_width", 1),
-                "img_height": entry.get("img_height", 1),
-                "detections": [],
-            }
-        pages_data[pi]["detections"].append(entry)
+    pages_data = _group_detections_by_page(raw, include_page_number_end=True)
 
     # Load page metadata (column bounds) if available
     _pages_meta = {}
@@ -1997,15 +1763,7 @@ def generate_files(
             midpoint=meta.get("midpoint", 0),
         )
         for d in pd["detections"]:
-            bbox_raw = d.get("bbox", [0, 0, 1, 1])
-            page.detections.append(
-                Detection(
-                    bbox=BBox(x1=bbox_raw[0], y1=bbox_raw[1], x2=bbox_raw[2], y2=bbox_raw[3]),
-                    label=Label(d["label_id"]),
-                    confidence=d["confidence"],
-                    page_index=pi,
-                )
-            )
+            page.detections.append(Detection.from_raw_dict(d, pi, bbox_default=[0, 0, 1, 1]))
         # Fill in missing page numbers from first_page offset
         if page.page_number is None:
             page.page_number = pi + first_page

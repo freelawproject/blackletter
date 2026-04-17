@@ -10,15 +10,17 @@ Usage:
     ocr_pdf = ocr(bitonal_pdf, output_dir)
     detections = detect(bitonal_pdf, output_dir, models=["medium", "large"])
     opinions = pair(detections, ocr_pdf, reporter="a3d", volume="333", first_page=1)
-    rects = compute_rects(opinions, detections, ocr_pdf)
-    redacted_pdf = build_redacted(ocr_pdf, rects, output_dir)
-    opinion_files = split_opinions(ocr_pdf, opinions, rects, output_dir)
+    rects = compute_rects(ocr_pdf, output_dir)
+    redacted_pdf = build_redacted(ocr_pdf, output_dir)
+    opinion_files = split_opinions(ocr_pdf, output_dir, opinions=opinions)
 """
 
 from __future__ import annotations
 
 import json
 import time
+from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
 
 import fitz
@@ -29,18 +31,19 @@ def bitonal(
     output_dir: str | Path,
     dpi: int = 200,
     threshold: int = 160,
-    progress_callback=None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> Path:
     """Convert a PDF to bitonal (CCITT G4 TIFF images).
 
-    Args:
-        progress_callback: Optional callable(current, total, message)
-
-    Returns path to the bitonal PDF.
+    :param pdf_path: Path to the source PDF.
+    :param output_dir: Directory to write bitonal.pdf into.
+    :param dpi: Rendering resolution for rasterisation.
+    :param threshold: Grayscale threshold (0-255) for binarisation.
+    :param progress_callback: Optional callable(current, total, message)
+        invoked during processing.
+    :returns: Path to the bitonal PDF.
     """
-    import io
-    import numpy as np
-    from PIL import Image
+    from blackletter.ocr import _render_bitonal_page
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -52,14 +55,7 @@ def bitonal(
     total = src.page_count
 
     for i in range(total):
-        page = src[i]
-        new_page = out.new_page(width=page.rect.width, height=page.rect.height)
-        pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
-        gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-        bw = Image.fromarray((gray > threshold).astype(np.uint8) * 255).convert("1")
-        buf = io.BytesIO()
-        bw.save(buf, format="TIFF", compression="group4")
-        new_page.insert_image(new_page.rect, stream=buf.getvalue())
+        _render_bitonal_page(src[i], out, dpi, threshold)
         if progress_callback and ((i + 1) % 10 == 0 or i == total - 1):
             progress_callback(i + 1, total, f"Bitonal: {i + 1}/{total} pages")
         if (i + 1) % 50 == 0 or i == total - 1:
@@ -82,25 +78,28 @@ def ocr(
 ) -> Path:
     """OCR a PDF (add text layer via ocrmypdf/Tesseract).
 
-    Returns path to the OCR'd PDF.
+    :param pdf_path: Path to the source PDF.
+    :param output_dir: Directory to write the OCR'd PDF into.
+    :param reporter: Reporter abbreviation for the output filename.
+    :param volume: Volume number for the output filename.
+    :param first_page: First page number (used to build the output filename).
+    :param language: Tesseract language code.
+    :returns: Path to the OCR'd PDF.
     """
-    import logging
+    from blackletter.ocr import _silence_ocr_loggers
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
 
     # Build scan name
-    total_pages = fitz.open(str(pdf_path)).page_count
+    with fitz.open(str(pdf_path)) as src:
+        total_pages = src.page_count
     last_page = first_page + total_pages - 1
     parts = [p for p in [reporter, str(volume), str(first_page), str(last_page)] if p]
     scan_name = ".".join(parts) if parts else pdf_path.stem
     output_path = output_dir / f"{scan_name}.pdf"
 
-    for name in ("pikepdf", "fontTools", "fontTools.subset", "fontTools.ttLib", "ocrmypdf"):
-        logging.getLogger(name).setLevel(logging.ERROR)
-    for _n in list(logging.root.manager.loggerDict):
-        if _n.startswith("ocrmypdf"):
-            logging.getLogger(_n).setLevel(logging.ERROR)
+    _silence_ocr_loggers()
 
     import ocrmypdf
 
@@ -128,7 +127,13 @@ def detect(
 ) -> list[dict]:
     """Run YOLO detection on all pages with one or more models.
 
-    Returns merged detection list. Also saves detections.json.
+    :param pdf_path: Path to the bitonal PDF.
+    :param output_dir: Directory to write detections.json into.
+    :param models: Model size names to run (e.g. ``["medium", "large"]``).
+        Defaults to all three: small, medium, large.
+    :param confidence: Minimum confidence threshold for detections.
+    :returns: Merged detection list. Also saves detections.json to
+        *output_dir*.
     """
     from PIL import Image
     from ultralytics import YOLO
@@ -143,8 +148,9 @@ def detect(
 
     model_map = {"small": "small.pt", "medium": "medium.pt", "large": "large.pt"}
 
+    from blackletter.scanner import DPI, YOLO_BATCH
+
     pdf = fitz.open(str(pdf_path))
-    DPI = 200
     mat = fitz.Matrix(DPI / 72, DPI / 72)
     total = pdf.page_count
 
@@ -159,9 +165,8 @@ def detect(
         print(f"  Detecting with {model_name}...", flush=True)
         t0 = time.time()
 
-        BATCH = 4
-        for bs in range(0, total, BATCH):
-            be = min(bs + BATCH, total)
+        for bs in range(0, total, YOLO_BATCH):
+            be = min(bs + YOLO_BATCH, total)
             imgs = []
             metas = []
             for i in range(bs, be):
@@ -190,8 +195,8 @@ def detect(
                             "model": model_name,
                         }
                     )
-            if (bs + BATCH) % 100 == 0 or bs + BATCH >= total:
-                print(f"    {min(bs + BATCH, total)}/{total} pages", flush=True)
+            if (bs + YOLO_BATCH) % 100 == 0 or bs + YOLO_BATCH >= total:
+                print(f"    {min(bs + YOLO_BATCH, total)}/{total} pages", flush=True)
 
         print(f"    {model_name} done ({time.time() - t0:.0f}s)", flush=True)
 
@@ -211,7 +216,12 @@ def detect(
         return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
 
     def _iou(a, b):
-        """Intersection over union of two [x0, y0, x1, y1] boxes."""
+        """Compute intersection-over-union of two ``[x0, y0, x1, y1]`` boxes.
+
+        :param a: First bounding box.
+        :param b: Second bounding box.
+        :returns: IoU value in ``[0.0, 1.0]``.
+        """
         ix0 = max(a[0], b[0])
         iy0 = max(a[1], b[1])
         ix1 = min(a[2], b[2])
@@ -223,7 +233,12 @@ def detect(
         return inter / union if union > 0 else 0.0
 
     def _contains(outer, inner):
-        """True if outer bbox fully contains inner bbox."""
+        """Check whether *outer* bbox fully contains *inner* bbox.
+
+        :param outer: Outer ``[x0, y0, x1, y1]`` bounding box.
+        :param inner: Inner ``[x0, y0, x1, y1]`` bounding box.
+        :returns: ``True`` if *outer* contains *inner*.
+        """
         return (
             outer[0] <= inner[0]
             and outer[1] <= inner[1]
@@ -281,12 +296,19 @@ def pair(
     first_page: int = 1,
     excluded: set | None = None,
 ) -> list[dict]:
-    """Pair opinions from detections. Returns opinions list. Saves opinions.json.
+    """Pair opinions from detections.
 
-    Can accept detections as a list or path to detections.json.
+    :param detections: Detection list or path to detections.json.
+    :param pdf_path: Path to the OCR'd PDF.
+    :param reporter: Reporter abbreviation (e.g. ``"a3d"``).
+    :param volume: Volume number (e.g. ``"333"``).
+    :param first_page: First page number of the volume.
+    :param excluded: Set of page indices to exclude from pairing.
+    :returns: List of opinion dicts with page ranges, bboxes, and
+        outside_rects.
     """
-    from blackletter.models import BBox, Detection as BLDetection, Document, Label, Page
-    from blackletter.scanner import _pair_opinions, _outside_opinion_rects
+    from blackletter.models import Detection as BLDetection, Document, Page
+    from blackletter.scanner import _pair_opinions
 
     pdf_path = Path(pdf_path)
 
@@ -297,19 +319,10 @@ def pair(
         raw = detections
 
     # Build Document
+    from blackletter.scanner import _group_detections_by_page
+
     src_pdf = fitz.open(str(pdf_path))
-    pages_data = {}
-    for entry in raw:
-        pi = entry["page_index"]
-        if pi not in pages_data:
-            pages_data[pi] = {
-                "page_number": entry.get("page_number"),
-                "page_number_end": entry.get("page_number_end"),
-                "img_width": entry.get("img_width", 1),
-                "img_height": entry.get("img_height", 1),
-                "detections": [],
-            }
-        pages_data[pi]["detections"].append(entry)
+    pages_data = _group_detections_by_page(raw, include_page_number_end=True)
 
     pages = []
     for pi in sorted(pages_data.keys()):
@@ -328,15 +341,7 @@ def pair(
             page_number_end=pd.get("page_number_end"),
         )
         for d in pd["detections"]:
-            b = d.get("bbox", [0, 0, 1, 1])
-            page.detections.append(
-                BLDetection(
-                    bbox=BBox(x1=b[0], y1=b[1], x2=b[2], y2=b[3]),
-                    label=Label(d["label_id"]),
-                    confidence=d["confidence"],
-                    page_index=pi,
-                )
-            )
+            page.detections.append(BLDetection.from_raw_dict(d, pi, bbox_default=[0, 0, 1, 1]))
         if page.page_number is None:
             page.page_number = pi + first_page
         pages.append(page)
@@ -361,82 +366,26 @@ def pair(
         page_ranges.append((caption.page_index, key.page_index))
 
     # Save opinions.json
+    from blackletter.scanner import _build_opinions_data, _opinion_page_bounds
+
     pages_by_index = {p.index: p for p in document.pages}
-    opinions_data = []
-    for idx, (caption, key) in enumerate(opinions):
+    opinions_data = _build_opinions_data(opinions, pages_by_index, src_pdf)
+
+    # Augment each entry with filename-inference fields unique to this API
+    for idx, entry in enumerate(opinions_data):
         start_idx, end_idx = page_ranges[idx]
-        outside_rects = []
-        for pi in range(start_idx, end_idx + 1):
-            pg = pages_by_index.get(pi)
-            if not pg:
-                continue
-            is_first = pi == start_idx
-            is_last = pi == end_idx
-            pw = src_pdf[pi].rect.width if pi < src_pdf.page_count else 612.0
-            for rect in _outside_opinion_rects(pg, pw, caption, key, is_first, is_last):
-                outside_rects.append(
-                    {
-                        "page_index": pi,
-                        "x0": round(rect.x0, 1),
-                        "y0": round(rect.y0, 1),
-                        "x1": round(rect.x1, 1),
-                        "y1": round(rect.y1, 1),
-                    }
-                )
-        has_image = any(
-            d.label == Label.IMAGE
-            for pi2 in range(start_idx, end_idx + 1)
-            if pi2 in pages_by_index
-            for d in pages_by_index[pi2].detections
+        first_num, last_num = _opinion_page_bounds(
+            pages_by_index.get(start_idx),
+            pages_by_index.get(end_idx),
+            start_idx,
+            end_idx,
+            first_page,
         )
-
-        # For naming: opinion starting on a range page uses end number,
-        # ending on a range page uses first number
-        start_page = pages_by_index.get(start_idx)
-        end_page = pages_by_index.get(end_idx)
-        if start_page and start_page.page_number_end:
-            first_num = start_page.page_number_end
-        elif start_page and start_page.page_number:
-            first_num = start_page.page_number
-        else:
-            first_num = start_idx + first_page
-        if end_page and end_page.page_number_end:
-            last_num = end_page.page_number
-        elif end_page and end_page.page_number:
-            last_num = end_page.page_number
-        else:
-            last_num = end_idx + first_page
-
-        opinions_data.append(
-            {
-                "caption_page": caption.page_index,
-                "caption_bbox": [
-                    round(caption.bbox.x1, 1),
-                    round(caption.bbox.y1, 1),
-                    round(caption.bbox.x2, 1),
-                    round(caption.bbox.y2, 1),
-                ],
-                "key_page": key.page_index,
-                "key_bbox": [
-                    round(key.bbox.x1, 1),
-                    round(key.bbox.y1, 1),
-                    round(key.bbox.x2, 1),
-                    round(key.bbox.y2, 1),
-                ],
-                "end_page": end_idx,
-                "page_count": end_idx - start_idx + 1,
-                "first_page_number": first_num,
-                "last_page_number": last_num,
-                "outside_rects": outside_rects,
-                "has_image": has_image,
-            }
-        )
+        entry["end_page"] = end_idx
+        entry["first_page_number"] = first_num
+        entry["last_page_number"] = last_num
 
     src_pdf.close()
-
-    # # Save
-    # output_dir = pdf_path.parent
-    # (output_dir / "opinions.json").write_text(json.dumps(opinions_data))
 
     return opinions_data
 
@@ -448,9 +397,17 @@ def compute_rects(
     approved: set | None = None,
     skip_doctr: bool = False,
 ) -> list[dict]:
-    """Compute redaction rects from detections + opinions. Saves redaction_rects.json.
+    """Compute redaction rects from detections + opinions.
 
-    Reads detections.json and opinions.json from output_dir.
+    Reads detections.json from *output_dir*, pairs opinions, and writes
+    redaction_rects.json back into *output_dir*.
+
+    :param pdf_path: Path to the OCR'd PDF.
+    :param output_dir: Directory containing detections.json.
+    :param excluded: Set of page indices to exclude from pairing.
+    :param approved: Set of page indices pre-approved for redaction.
+    :param skip_doctr: Unused, kept for backwards compatibility.
+    :returns: List of redaction rect dicts.
     """
     from blackletter.tasks import pair_and_compute_rects as _pair_compute
 
@@ -478,11 +435,16 @@ def compute_rects(
 def build_redacted(
     pdf_path: str | Path,
     output_dir: str | Path,
-    rects: list[dict] | str | Path | None = None,
+    rects: str | Path | None = None,
 ) -> Path:
     """Build the full redacted PDF from precomputed rects.
 
-    Returns path to the redacted PDF.
+    :param pdf_path: Path to the OCR'd PDF.
+    :param output_dir: Directory containing detections.json and where the
+        redacted PDF will be written.
+    :param rects: Path to a redaction_rects.json file. If ``None``, uses
+        ``output_dir / "redaction_rects.json"``.
+    :returns: Path to the redacted PDF.
     """
     from blackletter.process import _build_redacted_from_rects
     from blackletter.models import Document, Page
@@ -491,10 +453,7 @@ def build_redacted(
     output_dir = Path(output_dir)
 
     # Load rects
-    rects_path = output_dir / "redaction_rects.json"
-    if rects is not None:
-        if isinstance(rects, (str, Path)):
-            rects_path = Path(rects)
+    rects_path = Path(rects) if rects is not None else output_dir / "redaction_rects.json"
 
     # Build minimal Document for the function
     src_pdf = fitz.open(str(pdf_path))
@@ -549,10 +508,15 @@ def split_opinions(
     """Split the redacted PDF into individual opinion PDFs.
 
     Creates redacted/, unredacted/, and masked/ subdirectories.
-    Returns dict with counts.
 
-    opinions: precomputed opinions list (from api.pair()). If omitted,
-              falls back to reading opinions.json from output_dir.
+    :param pdf_path: Path to the OCR'd (unredacted) PDF.
+    :param output_dir: Directory containing the redacted PDF and
+        opinions.json. Output subdirectories are created here.
+    :param unredacted: Whether to also generate unredacted opinion PDFs.
+    :param opinions: Precomputed opinions list (from :func:`pair`). If
+        ``None``, reads opinions.json from *output_dir*.
+    :returns: Dict with ``redacted``, ``unredacted``, and ``masked``
+        counts.
     """
     from blackletter.process import _split_from_redacted, _build_masked_opinions
 
@@ -608,28 +572,31 @@ def generate(
     reporter: str = "",
     volume: str = "",
     unredacted: bool = False,
-    progress_callback=None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict:
-    """Generate all output PDFs from a source PDF and a single redactions.json.
+    """Generate all output PDFs from a source PDF and a redactions payload.
 
-    redactions.json contains:
-      - "opinions": list of opinion dicts with outside_rects, page ranges, filenames
-      - "pages": dict of page_index → list of rects (margins + redaction rects, all PDF points)
+    The *redactions* payload (file or dict) contains:
 
-    Builds in one pass per page — no layering.
+    - ``"opinions"``: list of opinion dicts with outside_rects, page
+      ranges, and filenames.
+    - ``"pages"``: dict mapping page_index to a list of rects (margins
+      + redaction rects, all in PDF points).
 
-    Args:
-        pdf_path: Path to the source (OCR'd) PDF.
-        redactions: Path to redactions.json, or the parsed dict.
-        output_dir: Base output directory.
-        reporter: Reporter abbreviation for filenames (e.g. "a3d").
-        volume: Volume number for filenames (e.g. "214").
-        unredacted: Also generate unredacted opinion PDFs.
-        progress_callback: Optional callable(current, total, message).
+    Builds in one pass per page (no layering).
 
-    Returns dict with keys: redacted_dir, masked_dir, full_redacted, opinion_count.
+    :param pdf_path: Path to the source (OCR'd) PDF.
+    :param redactions: Path to redactions.json, or the parsed dict.
+    :param output_dir: Base output directory.
+    :param reporter: Reporter abbreviation for filenames (e.g.
+        ``"a3d"``).
+    :param volume: Volume number for filenames (e.g. ``"214"``).
+    :param unredacted: Also generate unredacted opinion PDFs.
+    :param progress_callback: Optional callable(current, total, message).
+    :returns: Dict with keys ``redacted_dir``, ``masked_dir``,
+        ``full_redacted``, and ``opinion_count``.
     """
-    import re as _re
+    import re
 
     # Labels to white-out in masked output instead of black
     WHITE_IN_MASKED = {"PAGE_HEADER", "STATE_ABBREVIATION"}
@@ -654,7 +621,12 @@ def generate(
         prefix += f"{volume}."
 
     def _opinion_filename(op):
-        """Build filename from opinion page numbers."""
+        """Build filename from opinion page numbers.
+
+        :param op: Opinion dict with ``first_page_number`` and
+            ``last_page_number`` keys.
+        :returns: Filename string (e.g. ``"a3d.333.0001-0010.pdf"``).
+        """
         first = op.get("first_page_number")
         last = op.get("last_page_number")
         if first is not None and last is not None:
@@ -663,16 +635,14 @@ def generate(
         return op.get("filename", f"{op['caption_page']:04d}-{op['end_page']:04d}.pdf")
 
     # Detect duplicate filenames and add -1/-2/-3 suffixes
-    from collections import Counter as _Counter
-
     raw_names = [_opinion_filename(op) for op in opinions]
-    name_counts = _Counter(raw_names)
+    name_counts = Counter(raw_names)
     name_seq: dict[str, int] = {}
     filenames = []
     for name in raw_names:
         if name_counts[name] > 1:
             name_seq[name] = name_seq.get(name, 0) + 1
-            filenames.append(_re.sub(r"\.pdf$", f"-{name_seq[name]}.pdf", name))
+            filenames.append(re.sub(r"\.pdf$", f"-{name_seq[name]}.pdf", name))
         else:
             filenames.append(name)
 
@@ -681,11 +651,15 @@ def generate(
     def _apply_page(fitz_page, src_idx, opinion, mode):
         """Apply all rects for one page in one pass.
 
-        mode: 'full'     — all rects as specified, no outside-opinion whiteout
-              'redacted' — all rects as specified + outside-opinion whiteout
-              'masked'   — WHITE_IN_MASKED → white + outside-opinion whiteout
+        :param fitz_page: The ``fitz.Page`` to apply redactions to.
+        :param src_idx: Source page index in the original PDF.
+        :param opinion: Opinion dict (or ``None`` for full-redacted mode).
+        :param mode: One of ``"full"`` (all rects, no outside-opinion
+            whiteout), ``"redacted"`` (all rects + outside-opinion
+            whiteout), or ``"masked"`` (WHITE_IN_MASKED labels become
+            white + outside-opinion whiteout).
         """
-        # Page rects (margins + redactions) — all PDF points
+        # Page rects (margins + redactions), all PDF points
         for r in pages_rects.get(str(src_idx), []):
             rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
             if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
@@ -804,7 +778,7 @@ def generate(
 
     for group in groups:
         if len(group) == 1:
-            # Single opinion (single-page or multi-page) — build normally
+            # Single opinion (single-page or multi-page), build normally
             op = opinions[group[0]]
             start_idx = op["caption_page"]
             end_idx = op["end_page"]
@@ -817,7 +791,7 @@ def generate(
             out.save(str(masked_dir / filename), garbage=4, deflate=True)
             out.close()
         else:
-            # Multiple same-page opinions — consolidate into one PDF
+            # Multiple same-page opinions, consolidate into one PDF
             # Only white out areas that ALL opinions consider "outside"
             first_op = opinions[group[0]]
             src_page_idx = first_op["caption_page"]
@@ -850,7 +824,7 @@ def generate(
 
             # Filename: strip the -1/-2/-3 suffix from first opinion's computed name
             base_name = filenames[group[0]]
-            base_name = _re.sub(r"-\d+\.pdf$", ".pdf", base_name)
+            base_name = re.sub(r"-\d+\.pdf$", ".pdf", base_name)
 
             out = fitz.open()
             out.insert_pdf(src, from_page=src_page_idx, to_page=src_page_idx)
@@ -888,29 +862,3 @@ def generate(
         "masked_dir": masked_dir,
         "opinion_count": len(opinions),
     }
-
-
-def margins(
-    pdf_path: str | Path,
-    output_dir: str | Path,
-) -> list[dict]:
-    """Compute margin rects. Saves margin_rects.json.
-
-    Returns the margin rects data.
-    """
-    from blackletter.margins import compute_margin_rects
-
-    pdf_path = Path(pdf_path)
-    output_dir = Path(output_dir)
-
-    margin_path = output_dir / "margin_rects.json"
-    if margin_path.exists():
-        print("  Margins already computed, skipping.", flush=True)
-        return json.loads(margin_path.read_text())
-
-    t0 = time.time()
-    print("  Computing margins...", flush=True)
-    rects = compute_margin_rects(pdf_path)
-    margin_path.write_text(json.dumps(rects))
-    print(f"  Margins done ({time.time() - t0:.0f}s)", flush=True)
-    return rects

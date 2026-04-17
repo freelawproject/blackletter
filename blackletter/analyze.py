@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
@@ -21,12 +22,8 @@ PAGE_NUMBER_CLASS = 8
 RANGE_RE = re.compile(r"^(\d{1,4})\s*[–\-]\s*(\d{1,4})$")
 
 
-def _page_num_base(text: str) -> int | None:
-    m = re.match(r"^(\d+)", str(text))
-    return int(m.group(1)) if m else None
-
-
 def _classify_text(stripped: str) -> tuple[str, str] | None:
+    """Classify text as a page number (``"single"`` or ``"range"``), or ``None``."""
     if RANGE_RE.match(stripped):
         return stripped, "range"
     if stripped.isdigit() and len(stripped) <= 4:
@@ -50,16 +47,16 @@ def _scan_crop(
     x_offset: int = 0,
     y_offset: int = 0,
 ) -> tuple[list, list]:
-    """Run OCR on a cropped PIL image and classify detected text.
+    """OCR a cropped image region and extract page number candidates.
 
-    :param ocr: PaddleOCR instance (or None to fall back to Tesseract).
-    :param pil_crop: Cropped PIL image to scan.
-    :param zone_name: Label for the crop zone (e.g. ``"corner-L"``).
-    :param page_idx: Zero-based page index (used for logging).
-    :param x_offset: Horizontal pixel offset to add to polygon coordinates.
-    :param y_offset: Vertical pixel offset to add to polygon coordinates.
-    :returns: ``(hits, near_misses)`` where each is a list of result dicts.
-    :rtype: tuple[list, list]
+    :param ocr: PaddleOCR instance, or ``None`` to fall back to
+        Tesseract.
+    :param img_bytes: PNG image bytes of the crop.
+    :param zone_name: Label for the crop region (e.g. ``"corner-L"``).
+    :param page_idx: Zero-based page index (for temp file naming).
+    :param x_offset: Horizontal offset to add to polygon coordinates.
+    :param y_offset: Vertical offset to add to polygon coordinates.
+    :returns: Tuple of (hits, near_misses) lists.
     """
     hits, near_misses = [], []
     if ocr is None:
@@ -125,21 +122,18 @@ def _ocr_crop_multi(
     exp_start: int | None = None,
     exp_end: int | None = None,
 ) -> dict | None:
-    """Run multi-engine OCR on a crop, returning the first valid result.
+    """Try multiple OCR backends (PaddleOCR, Tesseract, GLM) on a crop.
 
-    Tries PaddleOCR first, then Tesseract, then GLM-OCR (rare fallback).
-
-    :param ocr: PaddleOCR instance, or None to skip.
-    :param glm_processor: Pre-loaded GLM AutoProcessor, or None.
-    :param glm_model: Pre-loaded GLM model, or None.
-    :param pil_crop: Cropped PIL image to run OCR on.
-    :param zone_name: Label for the crop zone (e.g. ``"yolo-pn"``).
-    :param page_idx: Zero-based page index (used for logging and caching).
-    :param exp_start: Expected first page number, for range validation.
-    :param exp_end: Expected last page number, for range validation.
-    :returns: Result dict with keys ``text``, ``score``, ``zone``, ``type``,
-        ``ocr``, or None if no valid page number was found.
-    :rtype: dict | None
+    :param ocr: PaddleOCR instance, or ``None``.
+    :param glm_processor: GLM-OCR processor, or ``None`` to lazy-load.
+    :param glm_model: GLM-OCR model, or ``None`` to lazy-load.
+    :param pil_crop: PIL Image of the cropped region.
+    :param zone_name: Label for the crop region.
+    :param page_idx: Zero-based page index.
+    :param exp_start: Expected first page number for validation.
+    :param exp_end: Expected last page number for validation.
+    :returns: Dict with ``text``, ``score``, ``zone``, ``type``, and
+        ``ocr`` keys, or ``None`` if no valid reading found.
     """
     margin = 20
 
@@ -199,7 +193,7 @@ def _ocr_crop_multi(
     except Exception:
         pass
 
-    # 3) GLM-OCR — lazy-load only when paddle + tesseract both fail
+    # 3) GLM-OCR, lazy-load only when paddle + tesseract both fail
     if glm_processor is None and glm_model is None:
         try:
             import torch
@@ -276,6 +270,18 @@ def _pick_best(
     exp_start: int | None = None,
     exp_end: int | None = None,
 ) -> dict | None:
+    """Select the best page number candidate from OCR results.
+
+    Filters by position (top corners) and expected range, then picks
+    the highest-score match.
+
+    :param candidates: List of candidate dicts from OCR scanning.
+    :param img_w: Image width in pixels.
+    :param img_h: Image height in pixels.
+    :param exp_start: Expected first page number for range filtering.
+    :param exp_end: Expected last page number for range filtering.
+    :returns: Best candidate dict, or ``None``.
+    """
     if not candidates:
         return None
 
@@ -320,7 +326,17 @@ def _pick_best(
 
 
 def _process_page(args: tuple) -> dict:
-    """Process a single page. Runs in a worker process."""
+    """Process a single page for page number detection.
+
+    Runs in a worker process. Uses YOLO to locate page number regions,
+    then OCR to read them.
+
+    :param args: Tuple of (page_idx, pdf_path, exp_start, exp_end,
+        model_path).
+    :returns: Dict with ``pdf_page``, ``detected``, ``zone``, ``type``,
+        ``score``, ``ocr``, ``detections``, ``img_width``, and
+        ``img_height``.
+    """
     page_idx, pdf_path, exp_start, exp_end, model_path = args
 
     if not hasattr(_process_page, "_ocr"):
@@ -353,16 +369,16 @@ def _process_page(args: tuple) -> dict:
             model_path = Path(downloaded)
         _process_page._yolo = YOLO(str(model_path))
     if not hasattr(_process_page, "_glm"):
-        # Lazy-load GLM-OCR: don't load the model upfront — only when needed
+        # Lazy-load GLM-OCR: don't load the model upfront, only when needed
         _process_page._glm_processor = None
         _process_page._glm_model = None
         _process_page._glm = True
-    import fitz as _fitz
+    import fitz
 
     if not hasattr(_process_page, "_pdf") or getattr(_process_page, "_pdf_path", None) != pdf_path:
         if hasattr(_process_page, "_pdf"):
             _process_page._pdf.close()
-        _process_page._pdf = _fitz.open(pdf_path)
+        _process_page._pdf = fitz.open(pdf_path)
         _process_page._pdf_path = pdf_path
 
     ocr = _process_page._ocr
@@ -417,7 +433,7 @@ def _process_page(args: tuple) -> dict:
         if yolo_result:
             break
 
-    # 1b) YOLO header — crop sides
+    # 1b) YOLO header, crop sides
     if not yolo_result and best_header:
         hx1, hy1, hx2, hy2, _ = best_header
         pad = 10
@@ -514,7 +530,7 @@ def analyze_pdf(
     max_pages: int = 9999,
     num_workers: int | None = None,
     model: str | Path | None = None,
-    progress_callback=None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict:
     """Analyze a PDF's page number sequence for QA/verification.
 
@@ -522,21 +538,22 @@ def analyze_pdf(
     then checks the sequence for gaps, duplicates, and coverage against
     an expected range.
 
-    Args:
-        pdf_path: Path to the PDF to analyze.
-        exp_start: Expected first page number (optional; inferred from filename if omitted).
-        exp_end: Expected last page number (optional).
-        max_pages: Maximum number of pages to process.
-        num_workers: Number of parallel workers (default: min(4, cpu_count)).
-        model: Path to YOLO model. Defaults to blackletter's bundled analyze.pt.
-        progress_callback: Optional callable(current, total, message) called after each page.
-
-    Returns:
-        Dict with keys:
-            total_pages, results, seq_issues, duplicates, seen_nums,
-            all_nums, missing_pages, ranges_found, not_detected
+    :param pdf_path: Path to the PDF to analyze.
+    :param exp_start: Expected first page number (inferred from filename
+        if omitted).
+    :param exp_end: Expected last page number.
+    :param max_pages: Maximum number of pages to process.
+    :param num_workers: Number of parallel workers (default:
+        min(4, cpu_count)).
+    :param model: Path to YOLO model. Defaults to blackletter's bundled
+        large.pt.
+    :param progress_callback: Optional callable(current, total, message)
+        called after each page.
+    :returns: Dict with keys ``total_pages``, ``results``,
+        ``seq_issues``, ``duplicates``, ``seen_nums``, ``all_nums``,
+        ``missing_pages``, ``ranges_found``, and ``not_detected``.
     """
-    import fitz as _fitz
+    import fitz
 
     pdf_path = str(pdf_path)
     if model is None:
@@ -563,7 +580,7 @@ def analyze_pdf(
     if num_workers is None:
         num_workers = min(4, cpu_count())
 
-    pdf = _fitz.open(pdf_path)
+    pdf = fitz.open(pdf_path)
     total = min(max_pages, len(pdf))
     pdf.close()
 

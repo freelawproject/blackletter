@@ -58,21 +58,12 @@ def bitonal_chunk(
     Returns:
         Path to the output chunk PDF.
     """
-    import io
-    import numpy as np
-    from PIL import Image
+    from blackletter.ocr import _render_bitonal_page
 
     src = fitz.open(str(src_path))
     out = fitz.open()
     for i in range(page_start, page_end):
-        page = src[i]
-        new_page = out.new_page(width=page.rect.width, height=page.rect.height)
-        pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
-        gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-        bw = Image.fromarray((gray > threshold).astype(np.uint8) * 255).convert("1")
-        buf = io.BytesIO()
-        bw.save(buf, format="TIFF", compression="group4")
-        new_page.insert_image(new_page.rect, stream=buf.getvalue())
+        _render_bitonal_page(src[i], out, dpi, threshold)
     out.save(str(dst_path), garbage=4, deflate=True)
     out.close()
     src.close()
@@ -122,8 +113,9 @@ def ocr_chunk(
     Returns:
         Path to OCR'd chunk PDF.
     """
-    import logging
     import tempfile
+
+    from blackletter.ocr import _silence_ocr_loggers
 
     # Extract pages
     src = fitz.open(str(src_path))
@@ -134,12 +126,7 @@ def ocr_chunk(
     chunk.close()
     src.close()
 
-    # Suppress noisy loggers
-    for name in ("pikepdf", "fontTools", "fontTools.subset", "fontTools.ttLib", "ocrmypdf"):
-        logging.getLogger(name).setLevel(logging.ERROR)
-    for _n in list(logging.root.manager.loggerDict):
-        if _n.startswith("ocrmypdf"):
-            logging.getLogger(_n).setLevel(logging.ERROR)
+    _silence_ocr_loggers()
 
     import ocrmypdf
 
@@ -184,22 +171,19 @@ def yolo_scan_chunk(
             index, pdf_width, pdf_height, img_width, img_height,
             cols, detections, page_number, page_number_end
     """
-    import cv2
-    import numpy as np
     from PIL import Image
     from ultralytics import YOLO
 
     from blackletter.models import Label
-    from blackletter.scanner import detect_columns, _extract_page_number, DPI
+    from blackletter.scanner import _safe_detect_columns, _extract_page_number, DPI, YOLO_BATCH
 
     model = YOLO(str(model_path))
     pdf = fitz.open(str(pdf_path))
     mat = fitz.Matrix(DPI / 72, DPI / 72)
-    BATCH = 4
     pages_data = []
 
-    for bs in range(page_start, page_end, BATCH):
-        be = min(bs + BATCH, page_end)
+    for bs in range(page_start, page_end, YOLO_BATCH):
+        be = min(bs + YOLO_BATCH, page_end)
         imgs = []
         meta = []
         for pi in range(bs, be):
@@ -207,11 +191,7 @@ def yolo_scan_chunk(
             pix = fp.get_pixmap(matrix=mat)
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             imgs.append(img)
-            img_bgr = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-            try:
-                lx1, lx2, rx1, rx2, mid = detect_columns(img_bgr)
-            except Exception:
-                lx1, lx2, rx1, rx2, mid = 0, 0, 0, 0, 0
+            cols = _safe_detect_columns(img)
             meta.append(
                 (
                     pi,
@@ -219,7 +199,7 @@ def yolo_scan_chunk(
                     fp.rect.height,
                     pix.width,
                     pix.height,
-                    (lx1, lx2, rx1, rx2, mid),
+                    cols,
                 )
             )
 
@@ -349,45 +329,13 @@ def merge_detections(
         ocr_applied=True,
     )
 
-    # Save detections.json
-    detections_data = []
-    for page in doc.pages:
-        for det in page.detections:
-            detections_data.append(
-                {
-                    "page_index": det.page_index,
-                    "label": det.label.name,
-                    "label_id": int(det.label),
-                    "confidence": round(det.confidence, 3),
-                    "bbox": [
-                        round(det.bbox.x1, 1),
-                        round(det.bbox.y1, 1),
-                        round(det.bbox.x2, 1),
-                        round(det.bbox.y2, 1),
-                    ],
-                    "page_number": page.page_number,
-                    "img_width": page.img_width,
-                    "img_height": page.img_height,
-                }
-            )
-    with open(output_dir / "detections.json", "w") as f:
-        json.dump(detections_data, f)
+    from blackletter.scanner import _write_detections_sidecar, _write_pages_meta_sidecar
 
-    # Save pages_meta.json
-    pages_meta = {}
-    for page in doc.pages:
-        pages_meta[page.index] = {
-            "col_left_x1": page.col_left_x1,
-            "col_left_x2": page.col_left_x2,
-            "col_right_x1": page.col_right_x1,
-            "col_right_x2": page.col_right_x2,
-            "midpoint": page.midpoint,
-        }
-    with open(output_dir / "pages_meta.json", "w") as f:
-        json.dump(pages_meta, f)
+    detections_count = _write_detections_sidecar(doc, output_dir)
+    _write_pages_meta_sidecar(doc, output_dir)
 
     return {
-        "detections_count": len(detections_data),
+        "detections_count": detections_count,
         "pages_count": len(pages),
     }
 
@@ -409,8 +357,12 @@ def pair_and_compute_rects(
     Returns:
         Dict with opinions_count, rects_count.
     """
-    from blackletter.models import BBox, Detection, Document, Label, Page
-    from blackletter.scanner import _pair_opinions, _outside_opinion_rects
+    from blackletter.models import Detection, Document, Page
+    from blackletter.scanner import (
+        _pair_opinions,
+        _build_opinions_data,
+        _group_detections_by_page,
+    )
     from blackletter.process import compute_redaction_rects
     from blackletter.margins import compute_margin_rects
 
@@ -432,17 +384,7 @@ def pair_and_compute_rects(
     }
     src_pdf.close()
 
-    pages_data = {}
-    for entry in raw:
-        pi = entry["page_index"]
-        if pi not in pages_data:
-            pages_data[pi] = {
-                "page_number": entry.get("page_number"),
-                "img_width": entry.get("img_width", 1),
-                "img_height": entry.get("img_height", 1),
-                "detections": [],
-            }
-        pages_data[pi]["detections"].append(entry)
+    pages_data = _group_detections_by_page(raw)
 
     pages = []
     for pi in sorted(pages_data.keys()):
@@ -463,15 +405,7 @@ def pair_and_compute_rects(
             midpoint=meta.get("midpoint", 0),
         )
         for d in pd["detections"]:
-            b = d.get("bbox", [0, 0, 1, 1])
-            page.detections.append(
-                Detection(
-                    bbox=BBox(x1=b[0], y1=b[1], x2=b[2], y2=b[3]),
-                    label=Label(d["label_id"]),
-                    confidence=d["confidence"],
-                    page_index=pi,
-                )
-            )
+            page.detections.append(Detection.from_raw_dict(d, pi, bbox_default=[0, 0, 1, 1]))
         pages.append(page)
 
     document = Document(
@@ -489,51 +423,7 @@ def pair_and_compute_rects(
     # Save opinions.json with outside_rects
     pages_by_index = {p.index: p for p in document.pages}
     _src_pdf = fitz.open(str(pdf_path))
-    opinions_data = []
-    for caption, key in opinions:
-        outside_rects = []
-        for pi in range(caption.page_index, key.page_index + 1):
-            pg = pages_by_index[pi]
-            is_first = pi == caption.page_index
-            is_last = pi == key.page_index
-            pw = _src_pdf[pi].rect.width
-            for rect in _outside_opinion_rects(pg, pw, caption, key, is_first, is_last):
-                outside_rects.append(
-                    {
-                        "page_index": pi,
-                        "x0": round(rect.x0, 1),
-                        "y0": round(rect.y0, 1),
-                        "x1": round(rect.x1, 1),
-                        "y1": round(rect.y1, 1),
-                    }
-                )
-        has_image = any(
-            d.label == Label.IMAGE
-            for pi2 in range(caption.page_index, key.page_index + 1)
-            if pi2 in pages_by_index
-            for d in pages_by_index[pi2].detections
-        )
-        opinions_data.append(
-            {
-                "caption_page": caption.page_index,
-                "caption_bbox": [
-                    round(caption.bbox.x1, 1),
-                    round(caption.bbox.y1, 1),
-                    round(caption.bbox.x2, 1),
-                    round(caption.bbox.y2, 1),
-                ],
-                "key_page": key.page_index,
-                "key_bbox": [
-                    round(key.bbox.x1, 1),
-                    round(key.bbox.y1, 1),
-                    round(key.bbox.x2, 1),
-                    round(key.bbox.y2, 1),
-                ],
-                "page_count": key.page_index - caption.page_index + 1,
-                "outside_rects": outside_rects,
-                "has_image": has_image,
-            }
-        )
+    opinions_data = _build_opinions_data(opinions, pages_by_index, _src_pdf)
     _src_pdf.close()
     with open(output_dir / "opinions.json", "w") as f:
         json.dump(opinions_data, f)
