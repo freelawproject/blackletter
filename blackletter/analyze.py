@@ -85,7 +85,8 @@ def _scan_crop(
         return hits, near_misses
     import numpy as np
 
-    result = ocr.predict(np.array(pil_crop))
+    # paddlex assumes numpy arrays are BGR; PIL gives RGB, so swap channels.
+    result = ocr.predict(np.array(pil_crop)[:, :, ::-1])
     if not result or not result[0]:
         return hits, near_misses
     r = result[0]
@@ -153,13 +154,14 @@ def _ocr_crop_multi(
                 return False
         return typ == "single"
 
-    # 1) PaddleOCR -- pass numpy array directly, no temp file needed
+    # 1) PaddleOCR -- pass numpy array directly, no temp file needed.
+    # paddlex assumes numpy arrays are BGR; PIL gives RGB, so swap channels.
     if ocr is None:
         result = None
     else:
         import numpy as np
 
-        result = ocr.predict(np.array(pil_crop))
+        result = ocr.predict(np.array(pil_crop)[:, :, ::-1])
     if result and result[0]:
         r = result[0]
         texts = r.get("rec_texts", []) if isinstance(r, dict) else getattr(r, "rec_texts", [])
