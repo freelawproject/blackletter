@@ -20,6 +20,7 @@ from blackletter.scanner import (
     _pair_opinions,
     _check_excluded,
     _outside_opinion_rects,
+    _group_detections_by_page,
     _make_add_safe,
     _iter_case_sequence_rects,
     _clip_headnote_rect,
@@ -1590,7 +1591,7 @@ def rebuild_full_redacted_from_detections(
     (with optional exclusions), and calls _build_full_redacted.
     """
     import json as _json
-    from blackletter.models import BBox, Detection, Document, Label, Page
+    from blackletter.models import Detection, Document, Page
 
     detections_json_path = Path(detections_json_path)
     ocr_pdf_path = Path(ocr_pdf_path)
@@ -1607,17 +1608,7 @@ def rebuild_full_redacted_from_detections(
     src_pdf.close()
 
     # Group detections by page_index
-    pages_data: dict[int, dict] = {}
-    for entry in raw:
-        pi = entry["page_index"]
-        if pi not in pages_data:
-            pages_data[pi] = {
-                "page_number": entry.get("page_number"),
-                "img_width": entry.get("img_width", 1),
-                "img_height": entry.get("img_height", 1),
-                "detections": [],
-            }
-        pages_data[pi]["detections"].append(entry)
+    pages_data = _group_detections_by_page(raw)
 
     pages = []
     for pi in sorted(pages_data.keys()):
@@ -1632,15 +1623,7 @@ def rebuild_full_redacted_from_detections(
             page_number=pd["page_number"],
         )
         for d in pd["detections"]:
-            bbox = d["bbox"]
-            page.detections.append(
-                Detection(
-                    bbox=BBox(bbox[0], bbox[1], bbox[2], bbox[3]),
-                    label=Label(d["label_id"]),
-                    confidence=d["confidence"],
-                    page_index=pi,
-                )
-            )
+            page.detections.append(Detection.from_raw_dict(d, pi))
         pages.append(page)
 
     document = Document(
@@ -1746,7 +1729,7 @@ def generate_files(
     """
     import json as _json
     import time as _time
-    from blackletter.models import BBox, Detection, Document, Label, Page
+    from blackletter.models import Detection, Document, Page
 
     _t_total = _time.time()
     ocr_pdf = Path(ocr_pdf)
@@ -1782,18 +1765,7 @@ def generate_files(
         page_dims[i] = (r.width, r.height)
     src_pdf.close()
 
-    pages_data: dict[int, dict] = {}
-    for entry in raw:
-        pi = entry["page_index"]
-        if pi not in pages_data:
-            pages_data[pi] = {
-                "page_number": entry.get("page_number"),
-                "page_number_end": entry.get("page_number_end"),
-                "img_width": entry.get("img_width", 1),
-                "img_height": entry.get("img_height", 1),
-                "detections": [],
-            }
-        pages_data[pi]["detections"].append(entry)
+    pages_data = _group_detections_by_page(raw, include_page_number_end=True)
 
     # Load page metadata (column bounds) if available
     _pages_meta = {}
@@ -1822,15 +1794,7 @@ def generate_files(
             midpoint=meta.get("midpoint", 0),
         )
         for d in pd["detections"]:
-            bbox_raw = d.get("bbox", [0, 0, 1, 1])
-            page.detections.append(
-                Detection(
-                    bbox=BBox(x1=bbox_raw[0], y1=bbox_raw[1], x2=bbox_raw[2], y2=bbox_raw[3]),
-                    label=Label(d["label_id"]),
-                    confidence=d["confidence"],
-                    page_index=pi,
-                )
-            )
+            page.detections.append(Detection.from_raw_dict(d, pi, bbox_default=[0, 0, 1, 1]))
         # Fill in missing page numbers from first_page offset
         if page.page_number is None:
             page.page_number = pi + first_page

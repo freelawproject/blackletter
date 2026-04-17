@@ -1496,6 +1496,40 @@ def _clip_headnote_rect(
     return None
 
 
+def _group_detections_by_page(
+    raw: list[dict],
+    include_page_number_end: bool = False,
+) -> dict[int, dict]:
+    """Bucket raw detection dicts by ``page_index``.
+
+    Each bucket collects ``page_number``, ``img_width``, ``img_height``
+    (with sensible defaults), and the raw ``detections`` list for that
+    page. When ``include_page_number_end`` is ``True`` the bucket also
+    records ``page_number_end``.
+
+    :param raw: Flat list of detection dicts (e.g. loaded from
+        ``detections.json``).
+    :param include_page_number_end: Whether to carry ``page_number_end``
+        from the first row seen for each page.
+    :returns: Mapping ``page_index -> bucket``.
+    """
+    pages_data: dict[int, dict] = {}
+    for entry in raw:
+        pi = entry["page_index"]
+        if pi not in pages_data:
+            bucket = {
+                "page_number": entry.get("page_number"),
+                "img_width": entry.get("img_width", 1),
+                "img_height": entry.get("img_height", 1),
+                "detections": [],
+            }
+            if include_page_number_end:
+                bucket["page_number_end"] = entry.get("page_number_end")
+            pages_data[pi] = bucket
+        pages_data[pi]["detections"].append(entry)
+    return pages_data
+
+
 def _write_detections_sidecar(document: Document, output_dir: Path) -> int:
     """Serialise all detections to ``output_dir/detections.json``.
 

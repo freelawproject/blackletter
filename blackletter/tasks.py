@@ -358,8 +358,12 @@ def pair_and_compute_rects(
     Returns:
         Dict with opinions_count, rects_count.
     """
-    from blackletter.models import BBox, Detection, Document, Label, Page
-    from blackletter.scanner import _pair_opinions, _build_opinions_data
+    from blackletter.models import Detection, Document, Page
+    from blackletter.scanner import (
+        _pair_opinions,
+        _build_opinions_data,
+        _group_detections_by_page,
+    )
     from blackletter.process import compute_redaction_rects
     from blackletter.margins import compute_margin_rects
 
@@ -381,17 +385,7 @@ def pair_and_compute_rects(
     }
     src_pdf.close()
 
-    pages_data = {}
-    for entry in raw:
-        pi = entry["page_index"]
-        if pi not in pages_data:
-            pages_data[pi] = {
-                "page_number": entry.get("page_number"),
-                "img_width": entry.get("img_width", 1),
-                "img_height": entry.get("img_height", 1),
-                "detections": [],
-            }
-        pages_data[pi]["detections"].append(entry)
+    pages_data = _group_detections_by_page(raw)
 
     pages = []
     for pi in sorted(pages_data.keys()):
@@ -412,15 +406,7 @@ def pair_and_compute_rects(
             midpoint=meta.get("midpoint", 0),
         )
         for d in pd["detections"]:
-            b = d.get("bbox", [0, 0, 1, 1])
-            page.detections.append(
-                Detection(
-                    bbox=BBox(x1=b[0], y1=b[1], x2=b[2], y2=b[3]),
-                    label=Label(d["label_id"]),
-                    confidence=d["confidence"],
-                    page_index=pi,
-                )
-            )
+            page.detections.append(Detection.from_raw_dict(d, pi, bbox_default=[0, 0, 1, 1]))
         pages.append(page)
 
     document = Document(

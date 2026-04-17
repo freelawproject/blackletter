@@ -157,6 +157,30 @@ class Detection:
     confidence: float
     page_index: int
 
+    @classmethod
+    def from_raw_dict(
+        cls,
+        d: dict,
+        page_index: int,
+        bbox_default: list[float] | None = None,
+    ) -> Detection:
+        """Reconstruct a :class:`Detection` from a JSON-serialised sidecar row.
+
+        :param d: Row dict with keys ``label_id``, ``confidence``, and
+            ``bbox`` (list of 4 floats: x1, y1, x2, y2).
+        :param page_index: Page index this detection belongs to.
+        :param bbox_default: If supplied, a missing ``bbox`` key falls
+            back to this list; otherwise a ``KeyError`` propagates.
+        :returns: A new :class:`Detection`.
+        """
+        bbox = d["bbox"] if bbox_default is None else d.get("bbox", bbox_default)
+        return cls(
+            bbox=BBox(x1=bbox[0], y1=bbox[1], x2=bbox[2], y2=bbox[3]),
+            label=Label(d["label_id"]),
+            confidence=d["confidence"],
+            page_index=page_index,
+        )
+
     @property
     def is_copyrighted(self) -> bool:
         return self.label.is_copyrighted

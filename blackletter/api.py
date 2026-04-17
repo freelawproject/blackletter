@@ -307,7 +307,7 @@ def pair(
     :returns: List of opinion dicts with page ranges, bboxes, and
         outside_rects.
     """
-    from blackletter.models import BBox, Detection as BLDetection, Document, Label, Page
+    from blackletter.models import Detection as BLDetection, Document, Label, Page
     from blackletter.scanner import _pair_opinions, _outside_opinion_rects
 
     pdf_path = Path(pdf_path)
@@ -319,19 +319,10 @@ def pair(
         raw = detections
 
     # Build Document
+    from blackletter.scanner import _group_detections_by_page
+
     src_pdf = fitz.open(str(pdf_path))
-    pages_data = {}
-    for entry in raw:
-        pi = entry["page_index"]
-        if pi not in pages_data:
-            pages_data[pi] = {
-                "page_number": entry.get("page_number"),
-                "page_number_end": entry.get("page_number_end"),
-                "img_width": entry.get("img_width", 1),
-                "img_height": entry.get("img_height", 1),
-                "detections": [],
-            }
-        pages_data[pi]["detections"].append(entry)
+    pages_data = _group_detections_by_page(raw, include_page_number_end=True)
 
     pages = []
     for pi in sorted(pages_data.keys()):
@@ -350,15 +341,7 @@ def pair(
             page_number_end=pd.get("page_number_end"),
         )
         for d in pd["detections"]:
-            b = d.get("bbox", [0, 0, 1, 1])
-            page.detections.append(
-                BLDetection(
-                    bbox=BBox(x1=b[0], y1=b[1], x2=b[2], y2=b[3]),
-                    label=Label(d["label_id"]),
-                    confidence=d["confidence"],
-                    page_index=pi,
-                )
-            )
+            page.detections.append(BLDetection.from_raw_dict(d, pi, bbox_default=[0, 0, 1, 1]))
         if page.page_number is None:
             page.page_number = pi + first_page
         pages.append(page)
