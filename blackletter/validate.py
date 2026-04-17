@@ -425,7 +425,7 @@ def _structural_checks(file_path: str | Path) -> list[dict]:
                     "page_number": display_num,
                     "check_name": "orientation",
                     "severity": "info",
-                    "message": (f"Page {display_num} is {orientation}, differs from page 1."),
+                    "message": f"Page {display_num} is {orientation}, differs from page 1.",
                 }
             )
 

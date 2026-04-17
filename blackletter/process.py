@@ -1069,7 +1069,8 @@ def cmd_process(args: argparse.Namespace) -> None:
     shrink = not getattr(args, "no_shrink", False)
 
     # Build output name: reporter.volume.firstpage.lastpage
-    page_count = len(fitz.open(str(args.pdf)))
+    with fitz.open(str(args.pdf)) as _pdf_for_count:
+        page_count = len(_pdf_for_count)
     # Prefer the last_page from filename parsing over computing from page count
     last_page = inferred.get("last_page") or (args.first_page + page_count - 1)
     parts = []
