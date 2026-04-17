@@ -44,23 +44,29 @@ def _classify_text(stripped: str) -> tuple[str, str] | None:
 
 def _scan_crop(
     ocr,
-    img_bytes: bytes,
+    pil_crop: Image.Image,
     zone_name: str,
     page_idx: int,
     x_offset: int = 0,
     y_offset: int = 0,
 ) -> tuple[list, list]:
-    tmp_path = f"/tmp/pn_{os.getpid()}_{page_idx}_{zone_name}.png"
-    with open(tmp_path, "wb") as f:
-        f.write(img_bytes)
+    """Run OCR on a cropped PIL image and classify detected text.
+
+    :param ocr: PaddleOCR instance (or None to fall back to Tesseract).
+    :param pil_crop: Cropped PIL image to scan.
+    :param zone_name: Label for the crop zone (e.g. ``"corner-L"``).
+    :param page_idx: Zero-based page index (used for logging).
+    :param x_offset: Horizontal pixel offset to add to polygon coordinates.
+    :param y_offset: Vertical pixel offset to add to polygon coordinates.
+    :returns: ``(hits, near_misses)`` where each is a list of result dicts.
+    :rtype: tuple[list, list]
+    """
     hits, near_misses = [], []
     if ocr is None:
         try:
             import pytesseract
-            from PIL import Image as _I
 
-            pil_img = _I.open(tmp_path)
-            tess_text = pytesseract.image_to_string(pil_img, config="--psm 6").strip()
+            tess_text = pytesseract.image_to_string(pil_crop, config="--psm 6").strip()
             for line in tess_text.splitlines():
                 classified = _classify_text(line.strip())
                 if classified:
@@ -77,7 +83,10 @@ def _scan_crop(
         except Exception:
             pass
         return hits, near_misses
-    result = ocr.predict(tmp_path)
+    import numpy as np
+
+    # paddlex assumes numpy arrays are BGR; PIL gives RGB, so swap channels.
+    result = ocr.predict(np.array(pil_crop)[:, :, ::-1])
     if not result or not result[0]:
         return hits, near_misses
     r = result[0]
@@ -110,12 +119,28 @@ def _ocr_crop_multi(
     ocr,
     glm_processor,
     glm_model,
-    pil_crop,
+    pil_crop: Image.Image,
     zone_name: str,
     page_idx: int,
     exp_start: int | None = None,
     exp_end: int | None = None,
 ) -> dict | None:
+    """Run multi-engine OCR on a crop, returning the first valid result.
+
+    Tries PaddleOCR first, then Tesseract, then GLM-OCR (rare fallback).
+
+    :param ocr: PaddleOCR instance, or None to skip.
+    :param glm_processor: Pre-loaded GLM AutoProcessor, or None.
+    :param glm_model: Pre-loaded GLM model, or None.
+    :param pil_crop: Cropped PIL image to run OCR on.
+    :param zone_name: Label for the crop zone (e.g. ``"yolo-pn"``).
+    :param page_idx: Zero-based page index (used for logging and caching).
+    :param exp_start: Expected first page number, for range validation.
+    :param exp_end: Expected last page number, for range validation.
+    :returns: Result dict with keys ``text``, ``score``, ``zone``, ``type``,
+        ``ocr``, or None if no valid page number was found.
+    :rtype: dict | None
+    """
     margin = 20
 
     def is_valid(text, typ):
@@ -129,14 +154,14 @@ def _ocr_crop_multi(
                 return False
         return typ == "single"
 
-    tmp_path = f"/tmp/pn_{os.getpid()}_{page_idx}_{zone_name}.png"
-    pil_crop.save(tmp_path)
-
-    # 1) PaddleOCR
+    # 1) PaddleOCR -- pass numpy array directly, no temp file needed.
+    # paddlex assumes numpy arrays are BGR; PIL gives RGB, so swap channels.
     if ocr is None:
         result = None
     else:
-        result = ocr.predict(tmp_path)
+        import numpy as np
+
+        result = ocr.predict(np.array(pil_crop)[:, :, ::-1])
     if result and result[0]:
         r = result[0]
         texts = r.get("rec_texts", []) if isinstance(r, dict) else getattr(r, "rec_texts", [])
@@ -193,7 +218,10 @@ def _ocr_crop_multi(
         except Exception:
             pass
     if glm_processor is not None and glm_model is not None:
+        # GLM needs a file path; write a temp file only for this rare fallback.
+        tmp_path = f"/tmp/pn_{os.getpid()}_{page_idx}_{zone_name}.png"
         try:
+            pil_crop.save(tmp_path)
             messages = [
                 {
                     "role": "user",
@@ -232,6 +260,11 @@ def _ocr_crop_multi(
                         }
         except Exception:
             pass
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
 
     return None
 
@@ -332,8 +365,6 @@ def _process_page(args: tuple) -> dict:
         _process_page._pdf = _fitz.open(pdf_path)
         _process_page._pdf_path = pdf_path
 
-    import io
-
     ocr = _process_page._ocr
     yolo = _process_page._yolo
     glm_proc = _process_page._glm_processor
@@ -344,11 +375,6 @@ def _process_page(args: tuple) -> dict:
     pix = page.get_pixmap(dpi=200)
     img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
     img_w, img_h = img.size
-
-    def img_to_bytes(pil_img):
-        buf = io.BytesIO()
-        pil_img.save(buf, format="PNG")
-        return buf.getvalue()
 
     page_num = None
 
@@ -437,13 +463,13 @@ def _process_page(args: tuple) -> dict:
             (img.crop((0, 0, half_w, crop_h)), "corner-L", 0),
             (img.crop((half_w, 0, img_w, crop_h)), "corner-R", half_w),
         ]:
-            hits, _ = _scan_crop(ocr, img_to_bytes(crop), cname, page_idx, x_offset=x_off)
+            hits, _ = _scan_crop(ocr, crop, cname, page_idx, x_offset=x_off)
             candidates.extend(hits)
         corner_result = _pick_best(candidates, img_w, img_h, exp_start, exp_end)
 
         if not corner_result or corner_result["score"] < MIN_SCORE:
             top_crop = img.crop((0, 0, img_w, crop_h))
-            hits, _ = _scan_crop(ocr, img_to_bytes(top_crop), "top", page_idx)
+            hits, _ = _scan_crop(ocr, top_crop, "top", page_idx)
             candidates.extend(hits)
             corner_result = _pick_best(candidates, img_w, img_h, exp_start, exp_end)
 
