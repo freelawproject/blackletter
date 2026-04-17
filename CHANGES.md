@@ -15,6 +15,7 @@ The following changes are not yet released, but are code complete:
 - Replace two `document.by_label()` calls with a single pass over page detections in `_pair_opinions()`, reducing from 3 sorts to 1 (#36)
 - Replace per-opinion detection scanning with a single pre-sorted list and bisect slicing in `_build_full_redacted` (#37)
 - Eliminate temp PNG file writes during OCR crop processing, reducing I/O overhead and preventing leaked files in `/tmp` on crashes (#38)
+- Add check changelog action (#40)
 
 ## Current
 
