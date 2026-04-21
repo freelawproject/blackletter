@@ -4,8 +4,9 @@ Each function is one discrete step. Call only what you need.
 All functions work with file paths and return file paths or data.
 
 Usage:
-    from blackletter.api import bitonal, ocr, detect, pair, compute_rects, build_redacted, split_opinions
+    from blackletter.api import ensure_weights, bitonal, ocr, detect, pair, compute_rects, build_redacted, split_opinions
 
+    ensure_weights(["large"])  # download large.pt from HF if absent
     bitonal_pdf = bitonal(source_pdf, output_dir)
     ocr_pdf = ocr(bitonal_pdf, output_dir)
     detections = detect(bitonal_pdf, output_dir, models=["medium", "large"])
@@ -24,6 +25,75 @@ from collections.abc import Callable
 from pathlib import Path
 
 import fitz
+
+
+# Hugging Face sources for weights not bundled in the package.
+# ``small`` and ``medium`` ship inside ``blackletter/weights/`` via
+# ``package-data`` in ``pyproject.toml``; ``large`` is too big for
+# PyPI and is downloaded on demand.
+_HF_WEIGHTS: dict[str, tuple[str, str]] = {
+    "large": ("flooie/blackletter-large", "large.pt"),
+}
+
+
+def ensure_weights(models: list[str] | None = None) -> dict[str, Path]:
+    """Ensure named YOLO weights exist under ``blackletter/weights/``.
+
+    For bundled weights (``small``, ``medium``), this simply resolves
+    the path. For weights sourced from Hugging Face (currently only
+    ``large``), downloads them to the package weights directory if
+    they are not already present. Safe to call repeatedly; a noop when
+    every requested weight is already on disk.
+
+    Call this before :func:`detect` if you want to guarantee that a
+    weight is available rather than relying on :func:`detect`'s
+    silent-skip behaviour for missing weights.
+
+    :param models: Model size names to ensure (e.g. ``["large"]``).
+        Defaults to all three: ``small``, ``medium``, ``large``.
+    :returns: Mapping from model name to its resolved path on disk.
+    :rtype: dict[str, Path]
+    :raises RuntimeError: If ``huggingface_hub`` is not installed but
+        a download is required. Install with
+        ``pip install blackletter[analyze]``.
+    :raises FileNotFoundError: If a requested weight is missing from
+        the installation and has no Hugging Face source.
+    """
+    weights_dir = Path(__file__).resolve().parent / "weights"
+    weights_dir.mkdir(parents=True, exist_ok=True)
+
+    if models is None:
+        models = ["small", "medium", "large"]
+
+    resolved: dict[str, Path] = {}
+    for name in models:
+        path = weights_dir / f"{name}.pt"
+        if path.is_file():
+            resolved[name] = path
+            continue
+
+        source = _HF_WEIGHTS.get(name)
+        if source is None:
+            raise FileNotFoundError(f"Weight {path} is missing and has no Hugging Face source.")
+
+        try:
+            from huggingface_hub import hf_hub_download
+        except ImportError as exc:
+            raise RuntimeError(
+                f"huggingface_hub is required to download {name}.pt. "
+                "Install with `pip install blackletter[analyze]`."
+            ) from exc
+
+        repo_id, filename = source
+        print(f"  Downloading {filename} from {repo_id}...", flush=True)
+        downloaded = hf_hub_download(
+            repo_id=repo_id,
+            filename=filename,
+            local_dir=str(weights_dir),
+        )
+        resolved[name] = Path(downloaded)
+
+    return resolved
 
 
 def bitonal(
