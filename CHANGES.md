@@ -16,6 +16,7 @@ The following changes are not yet released, but are code complete:
 - Replace per-opinion detection scanning with a single pre-sorted list and bisect slicing in `_build_full_redacted` (#37)
 - Eliminate temp PNG file writes during OCR crop processing, reducing I/O overhead and preventing leaked files in `/tmp` on crashes (#38)
 - Add check changelog action (#40)
+- Add new helper to download weights (#42)
 
 ## Current
 
