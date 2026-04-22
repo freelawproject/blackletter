@@ -211,12 +211,11 @@ def detect(
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
-    models_dir = Path(__file__).parent / "weights"
 
     if models is None:
         models = ["small", "medium", "large"]
 
-    model_map = {"small": "small.pt", "medium": "medium.pt", "large": "large.pt"}
+    resolved = ensure_weights(models)
 
     from blackletter.scanner import DPI, YOLO_BATCH
 
@@ -226,11 +225,7 @@ def detect(
 
     all_raw = []
     for model_name in models:
-        model_file = models_dir / model_map.get(model_name, f"{model_name}.pt")
-        if not model_file.exists():
-            print(f"  Model {model_file} not found, skipping", flush=True)
-            continue
-
+        model_file = resolved[model_name]
         model = YOLO(str(model_file))
         print(f"  Detecting with {model_name}...", flush=True)
         t0 = time.time()

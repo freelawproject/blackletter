@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ultralytics import YOLO
 
+from blackletter.api import ensure_weights
 from blackletter.models import Label
 from blackletter.scanner import (
     scan,
@@ -22,28 +23,16 @@ DEFAULT_MODEL = Path(__file__).resolve().parent / "weights" / "small.pt"
 MEDIUM_MODEL = Path(__file__).resolve().parent / "weights" / "medium.pt"
 LARGE_MODEL = Path(__file__).resolve().parent / "weights" / "large.pt"
 
-# Hugging Face repo for models not bundled in the package
-_HF_SOURCES = {
-    LARGE_MODEL: ("flooie/blackletter-large", "large.pt"),
-}
-
 
 def _ensure_model(path: Path) -> None:
-    """Download model from Hugging Face if not present locally."""
-    if path.exists():
+    """Ensure the model at ``path`` is present; download bundled weights if missing."""
+    if path.is_file():
         return
-    if path not in _HF_SOURCES:
-        print(f"Model not found: {path}")
-        sys.exit(1)
-    repo_id, filename = _HF_SOURCES[path]
-    print(f"Model not found locally — downloading {filename} from {repo_id}...")
     try:
-        from huggingface_hub import hf_hub_download
-    except ImportError:
-        print("huggingface_hub is required to download models. Run: pip install huggingface_hub")
+        ensure_weights([path.stem])
+    except (RuntimeError, FileNotFoundError) as exc:
+        print(str(exc))
         sys.exit(1)
-    hf_hub_download(repo_id=repo_id, filename=filename, local_dir=path.parent)
-    print(f"Downloaded to {path}")
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:

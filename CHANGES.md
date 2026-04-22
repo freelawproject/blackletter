@@ -17,6 +17,7 @@ The following changes are not yet released, but are code complete:
 - Eliminate temp PNG file writes during OCR crop processing, reducing I/O overhead and preventing leaked files in `/tmp` on crashes (#38)
 - Add check changelog action (#40)
 - Add new helper to download weights (#42)
+- Consolidate model download logic through `ensure_weights`: `detect()` now downloads missing weights instead of silently skipping, and `cli.py` and `analyze.py` no longer duplicate the Hugging Face download code (#42)
 
 ## Current
 

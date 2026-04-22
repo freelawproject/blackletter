@@ -111,3 +111,21 @@ class TestErrors:
 
         with pytest.raises(FileNotFoundError, match="no Hugging Face source"):
             api.ensure_weights(["nonexistent"])
+
+
+# ── detect() integration ─────────────────────────────────────────────────
+
+
+class TestDetectIntegration:
+    def test_detect_raises_for_unknown_model_instead_of_skipping(self, tmp_path):
+        """``detect`` should raise for unknown model names, not silently skip.
+
+        ``ensure_weights`` runs up front in ``detect``, so the PDF is
+        never opened and we can pass a non-existent path.
+        """
+        with pytest.raises(FileNotFoundError, match="no Hugging Face source"):
+            api.detect(
+                pdf_path=tmp_path / "fake.pdf",
+                output_dir=tmp_path,
+                models=["nonexistent"],
+            )
