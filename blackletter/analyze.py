@@ -356,17 +356,12 @@ def _process_page(args: tuple) -> dict:
     if not hasattr(_process_page, "_yolo"):
         from ultralytics import YOLO
 
-        model_path = Path(model_path)
-        if not model_path.exists():
-            from huggingface_hub import hf_hub_download
+        from blackletter.api import ensure_weights
 
-            model_path.parent.mkdir(parents=True, exist_ok=True)
-            downloaded = hf_hub_download(
-                repo_id="flooie/blackletter-large",
-                filename=model_path.name,
-                local_dir=model_path.parent,
-            )
-            model_path = Path(downloaded)
+        model_path = Path(model_path)
+        if not model_path.is_file():
+            resolved = ensure_weights([model_path.stem])
+            model_path = resolved[model_path.stem]
         _process_page._yolo = YOLO(str(model_path))
     if not hasattr(_process_page, "_glm"):
         # Lazy-load GLM-OCR: don't load the model upfront, only when needed
@@ -555,27 +550,16 @@ def analyze_pdf(
     """
     import fitz
 
+    from blackletter.api import ensure_weights
+
     pdf_path = str(pdf_path)
     if model is None:
         model = DEFAULT_ANALYZE_MODEL
 
-    # Auto-download model from Hugging Face if not present
     model = Path(model)
-    if not model.exists():
-        try:
-            from huggingface_hub import hf_hub_download
-
-            print(f"  Downloading {model.name} from Hugging Face...", flush=True)
-            downloaded = hf_hub_download(
-                repo_id="flooie/blackletter-large",
-                filename=model.name,
-                local_dir=model.parent,
-            )
-            model = Path(downloaded)
-        except Exception as e:
-            raise FileNotFoundError(
-                f"Model not found at {model} and could not be downloaded: {e}"
-            ) from e
+    if not model.is_file():
+        resolved = ensure_weights([model.stem])
+        model = resolved[model.stem]
 
     if num_workers is None:
         num_workers = min(4, cpu_count())
