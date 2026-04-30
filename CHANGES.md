@@ -4,6 +4,10 @@
 
 The following changes are not yet released, but are code complete:
 
+## Current
+
+0.0.9 (2026-04-29)
+
 - Add rST docstrings (`:param:` / `:returns:`) across all public and internal functions in `api.py`, `margins.py`, `models.py`, `analyze.py`, `scanner.py`, and `validate.py`
 - Add `Callable` type hints for `progress_callback` parameters in `api.py`, `analyze.py`, `scanner.py`, and `validate.py`
 - Fix resource leak in `api.ocr()` where `fitz.open()` was never closed
@@ -19,18 +23,15 @@ The following changes are not yet released, but are code complete:
 - Add new helper to download weights (#42)
 - Consolidate model download logic through `ensure_weights`: `detect()` now downloads missing weights instead of silently skipping, and `cli.py` and `analyze.py` no longer duplicate the Hugging Face download code (#42)
 
-## Current
+## Past
 
 0.0.8 (2026-04-01)
 
 - Update api generate file names
 
-## Past
-
 0.0.7 (2026-04-01)
 
 - Simplify API call for generating file
-
 
 0.0.6 (2026-04-01)
 
@@ -67,7 +68,5 @@ The following changes are not yet released, but are code complete:
 - Remove defunct verify.txt pipeline
 - Rename bundled model from best.pt to small.pt
 - Update README with full documentation of all commands, models, and output files
-
-## Past
 
 0.0.1 - Initial release
