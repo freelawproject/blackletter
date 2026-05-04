@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 
 import fitz
-from ultralytics import YOLO
 
 from blackletter.models import BBox, Detection, Label
 from blackletter.refine import refine_headnote_rects
@@ -1035,6 +1034,8 @@ def cmd_process(args: argparse.Namespace) -> None:
 
     import time as _time
 
+    from ultralytics import YOLO
+
     _t_total = _time.time()
 
     model = YOLO(str(args.model))
@@ -1382,6 +1383,8 @@ def reprocess_section(
         redacted_paths, unredacted_paths.
     """
     import tempfile
+
+    from ultralytics import YOLO
 
     ocr_pdf_path = Path(ocr_pdf_path)
     output_dir = Path(output_dir)

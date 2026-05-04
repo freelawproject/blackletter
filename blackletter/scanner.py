@@ -9,14 +9,17 @@ import subprocess
 import tempfile
 from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2
 import fitz
 import numpy as np
 from PIL import Image
-from ultralytics import YOLO
 
 from blackletter.models import BBox, Detection, Document, Label, Page
+
+if TYPE_CHECKING:
+    from ultralytics import YOLO
 
 logger = logging.getLogger(__name__)
 
