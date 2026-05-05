@@ -4,6 +4,8 @@
 
 The following changes are not yet released, but are code complete:
 
+- Lazy-load `ultralytics`/`torch` so importing `blackletter` (or any submodule) no longer pulls in the GPU stack. CPU-only consumers (e.g. scanning daemons running with RunPod) save ~500 MB to 1 GB of resident memory; YOLO-using code paths are unchanged (#44)
+
 ## Current
 
 0.0.9 (2026-04-29)
