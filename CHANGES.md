@@ -4,12 +4,16 @@
 
 The following changes are not yet released, but are code complete:
 
-- Lazy-load `ultralytics`/`torch` so importing `blackletter` (or any submodule) no longer pulls in the GPU stack. CPU-only consumers (e.g. scanning daemons running with RunPod) save ~500 MB to 1 GB of resident memory; YOLO-using code paths are unchanged (#44)
-- Remove `masked/` output entirely (per-opinion masked PDFs are no longer generated). Replaced with an opt-in `llm/` directory: one PDF per source page sliced from the fully redacted document, with an invisible `<--CASEEND-->` text stamp (`render_mode=3`) on every redacted Key-icon location so downstream LLM passes can detect opinion boundaries. Enable with `--llm` on `blackletter process` or `llm=True` on `api.generate()`
-- Drop the `WHITE_IN_MASKED` override from `api.generate._apply_page`: `PAGE_HEADER` and `STATE_ABBREVIATION` now use the fill colour from `redactions.json` in all output modes instead of being forced black outside masked mode
-- Delete `_build_masked_opinions` and `_delete_headnote_pages` (process.py); collapse `_apply_page`'s `mode` parameter from `{full, redacted, masked}` to `{full, redacted}` (api.py)
-
 ## Current
+
+0.0.10 (2026-05-14)
+
+- Lazy-load `ultralytics`/`torch` so importing `blackletter` (or any submodule) no longer pulls in the GPU stack. CPU-only consumers (e.g. scanning daemons running with RunPod) save ~500 MB to 1 GB of resident memory; YOLO-using code paths are unchanged (#44)
+- Remove `masked/` output entirely (per-opinion masked PDFs are no longer generated). Replaced with an opt-in `llm/` directory: one PDF per source page sliced from the fully redacted document, with an invisible `<--CASEEND-->` text stamp (`render_mode=3`) on every redacted Key-icon location so downstream LLM passes can detect opinion boundaries. Enable with `--llm` on `blackletter process` or `llm=True` on `api.generate()` (#45)
+- Drop the `WHITE_IN_MASKED` override from `api.generate._apply_page`: `PAGE_HEADER` and `STATE_ABBREVIATION` now use the fill colour from `redactions.json` in all output modes instead of being forced black outside masked mode (#45)
+- Delete `_build_masked_opinions` and `_delete_headnote_pages` (process.py); collapse `_apply_page`'s `mode` parameter from `{full, redacted, masked}` to `{full, redacted}` (api.py) (#45)
+
+## Past
 
 0.0.9 (2026-04-29)
 
@@ -27,8 +31,6 @@ The following changes are not yet released, but are code complete:
 - Add check changelog action (#40)
 - Add new helper to download weights (#42)
 - Consolidate model download logic through `ensure_weights`: `detect()` now downloads missing weights instead of silently skipping, and `cli.py` and `analyze.py` no longer duplicate the Hugging Face download code (#42)
-
-## Past
 
 0.0.8 (2026-04-01)
 
