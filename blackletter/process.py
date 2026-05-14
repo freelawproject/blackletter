@@ -89,6 +89,12 @@ def _key_rects_pdf_by_page_from_document(document) -> dict[int, list[fitz.Rect]]
     Applies the same size + confidence filtering as the redaction pipeline
     so the resulting rects match the Key icons that actually got blacked
     out in the redacted PDF.
+
+    :param document: ``Document`` carrying per-page detections and image /
+        PDF dimensions.
+    :returns: Mapping of page index to ``fitz.Rect`` instances (PDF
+        points). Pages with no surviving KEY_ICON detections are omitted.
+    :rtype: dict[int, list[fitz.Rect]]
     """
     result: dict[int, list[fitz.Rect]] = {}
     thresh = LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
@@ -115,6 +121,13 @@ def _key_rects_pdf_by_page_from_rects(rects_path: Path, document) -> dict[int, l
     The rects file stores image-pixel coordinates with a ``type`` field;
     only entries typed ``"KEY_ICON"`` are returned so the stamps line up
     with the icons that were redacted.
+
+    :param rects_path: Path to ``redaction_rects.json`` (image-pixel coords).
+    :param document: ``Document`` used to recover per-page pixel-to-PDF
+        scale factors.
+    :returns: Mapping of page index to ``fitz.Rect`` instances (PDF
+        points). Pages with no KEY_ICON rects are omitted.
+    :rtype: dict[int, list[fitz.Rect]]
     """
     import json as _json
 
@@ -150,6 +163,13 @@ def _split_llm_pages(
     Each output page is stamped with an invisible ``<--CASEEND-->`` token
     inside every redacted KEY_ICON rect so downstream LLM passes can spot
     opinion boundaries.
+
+    :param full_redacted_pdf: Path to the fully-redacted source .
+    :param key_by_page: Mapping of source-page index to ``fitz.Rect``
+        instances (PDF points) where ``<--CASEEND-->`` should be stamped.
+    :param output_dir: Directory to write ``page_NNNN.pdf`` files into;
+        created if absent.
+    :returns: The number of pages written.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     with fitz.open(str(full_redacted_pdf)) as src_doc:
@@ -1492,53 +1512,6 @@ def rebuild_full_redacted_from_detections(
     print(f"  Rebuilt {len(opinions)} opinions from detections")
     _build_full_redacted(document, opinions, output_path, excluded=excluded)
     return output_path
-
-
-def _headnote_local_pages_to_delete(
-    caption,
-    key,
-    pages_by_index: dict,
-    mid: float,
-    reporter: str | None = None,
-) -> list[int]:
-    """Return local page indices (0-based within the masked PDF) to delete for one opinion.
-
-    Local index 0 = caption page, 1 = next page, etc.  Pages strictly between
-    the caption page and the headnote-end page are fully headnote and can be removed.
-    Returns an empty list if nothing should be deleted.
-    """
-    if caption.page_index == key.page_index:
-        return []
-
-    cap_key = caption.sort_key(mid)
-    key_key = key.sort_key(mid)
-    opinion_dets = []
-    for src_idx in range(caption.page_index, key.page_index + 1):
-        for d in pages_by_index[src_idx].detections:
-            sk = d.sort_key(mid)
-            if cap_key <= sk <= key_key:
-                opinion_dets.append(d)
-    opinion_dets.sort(key=lambda d: d.sort_key(mid))
-
-    end_marker = _find_redaction_end(opinion_dets, caption, key, mid, reporter=reporter)
-    if end_marker is not None:
-        first_hn = caption.page_index
-        last_hn = end_marker.page_index
-    else:
-        fallback_rects = _headnote_fallback_rects(opinion_dets, caption, pages_by_index, mid)
-        if not fallback_rects:
-            return []
-        first_hn = caption.page_index
-        last_hn = max(r[0] for r in fallback_rects)
-
-    if last_hn - first_hn < 2:
-        return []
-
-    return [
-        local_idx
-        for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1))
-        if first_hn < src_idx < last_hn
-    ]
 
 
 def generate_files(
