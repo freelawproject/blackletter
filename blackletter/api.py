@@ -804,29 +804,19 @@ def generate(
 
     # ── LLM per-page split with CASEEND stamps on Key icons (opt-in) ──
     if llm:
+        from blackletter.process import _split_llm_pages
+
         t_llm = time.time()
-        with fitz.open(str(full_path)) as src_doc:
-            total = src_doc.page_count
-            for pdf_idx in range(total):
-                page_num = pdf_idx + 1
-                page_pdf_path = llm_dir / f"page_{page_num:04d}.pdf"
-                single = fitz.open()
-                single.insert_pdf(src_doc, from_page=pdf_idx, to_page=pdf_idx)
-                krs = [r for r in pages_rects.get(str(pdf_idx), []) if r.get("type") == "KEY_ICON"]
-                if krs:
-                    page = single[0]
-                    for r in krs:
-                        rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
-                        page.insert_textbox(
-                            rect,
-                            "<--CASEEND-->",
-                            fontsize=8,
-                            fontname="helv",
-                            render_mode=3,
-                            align=1,
-                        )
-                single.save(str(page_pdf_path))
-                single.close()
+        key_by_page: dict[int, list[fitz.Rect]] = {}
+        for pi_str, rs in pages_rects.items():
+            rects = [
+                fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+                for r in rs
+                if r.get("type") == "KEY_ICON"
+            ]
+            if rects:
+                key_by_page[int(pi_str)] = rects
+        total = _split_llm_pages(full_path, key_by_page, llm_dir)
         print(f"    LLM {total} pages ({time.time() - t_llm:.0f}s)", flush=True)
 
     src.close()

@@ -183,13 +183,12 @@ def _split_llm_pages(
             if krs:
                 page = single[0]
                 for rect in krs:
-                    page.insert_textbox(
-                        rect,
+                    page.insert_text(
+                        (rect.x0 + 2, rect.y0 + rect.height / 2 + 3),
                         "<--CASEEND-->",
                         fontsize=8,
                         fontname="helv",
                         render_mode=3,
-                        align=1,
                     )
             single.save(str(page_pdf_path))
             single.close()
