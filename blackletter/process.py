@@ -36,7 +36,6 @@ from blackletter.scanner import (
     _text_x_bounds,
     _REDACT_WHITE,
     _REDACT_BLACK,
-    _MARGIN_LABELS,
     _filter_key_icons_by_size,
     LABEL_CONFIDENCE,
     CONFIDENCE_THRESHOLD,
@@ -84,203 +83,116 @@ def _detections_in_range(
     return all_dets[lo:hi]
 
 
-def _build_masked_opinions(
-    masked_paths: list[Path],
-    opinions: list,
-    document,
-    output_dir: Path,
-    excluded: set[tuple[int, int, int, int]] | None = None,
-) -> list[Path]:
-    """Consolidate same-page masked opinions into single PDF pages.
+def _key_rects_pdf_by_page_from_document(document) -> dict[int, list[fitz.Rect]]:
+    """Return KEY_ICON rects in PDF points, keyed by page index.
 
-    For opinions that all start and end on the same source page, produces
-    a single 1-page PDF extracted from the source with:
-    - All same-page opinions visible
-    - Content from multi-page opinions (that start on this page but
-      continue to the next) whited out
-    - Headnote/per-detection redactions applied
+    Applies the same size + confidence filtering as the redaction pipeline
+    so the resulting rects match the Key icons that actually got blacked
+    out in the redacted PDF.
+
+    :param document: ``Document`` carrying per-page detections and image /
+        PDF dimensions.
+    :returns: Mapping of page index to ``fitz.Rect`` instances (PDF
+        points). Pages with no surviving KEY_ICON detections are omitted.
+    :rtype: dict[int, list[fitz.Rect]]
     """
-    pages_by_index = {p.index: p for p in document.pages}
-    mid = document.pages[0].midpoint
-
-    # Group consecutive single-page opinions on the same source page
-    groups: list[list[int]] = []
-    i = 0
-    while i < len(opinions):
-        caption, key = opinions[i]
-        if caption.page_index == key.page_index:
-            group = [i]
-            j = i + 1
-            while j < len(opinions):
-                next_cap, next_key = opinions[j]
-                if (
-                    next_cap.page_index == next_key.page_index
-                    and next_cap.page_index == caption.page_index
-                ):
-                    group.append(j)
-                    j += 1
-                else:
-                    break
-            groups.append(group)
-            i = j
-        else:
-            groups.append([i])
-            i += 1
-
-    prefix = ""
-    if document.reporter and document.volume:
-        prefix = f"{document.reporter}.{document.volume}."
-
-    src_pdf = fitz.open(str(document.pdf_path))
-    final_paths: list[Path] = []
-
-    for group in groups:
-        if len(group) == 1:
-            final_paths.append(masked_paths[group[0]])
+    result: dict[int, list[fitz.Rect]] = {}
+    thresh = LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
+    for page in document.pages:
+        key_dets = [d for d in page.detections if d.label == Label.KEY_ICON]
+        if not key_dets:
             continue
+        valid = {id(d) for d in _filter_key_icons_by_size(key_dets)}
+        rects: list[fitz.Rect] = []
+        for d in key_dets:
+            if id(d) not in valid:
+                continue
+            if d.confidence < thresh:
+                continue
+            rects.append(d.bbox.to_fitz_pdf_rect(page.scale_x, page.scale_y))
+        if rects:
+            result[page.index] = rects
+    return result
 
-        # Multiple same-page opinions — build a single-page PDF
-        first_cap, _ = opinions[group[0]]
-        _, last_key = opinions[group[-1]]
-        src_page_idx = first_cap.page_index
-        page = pages_by_index[src_page_idx]
-        first_num = page.page_number
 
-        if first_num is not None:
-            name = f"{prefix}{first_num:04d}-{first_num:04d}.pdf"
-        else:
-            fb = src_page_idx + document.first_page
-            name = f"{prefix}{fb:04d}-{fb:04d}.pdf"
+def _key_rects_pdf_by_page_from_rects(rects_path: Path, document) -> dict[int, list[fitz.Rect]]:
+    """Return KEY_ICON rects from redaction_rects.json, converted to PDF points.
 
-        out_path = output_dir / name
+    The rects file stores image-pixel coordinates with a ``type`` field;
+    only entries typed ``"KEY_ICON"`` are returned so the stamps line up
+    with the icons that were redacted.
 
-        # Extract source page
-        out_pdf = fitz.open()
-        out_pdf.insert_pdf(src_pdf, from_page=src_page_idx, to_page=src_page_idx)
-        fitz_page = out_pdf[0]
+    :param rects_path: Path to ``redaction_rects.json`` (image-pixel coords).
+    :param document: ``Document`` used to recover per-page pixel-to-PDF
+        scale factors.
+    :returns: Mapping of page index to ``fitz.Rect`` instances (PDF
+        points). Pages with no KEY_ICON rects are omitted.
+    :rtype: dict[int, list[fitz.Rect]]
+    """
+    import json as _json
 
-        sx, sy = page.scale_x, page.scale_y
+    data = _json.loads(rects_path.read_text())
+    pages_by_idx = {p.index: p for p in document.pages}
+    result: dict[int, list[fitz.Rect]] = {}
+    for entry in data:
+        pi = entry["page_index"]
+        p = pages_by_idx.get(pi)
+        if p is None or p.img_width <= 1:
+            continue
+        sx = p.pdf_width / p.img_width
+        sy = p.pdf_height / p.img_height
+        rects: list[fitz.Rect] = []
+        for r in entry.get("rects", []):
+            if r.get("type") != "KEY_ICON":
+                continue
+            rect = fitz.Rect(r["x0"] * sx, r["y0"] * sy, r["x1"] * sx, r["y1"] * sy)
+            if not rect.is_empty:
+                rects.append(rect)
+        if rects:
+            result[pi] = rects
+    return result
 
-        # Collect page number rects — never redact these
-        pn_rects = _collect_page_number_rects(page, fitz_page, sx, sy)
 
-        add_safe = _make_add_safe(fitz_page, pn_rects)
+def _split_llm_pages(
+    full_redacted_pdf: Path,
+    key_by_page: dict[int, list[fitz.Rect]],
+    output_dir: Path,
+) -> int:
+    """Split the fully-redacted PDF into one PDF per page in ``output_dir``.
 
-        # Outside-opinion whiteout: treat the group as one mega-opinion
-        # from first caption to last key
-        for rect in _outside_opinion_rects(
-            page,
-            fitz_page.rect.width,
-            first_cap,
-            last_key,
-            is_first=True,
-            is_last=True,
-        ):
-            add_safe(rect, (1, 1, 1))
+    Each output page is stamped with an invisible ``<--CASEEND-->`` token
+    inside every redacted KEY_ICON rect so downstream LLM passes can spot
+    opinion boundaries.
 
-        # Headnote blackout for each opinion in the group
-        cap_key = first_cap.sort_key(mid)
-        key_key = last_key.sort_key(mid)
-        for idx in group:
-            cap, key = opinions[idx]
-            opinion_dets = []
-            for d in page.detections:
-                sk = d.sort_key(mid)
-                if cap.sort_key(mid) <= sk <= key.sort_key(mid):
-                    opinion_dets.append(d)
-            opinion_dets.sort(key=lambda d: d.sort_key(mid))
-
-            end_marker = _find_redaction_end(
-                opinion_dets, cap, key, mid, reporter=document.reporter
-            )
-            if end_marker is not None:
-                start = _find_redaction_start(opinion_dets, cap, mid)
-                headnote_rects = _redaction_rects(
-                    cap,
-                    end_marker,
-                    pages_by_index,
-                    start_marker=start if start is not cap else None,
-                )
-            else:
-                headnote_rects = _headnote_fallback_rects(opinion_dets, cap, pages_by_index, mid)
-            if headnote_rects:
-                header_bottom, footer_top = _margin_bounds(page)
-                for rect_page_idx, rect in headnote_rects:
-                    if rect_page_idx != src_page_idx:
-                        continue
-                    clipped = _clip_headnote_rect(
-                        fitz_page, rect, header_bottom, footer_top, document.ocr_applied
+    :param full_redacted_pdf: Path to the fully-redacted source .
+    :param key_by_page: Mapping of source-page index to ``fitz.Rect``
+        instances (PDF points) where ``<--CASEEND-->`` should be stamped.
+    :param output_dir: Directory to write ``page_NNNN.pdf`` files into;
+        created if absent.
+    :returns: The number of pages written.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with fitz.open(str(full_redacted_pdf)) as src_doc:
+        total = src_doc.page_count
+        for pdf_idx in range(total):
+            page_num = pdf_idx + 1
+            page_pdf_path = output_dir / f"page_{page_num:04d}.pdf"
+            single = fitz.open()
+            single.insert_pdf(src_doc, from_page=pdf_idx, to_page=pdf_idx)
+            krs = key_by_page.get(pdf_idx, [])
+            if krs:
+                page = single[0]
+                for rect in krs:
+                    page.insert_text(
+                        (rect.x0 + 2, rect.y0 + rect.height / 2 + 3),
+                        "<--CASEEND-->",
+                        fontsize=8,
+                        fontname="helv",
+                        render_mode=3,
                     )
-                    if clipped is not None:
-                        add_safe(clipped, (0, 0, 0))
-
-        # Per-detection redactions (within the mega-span)
-        # STATE_ABBREVIATION lives above the first caption so treat it like
-        # a margin label — always redact regardless of sort-key position.
-        _always_redact = _MARGIN_LABELS | {Label.STATE_ABBREVIATION}
-        redact_labels = _REDACT_WHITE | _REDACT_BLACK
-        for d in page.detections:
-            if d.label not in redact_labels:
-                continue
-            if _check_excluded(d, excluded):
-                continue
-            if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
-                continue
-            if d.label not in _always_redact:
-                sk = d.sort_key(mid)
-                if sk < cap_key or sk > key_key:
-                    continue
-            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
-            tight = _tighten_to_text(fitz_page, rect, skip=False)
-            if tight is not None:
-                rect = tight
-            fill = (0, 0, 0) if d.label in _REDACT_BLACK else (1, 1, 1)
-            add_safe(rect, fill)
-
-        # Key icon redactions (ratio-filtered only)
-        valid_key_icons = {
-            id(d)
-            for d in _filter_key_icons_by_size(
-                [x for x in page.detections if x.label == Label.KEY_ICON]
-            )
-        }
-        for d in page.detections:
-            if d.label != Label.KEY_ICON:
-                continue
-            if id(d) not in valid_key_icons:
-                continue
-            if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
-                continue
-            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
-            sk = d.sort_key(mid)
-            if sk < cap_key or sk > key_key:
-                add_safe(rect, (1, 1, 1))
-            else:
-                add_safe(rect, (0, 0, 0))
-
-        # CASE_SEQUENCE: black redaction, clamped to 40-60px, never overlapping captions
-        _caption_rects = []
-        for d in page.detections:
-            if d.label == Label.CASE_CAPTION:
-                _caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
-        for rect in _iter_case_sequence_rects(page, sx, sy, _caption_rects, excluded):
-            add_safe(rect, (0, 0, 0))
-
-        fitz_page.apply_redactions()
-        recompress_images(out_pdf)
-        out_pdf.save(str(out_path), garbage=4, deflate=True)
-        out_pdf.close()
-
-        # Remove the individual files
-        for idx in group:
-            p = masked_paths[idx]
-            if p.exists() and p != out_path:
-                p.unlink()
-
-        final_paths.append(out_path)
-
-    src_pdf.close()
-    return final_paths
+            single.save(str(page_pdf_path))
+            single.close()
+    return total
 
 
 def _apply_margin_rects(pdf_path: Path, margin_rects_path: Path) -> None:
@@ -1064,7 +976,7 @@ def cmd_process(args: argparse.Namespace) -> None:
 
     unredacted_dir = base_dir / "unredacted"
     redacted_dir = base_dir / "redacted"
-    masked_dir = base_dir / "masked"
+    llm_dir = base_dir / "llm"
 
     # ── Scan ──
     shrink = not getattr(args, "no_shrink", False)
@@ -1310,30 +1222,18 @@ def cmd_process(args: argparse.Namespace) -> None:
     )
     print(f"  Wrote {len(redacted_paths)} redacted PDFs ({_time.time() - _t0:.0f}s)", flush=True)
 
-    # ── Masked (for LLM) ──
-    if cb:
-        cb(0, 0, "Splitting masked opinions...")
-    _t0 = _time.time()
-    print(f"\nSplitting masked into {masked_dir}...", flush=True)
-    masked_paths = split_opinions(
-        document.pdf_path,
-        document,
-        masked_dir,
-        first_page=args.first_page,
-        redact_mode="masked",
-        excluded=excluded,
-    )
-    # Consolidate same-page opinions
-    final_masked = _build_masked_opinions(
-        masked_paths,
-        opinions,
-        document,
-        masked_dir,
-    )
-    print(
-        f"  Wrote {len(final_masked)} masked PDFs ({len(masked_paths)} opinions consolidated) ({_time.time() - _t0:.0f}s)",
-        flush=True,
-    )
+    # ── LLM (per-page split with CASEEND stamps on Key icons) ──
+    if getattr(args, "llm", False):
+        if cb:
+            cb(0, 0, "Splitting LLM pages...")
+        _t0 = _time.time()
+        print(f"\nSplitting LLM pages into {llm_dir}...", flush=True)
+        key_by_page = _key_rects_pdf_by_page_from_document(document)
+        n_llm = _split_llm_pages(full_redacted_path, key_by_page, llm_dir)
+        print(
+            f"  Wrote {n_llm} LLM page PDFs ({_time.time() - _t0:.0f}s)",
+            flush=True,
+        )
     print(f"\n── Total processing time: {_time.time() - _t_total:.0f}s ──", flush=True)
     if cb:
         cb(0, 0, "Done")
@@ -1613,76 +1513,6 @@ def rebuild_full_redacted_from_detections(
     return output_path
 
 
-def _headnote_local_pages_to_delete(
-    caption,
-    key,
-    pages_by_index: dict,
-    mid: float,
-    reporter: str | None = None,
-) -> list[int]:
-    """Return local page indices (0-based within the masked PDF) to delete for one opinion.
-
-    Local index 0 = caption page, 1 = next page, etc.  Pages strictly between
-    the caption page and the headnote-end page are fully headnote and can be removed.
-    Returns an empty list if nothing should be deleted.
-    """
-    if caption.page_index == key.page_index:
-        return []
-
-    cap_key = caption.sort_key(mid)
-    key_key = key.sort_key(mid)
-    opinion_dets = []
-    for src_idx in range(caption.page_index, key.page_index + 1):
-        for d in pages_by_index[src_idx].detections:
-            sk = d.sort_key(mid)
-            if cap_key <= sk <= key_key:
-                opinion_dets.append(d)
-    opinion_dets.sort(key=lambda d: d.sort_key(mid))
-
-    end_marker = _find_redaction_end(opinion_dets, caption, key, mid, reporter=reporter)
-    if end_marker is not None:
-        first_hn = caption.page_index
-        last_hn = end_marker.page_index
-    else:
-        fallback_rects = _headnote_fallback_rects(opinion_dets, caption, pages_by_index, mid)
-        if not fallback_rects:
-            return []
-        first_hn = caption.page_index
-        last_hn = max(r[0] for r in fallback_rects)
-
-    if last_hn - first_hn < 2:
-        return []
-
-    return [
-        local_idx
-        for local_idx, src_idx in enumerate(range(caption.page_index, key.page_index + 1))
-        if first_hn < src_idx < last_hn
-    ]
-
-
-def _delete_headnote_pages(
-    masked_paths: list[Path],
-    opinions: list[tuple],
-    document,
-    rects_path: Path,
-) -> None:
-    """Remove fully-headnote middle pages from masked opinion PDFs."""
-    pages_by_index = {p.index: p for p in document.pages}
-    mid = document.pages[0].midpoint
-
-    for path, (caption, key) in zip(masked_paths, opinions):
-        pages_to_delete = _headnote_local_pages_to_delete(
-            caption, key, pages_by_index, mid, reporter=document.reporter
-        )
-        if pages_to_delete and path.exists():
-            tmp = path.with_suffix(".tmp.pdf")
-            doc = fitz.open(str(path))
-            doc.delete_pages(pages_to_delete)
-            doc.save(str(tmp), garbage=4, deflate=True)
-            doc.close()
-            tmp.replace(path)
-
-
 def generate_files(
     ocr_pdf: str | Path,
     output: str | Path,
@@ -1692,6 +1522,7 @@ def generate_files(
     first_page: int = 1,
     footnotes: bool = False,
     unredacted: bool = False,
+    llm: bool = False,
     excluded: set[tuple[int, int, int, int]] | None = None,
 ) -> Path:
     """Phase 2: Generate redacted/split files from existing detections.
@@ -1858,9 +1689,8 @@ def generate_files(
         _build_full_redacted(document, opinions, full_redacted_path, excluded=excluded)
     print(f"  Full redacted done ({_time.time() - _t0:.0f}s)", flush=True)
 
-    # Split redacted and masked opinions
+    # Split redacted opinions
     redacted_dir = output / "redacted"
-    masked_dir = output / "masked"
 
     _t0 = _time.time()
     print(f"\nSplitting redacted into {redacted_dir}...", flush=True)
@@ -1879,25 +1709,17 @@ def generate_files(
         )
     print(f"  Redacted done ({_time.time() - _t0:.0f}s)", flush=True)
 
-    _t0 = _time.time()
-    print(f"\nSplitting masked into {masked_dir}...", flush=True)
-    if rects_path.exists():
-        # Split masked from the already-redacted PDF too
-        masked_paths = _split_from_redacted(
-            full_redacted_path, document, opinions, masked_dir, first_page
-        )
-        _delete_headnote_pages(masked_paths, opinions, document, rects_path)
-    else:
-        masked_paths = split_opinions(
-            document.pdf_path,
-            document,
-            masked_dir,
-            first_page=first_page,
-            redact_mode="masked",
-            excluded=excluded,
-        )
-    _build_masked_opinions(masked_paths, opinions, document, masked_dir)
-    print(f"  Masked done ({_time.time() - _t0:.0f}s)", flush=True)
+    # LLM per-page PDFs with CASEEND stamps on Key icons (opt-in)
+    if llm:
+        llm_dir = output / "llm"
+        _t0 = _time.time()
+        print(f"\nSplitting LLM pages into {llm_dir}...", flush=True)
+        if rects_path.exists():
+            key_by_page = _key_rects_pdf_by_page_from_rects(rects_path, document)
+        else:
+            key_by_page = _key_rects_pdf_by_page_from_document(document)
+        n_llm = _split_llm_pages(full_redacted_path, key_by_page, llm_dir)
+        print(f"  Wrote {n_llm} LLM page PDFs ({_time.time() - _t0:.0f}s)", flush=True)
 
     print(f"\n── Generate complete: {_time.time() - _t_total:.0f}s ──", flush=True)
     return output
@@ -1914,6 +1736,7 @@ def process(
     large: bool = False,
     footnotes: bool = False,
     unredacted: bool = False,
+    llm: bool = False,
     no_shrink: bool = False,
     optimize: int = 1,
     progress_callback=None,
@@ -1958,6 +1781,7 @@ def process(
         model=Path(model),
         footnotes=footnotes,
         unredacted=unredacted,
+        llm=llm,
         no_shrink=no_shrink,
         optimize=optimize,
         progress_callback=progress_callback,
@@ -2027,6 +1851,11 @@ def build_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--unredacted",
         action="store_true",
         help="Skip generating unredacted opinion PDFs",
+    )
+    p.add_argument(
+        "--llm",
+        action="store_true",
+        help="Generate per-page LLM PDFs with invisible <--CASEEND--> stamps on Key icons",
     )
     p.add_argument(
         "--cpu",

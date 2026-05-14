@@ -572,7 +572,7 @@ def split_opinions(
 ) -> dict:
     """Split the redacted PDF into individual opinion PDFs.
 
-    Creates redacted/, unredacted/, and masked/ subdirectories.
+    Creates redacted/ and (optionally) unredacted/ subdirectories.
 
     :param pdf_path: Path to the OCR'd (unredacted) PDF.
     :param output_dir: Directory containing the redacted PDF and
@@ -580,10 +580,9 @@ def split_opinions(
     :param unredacted: Whether to also generate unredacted opinion PDFs.
     :param opinions: Precomputed opinions list (from :func:`pair`). If
         ``None``, reads opinions.json from *output_dir*.
-    :returns: Dict with ``redacted``, ``unredacted``, and ``masked``
-        counts.
+    :returns: Dict with ``redacted`` and ``unredacted`` counts.
     """
-    from blackletter.process import _split_from_redacted, _build_masked_opinions
+    from blackletter.process import _split_from_redacted
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -616,17 +615,9 @@ def split_opinions(
         _split_from_redacted(str(pdf_path), opinions_data, str(unredacted_dir))
         print(f"  Split unredacted ({time.time() - t0:.0f}s)", flush=True)
 
-    # Build masked
-    t0 = time.time()
-    masked_dir = output_dir / "masked"
-    masked_dir.mkdir(exist_ok=True)
-    _build_masked_opinions(str(redacted_pdf), opinions_data, str(masked_dir))
-    print(f"  Split masked ({time.time() - t0:.0f}s)", flush=True)
-
     return {
         "redacted": len(redacted_files),
         "unredacted": len(list((output_dir / "unredacted").glob("*.pdf"))) if unredacted else 0,
-        "masked": len(list(masked_dir.glob("*.pdf"))),
     }
 
 
@@ -637,6 +628,7 @@ def generate(
     reporter: str = "",
     volume: str = "",
     unredacted: bool = False,
+    llm: bool = False,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict:
     """Generate all output PDFs from a source PDF and a redactions payload.
@@ -657,14 +649,13 @@ def generate(
         ``"a3d"``).
     :param volume: Volume number for filenames (e.g. ``"214"``).
     :param unredacted: Also generate unredacted opinion PDFs.
+    :param llm: Also generate per-page LLM PDFs with invisible
+        ``<--CASEEND-->`` stamps on Key-icon locations.
     :param progress_callback: Optional callable(current, total, message).
-    :returns: Dict with keys ``redacted_dir``, ``masked_dir``,
-        ``full_redacted``, and ``opinion_count``.
+    :returns: Dict with keys ``redacted_dir``, ``full_redacted``, and
+        ``opinion_count``. Includes ``llm_dir`` when *llm* is True.
     """
     import re
-
-    # Labels to white-out in masked output instead of black
-    WHITE_IN_MASKED = {"PAGE_HEADER", "STATE_ABBREVIATION"}
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -720,9 +711,8 @@ def generate(
         :param src_idx: Source page index in the original PDF.
         :param opinion: Opinion dict (or ``None`` for full-redacted mode).
         :param mode: One of ``"full"`` (all rects, no outside-opinion
-            whiteout), ``"redacted"`` (all rects + outside-opinion
-            whiteout), or ``"masked"`` (WHITE_IN_MASKED labels become
-            white + outside-opinion whiteout).
+            whiteout) or ``"redacted"`` (all rects + outside-opinion
+            whiteout).
         """
         # Page rects (margins + redactions), all PDF points
         for r in pages_rects.get(str(src_idx), []):
@@ -731,12 +721,6 @@ def generate(
                 continue
             if r["type"] == "margin":
                 fill = (1, 1, 1)
-
-            elif mode == "masked" and r["type"] in WHITE_IN_MASKED:
-                fill = (1, 1, 1)
-            elif mode != "masked" and r["type"] in WHITE_IN_MASKED:
-                fill = (0, 0, 0)
-
             else:
                 fill = (0, 0, 0) if r["fill"] == "black" else (1, 1, 1)
             fitz_page.add_redact_annot(rect, fill=fill)
@@ -775,13 +759,15 @@ def generate(
 
     # ── Split opinions ──
     redacted_dir = output_dir / "redacted"
-    masked_dir = output_dir / "masked"
     redacted_dir.mkdir(exist_ok=True)
-    masked_dir.mkdir(exist_ok=True)
 
     if unredacted:
         unredacted_dir = output_dir / "unredacted"
         unredacted_dir.mkdir(exist_ok=True)
+
+    if llm:
+        llm_dir = output_dir / "llm"
+        llm_dir.mkdir(exist_ok=True)
 
     t0 = time.time()
 
@@ -816,114 +802,31 @@ def generate(
         if done % 20 == 0 or done == len(opinions):
             print(f"    Redacted {done}/{len(opinions)}", flush=True)
 
-    # ── Masked: group same-page opinions together ──
-    # Build groups of consecutive single-page opinions on the same source page
-    groups: list[list[int]] = []
-    i = 0
-    while i < len(opinions):
-        op = opinions[i]
-        if op["caption_page"] == op["end_page"]:
-            group = [i]
-            j = i + 1
-            while j < len(opinions):
-                next_op = opinions[j]
-                if (
-                    next_op["caption_page"] == next_op["end_page"]
-                    and next_op["caption_page"] == op["caption_page"]
-                ):
-                    group.append(j)
-                    j += 1
-                else:
-                    break
-            groups.append(group)
-            i = j
-        else:
-            groups.append([i])
-            i += 1
+    # ── LLM per-page split with CASEEND stamps on Key icons (opt-in) ──
+    if llm:
+        from blackletter.process import _split_llm_pages
 
-    for group in groups:
-        if len(group) == 1:
-            # Single opinion (single-page or multi-page), build normally
-            op = opinions[group[0]]
-            start_idx = op["caption_page"]
-            end_idx = op["end_page"]
-            filename = filenames[group[0]]
-
-            out = fitz.open()
-            out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
-            for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
-                _apply_page(out[local_idx], src_idx, op, "masked")
-            out.save(str(masked_dir / filename), garbage=4, deflate=True)
-            out.close()
-        else:
-            # Multiple same-page opinions, consolidate into one PDF
-            # Only white out areas that ALL opinions consider "outside"
-            first_op = opinions[group[0]]
-            src_page_idx = first_op["caption_page"]
-
-            # Intersect outside_rects across all opinions in the group:
-            # start with the first opinion's rects, then intersect with each
-            # subsequent opinion's rects. Only areas outside ALL opinions remain.
-            result_rects = [
+        t_llm = time.time()
+        key_by_page: dict[int, list[fitz.Rect]] = {}
+        for pi_str, rs in pages_rects.items():
+            rects = [
                 fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
-                for r in first_op.get("outside_rects", [])
-                if r["page_index"] == src_page_idx
+                for r in rs
+                if r.get("type") == "KEY_ICON"
             ]
-            for idx in group[1:]:
-                other_rects = [
-                    fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
-                    for r in opinions[idx].get("outside_rects", [])
-                    if r["page_index"] == src_page_idx
-                ]
-                new_result = []
-                for r in result_rects:
-                    for o in other_rects:
-                        intersection = r & o
-                        if (
-                            not intersection.is_empty
-                            and intersection.x0 < intersection.x1
-                            and intersection.y0 < intersection.y1
-                        ):
-                            new_result.append(intersection)
-                result_rects = new_result
-
-            # Filename: strip the -1/-2/-3 suffix from first opinion's computed name
-            base_name = filenames[group[0]]
-            base_name = re.sub(r"-\d+\.pdf$", ".pdf", base_name)
-
-            out = fitz.open()
-            out.insert_pdf(src, from_page=src_page_idx, to_page=src_page_idx)
-            fitz_page = out[0]
-
-            # Apply page rects (margins + redactions) in masked mode
-            for r in pages_rects.get(str(src_page_idx), []):
-                rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
-                if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
-                    continue
-                if r["type"] in WHITE_IN_MASKED:
-                    fill = (1, 1, 1)
-                else:
-                    fill = (0, 0, 0) if r["fill"] == "black" else (1, 1, 1)
-                fitz_page.add_redact_annot(rect, fill=fill)
-
-            # Apply intersected outside rects
-            for rect in result_rects:
-                if not rect.is_empty:
-                    fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
-
-            fitz_page.apply_redactions()
-            out.save(str(masked_dir / base_name), garbage=4, deflate=True)
-            out.close()
-
-    masked_count = len(list(masked_dir.glob("*.pdf")))
-    print(f"    Masked {masked_count} files ({len(opinions)} opinions)", flush=True)
+            if rects:
+                key_by_page[int(pi_str)] = rects
+        total = _split_llm_pages(full_path, key_by_page, llm_dir)
+        print(f"    LLM {total} pages ({time.time() - t_llm:.0f}s)", flush=True)
 
     src.close()
     print(f"  Split complete ({time.time() - t0:.0f}s)", flush=True)
 
-    return {
+    result = {
         "full_redacted": full_path,
         "redacted_dir": redacted_dir,
-        "masked_dir": masked_dir,
         "opinion_count": len(opinions),
     }
+    if llm:
+        result["llm_dir"] = llm_dir
+    return result

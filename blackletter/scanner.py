@@ -2073,14 +2073,13 @@ def split_opinions(
         None: use the redact boolean (backwards compat)
         "unredacted": no redactions
         "redacted": headnote blackout + per-detection redactions, NO outside whiteout
-        "masked": outside-opinion whiteout only, no headnote/per-detection redactions
 
     Files are named {page_number:04d}-{seq:02d}.pdf.
     """
     # Resolve mode
     if redact_mode == "unredacted":
         redact = False
-    elif redact_mode in ("redacted", "masked"):
+    elif redact_mode == "redacted":
         redact = True
     output_dir.mkdir(parents=True, exist_ok=True)
     opinions = _pair_opinions(document, excluded=excluded)
@@ -2180,9 +2179,6 @@ def split_opinions(
                 )
 
             # Refine block rects to line-level with docTR
-            # Keep block-level rects for page-deletion coverage check (line-level
-            # rects have gaps between lines and won't sum to 95% coverage).
-            block_headnote_rects = headnote_rects
             if headnote_rects:
                 from blackletter.refine import refine_headnote_rects
 
@@ -2206,7 +2202,7 @@ def split_opinions(
                 _page_redact_rects: list[tuple[fitz.Rect, tuple]] = []
                 add_safe = _make_add_safe(fitz_page, pn_rects, collector=_page_redact_rects)
 
-                # White redact: content outside opinion (redacted + masked)
+                # White redact: content outside opinion
                 if is_first or is_last:
                     for rect in _outside_opinion_rects(
                         page,
@@ -2348,43 +2344,6 @@ def split_opinions(
                     _draw_boxes(shape, dets, page, fitz_page)
 
                 shape.commit()
-
-        # For masked mode, remove pages that are fully headnotes
-        # Use block-level rects (pre-refinement) for coverage. Line-level rects
-        # have gaps between lines and won't reliably sum to >=95%.
-        if redact_mode == "masked" and block_headnote_rects:
-            pages_to_delete: list[int] = []
-            for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
-                if src_idx not in pages_by_index:
-                    continue
-                page = pages_by_index[src_idx]
-                header_bottom, footer_top = _margin_bounds(page)
-                sx = page.scale_x
-                mid_pdf = page.midpoint * sx
-                content_height = footer_top - header_bottom
-                if content_height <= 0:
-                    continue
-
-                # Collect headnote rects for this page, split by column
-                left_coverage = 0.0
-                right_coverage = 0.0
-                for rect_page_idx, rect in block_headnote_rects:
-                    if rect_page_idx != src_idx:
-                        continue
-                    rect_height = min(rect.y1, footer_top) - max(rect.y0, header_bottom)
-                    if rect_height <= 0:
-                        continue
-                    if rect.x0 + rect.width / 2 < mid_pdf:
-                        left_coverage += rect_height / content_height
-                    else:
-                        right_coverage += rect_height / content_height
-
-                # If both columns are >=95% covered by headnotes, skip page
-                if left_coverage >= 0.95 and right_coverage >= 0.95:
-                    pages_to_delete.append(local_idx)
-
-            if pages_to_delete:
-                out_pdf.delete_pages(pages_to_delete)
 
         out_pdf.save(out_path, garbage=4, deflate=True)
         out_pdf.close()

@@ -48,10 +48,10 @@ The `process` command runs a single-pass pipeline:
 2. **Detection**: Runs a YOLO model to identify proprietary elements (headnotes, captions, key cites, brackets, etc.) and structural elements (page numbers, dividers, footnotes)
 3. **Page Numbers**: Extracts and validates page numbers using OCR on detected regions
 4. **Opinion Pairing**: Matches case captions to key icons to identify opinion boundaries
-5. **Splitting & Redaction**: Produces three output variants per opinion:
-   - **Unredacted**: Raw opinion pages extracted from the source
-   - **Redacted**: Potentially copyrighted content (headnotes, brackets, key icons) blacked out; non-opinion content whited out
-   - **Masked**: Optimized for LLM ingestion — only the opinion text is visible
+5. **Splitting & Redaction**: Produces per-opinion variants and an optional per-page LLM split:
+   - **Unredacted** (opt-in, via `--unredacted`): Raw opinion pages extracted from the source
+   - **Redacted**: Per-opinion PDFs with potentially copyrighted content (headnotes, brackets, key icons) blacked out
+   - **LLM** (opt-in, via `--llm`): One PDF per source page, sliced from the fully redacted document, with an invisible `<--CASEEND-->` marker stamped on every redacted Key-icon location so downstream LLM passes can detect opinion boundaries
 
 Additionally produces:
 - A full redacted copy of the entire document
@@ -90,6 +90,7 @@ Options:
   --large                   Use the large model (21 classes, auto-downloaded)
   --footnotes               Extract footnotes into separate PDFs
   --unredacted              Also generate unredacted opinion PDFs
+  --llm                     Also generate per-page LLM PDFs with <--CASEEND--> stamps
   --no-shrink               Skip downsampling (default: shrink to ~148 KB/page)
   --optimize {0,1,2,3}      ocrmypdf optimization level (default: 1)
   --bitonal                 Convert to 1-bit B&W before processing (for already-bitonal scans)
@@ -140,9 +141,10 @@ output/<reporter>/<volume>/<first-page>/
     margin_rects.json     # Margin cleanup rectangles
 
     images/               # Extracted case law images (PNGs)
-    unredacted/           # Individual opinion PDFs (raw, no redaction)
+    unredacted/           # Individual opinion PDFs (raw, no redaction) — only if --unredacted
     redacted/             # Individual opinion PDFs (copyrighted content redacted)
-    masked/               # Individual opinion PDFs (for LLM ingestion)
+    llm/                  # Per-page fully-redacted PDFs with invisible <--CASEEND-->
+                          # stamps on each Key-icon location — only if --llm
 ```
 
 The JSON files are designed for use with a review UI — they allow manual inspection and adjustment of detections and redaction boundaries before final output is committed.
