@@ -4,6 +4,8 @@
 
 The following changes are not yet released, but are code complete:
 
+- Close every `fitz.Document` via `with fitz.open(...)` in `margins.py`, `api.py`, and `process.py` so exceptions no longer leak the open (mmap-backed) Document, fixing the runaway memory growth seen in downstream scanning web pods
+
 ## Current
 
 0.0.10 (2026-05-14)

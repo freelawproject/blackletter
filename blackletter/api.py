@@ -120,20 +120,17 @@ def bitonal(
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "bitonal.pdf"
 
-    src = fitz.open(str(pdf_path))
-    out = fitz.open()
-    total = src.page_count
+    with fitz.open(str(pdf_path)) as src, fitz.open() as out:
+        total = src.page_count
 
-    for i in range(total):
-        _render_bitonal_page(src[i], out, dpi, threshold)
-        if progress_callback and ((i + 1) % 10 == 0 or i == total - 1):
-            progress_callback(i + 1, total, f"Bitonal: {i + 1}/{total} pages")
-        if (i + 1) % 50 == 0 or i == total - 1:
-            print(f"  Bitonal {i + 1}/{total}", flush=True)
+        for i in range(total):
+            _render_bitonal_page(src[i], out, dpi, threshold)
+            if progress_callback and ((i + 1) % 10 == 0 or i == total - 1):
+                progress_callback(i + 1, total, f"Bitonal: {i + 1}/{total} pages")
+            if (i + 1) % 50 == 0 or i == total - 1:
+                print(f"  Bitonal {i + 1}/{total}", flush=True)
 
-    out.save(str(output_path), garbage=4, deflate=True)
-    out.close()
-    src.close()
+        out.save(str(output_path), garbage=4, deflate=True)
     print(f"  Saved bitonal.pdf ({output_path.stat().st_size / 1024 / 1024:.1f} MB)", flush=True)
     return output_path
 
@@ -219,53 +216,51 @@ def detect(
 
     from blackletter.scanner import DPI, YOLO_BATCH
 
-    pdf = fitz.open(str(pdf_path))
     mat = fitz.Matrix(DPI / 72, DPI / 72)
-    total = pdf.page_count
 
     all_raw = []
-    for model_name in models:
-        model_file = resolved[model_name]
-        model = YOLO(str(model_file))
-        print(f"  Detecting with {model_name}...", flush=True)
-        t0 = time.time()
+    with fitz.open(str(pdf_path)) as pdf:
+        total = pdf.page_count
+        for model_name in models:
+            model_file = resolved[model_name]
+            model = YOLO(str(model_file))
+            print(f"  Detecting with {model_name}...", flush=True)
+            t0 = time.time()
 
-        for bs in range(0, total, YOLO_BATCH):
-            be = min(bs + YOLO_BATCH, total)
-            imgs = []
-            metas = []
-            for i in range(bs, be):
-                pix = pdf[i].get_pixmap(matrix=mat)
-                imgs.append(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
-                metas.append({"index": i, "img_width": pix.width, "img_height": pix.height})
+            for bs in range(0, total, YOLO_BATCH):
+                be = min(bs + YOLO_BATCH, total)
+                imgs = []
+                metas = []
+                for i in range(bs, be):
+                    pix = pdf[i].get_pixmap(matrix=mat)
+                    imgs.append(Image.frombytes("RGB", (pix.width, pix.height), pix.samples))
+                    metas.append({"index": i, "img_width": pix.width, "img_height": pix.height})
 
-            results = model(imgs, conf=confidence, verbose=False)
-            for j, res in enumerate(results):
-                pm = metas[j]
-                for box in res.boxes:
-                    class_id = int(box.cls[0].item())
-                    try:
-                        label_name = Label(class_id).name
-                    except ValueError:
-                        continue
-                    all_raw.append(
-                        {
-                            "page_index": pm["index"],
-                            "label": label_name,
-                            "label_id": class_id,
-                            "confidence": round(float(box.conf[0].item()), 3),
-                            "bbox": [round(v, 1) for v in box.xyxy[0].tolist()],
-                            "img_width": pm["img_width"],
-                            "img_height": pm["img_height"],
-                            "model": model_name,
-                        }
-                    )
-            if (bs + YOLO_BATCH) % 100 == 0 or bs + YOLO_BATCH >= total:
-                print(f"    {min(bs + YOLO_BATCH, total)}/{total} pages", flush=True)
+                results = model(imgs, conf=confidence, verbose=False)
+                for j, res in enumerate(results):
+                    pm = metas[j]
+                    for box in res.boxes:
+                        class_id = int(box.cls[0].item())
+                        try:
+                            label_name = Label(class_id).name
+                        except ValueError:
+                            continue
+                        all_raw.append(
+                            {
+                                "page_index": pm["index"],
+                                "label": label_name,
+                                "label_id": class_id,
+                                "confidence": round(float(box.conf[0].item()), 3),
+                                "bbox": [round(v, 1) for v in box.xyxy[0].tolist()],
+                                "img_width": pm["img_width"],
+                                "img_height": pm["img_height"],
+                                "model": model_name,
+                            }
+                        )
+                if (bs + YOLO_BATCH) % 100 == 0 or bs + YOLO_BATCH >= total:
+                    print(f"    {min(bs + YOLO_BATCH, total)}/{total} pages", flush=True)
 
-        print(f"    {model_name} done ({time.time() - t0:.0f}s)", flush=True)
-
-    pdf.close()
+            print(f"    {model_name} done ({time.time() - t0:.0f}s)", flush=True)
 
     # Merge across models with label-specific strategies:
     #   CASE_CAPTION, KEY_ICON: medium model only (large hallucinates)
@@ -386,71 +381,69 @@ def pair(
     # Build Document
     from blackletter.scanner import _group_detections_by_page
 
-    src_pdf = fitz.open(str(pdf_path))
     pages_data = _group_detections_by_page(raw, include_page_number_end=True)
 
-    pages = []
-    for pi in sorted(pages_data.keys()):
-        pd = pages_data[pi]
-        if pi < src_pdf.page_count:
-            pw, ph = src_pdf[pi].rect.width, src_pdf[pi].rect.height
-        else:
-            pw, ph = 612.0, 792.0
-        page = Page(
-            index=pi,
-            pdf_width=pw,
-            pdf_height=ph,
-            img_width=pd["img_width"],
-            img_height=pd["img_height"],
-            page_number=pd["page_number"],
-            page_number_end=pd.get("page_number_end"),
+    with fitz.open(str(pdf_path)) as src_pdf:
+        pages = []
+        for pi in sorted(pages_data.keys()):
+            pd = pages_data[pi]
+            if pi < src_pdf.page_count:
+                pw, ph = src_pdf[pi].rect.width, src_pdf[pi].rect.height
+            else:
+                pw, ph = 612.0, 792.0
+            page = Page(
+                index=pi,
+                pdf_width=pw,
+                pdf_height=ph,
+                img_width=pd["img_width"],
+                img_height=pd["img_height"],
+                page_number=pd["page_number"],
+                page_number_end=pd.get("page_number_end"),
+            )
+            for d in pd["detections"]:
+                page.detections.append(BLDetection.from_raw_dict(d, pi, bbox_default=[0, 0, 1, 1]))
+            if page.page_number is None:
+                page.page_number = pi + first_page
+            pages.append(page)
+
+        document = Document(
+            pdf_path=pdf_path,
+            pages=pages,
+            reporter=reporter,
+            volume=volume,
+            first_page=first_page,
+            ocr_applied=True,
         )
-        for d in pd["detections"]:
-            page.detections.append(BLDetection.from_raw_dict(d, pi, bbox_default=[0, 0, 1, 1]))
-        if page.page_number is None:
-            page.page_number = pi + first_page
-        pages.append(page)
 
-    document = Document(
-        pdf_path=pdf_path,
-        pages=pages,
-        reporter=reporter,
-        volume=volume,
-        first_page=first_page,
-        ocr_applied=True,
-    )
+        # Pair
+        t0 = time.time()
+        opinions = _pair_opinions(document, excluded=excluded)
+        print(f"  Paired {len(opinions)} opinions ({time.time() - t0:.0f}s)", flush=True)
 
-    # Pair
-    t0 = time.time()
-    opinions = _pair_opinions(document, excluded=excluded)
-    print(f"  Paired {len(opinions)} opinions ({time.time() - t0:.0f}s)", flush=True)
+        # Each opinion runs from its caption page to its key page.
+        page_ranges: list[tuple[int, int]] = []
+        for idx, (caption, key) in enumerate(opinions):
+            page_ranges.append((caption.page_index, key.page_index))
 
-    # Each opinion runs from its caption page to its key page.
-    page_ranges: list[tuple[int, int]] = []
-    for idx, (caption, key) in enumerate(opinions):
-        page_ranges.append((caption.page_index, key.page_index))
+        # Save opinions.json
+        from blackletter.scanner import _build_opinions_data, _opinion_page_bounds
 
-    # Save opinions.json
-    from blackletter.scanner import _build_opinions_data, _opinion_page_bounds
+        pages_by_index = {p.index: p for p in document.pages}
+        opinions_data = _build_opinions_data(opinions, pages_by_index, src_pdf)
 
-    pages_by_index = {p.index: p for p in document.pages}
-    opinions_data = _build_opinions_data(opinions, pages_by_index, src_pdf)
-
-    # Augment each entry with filename-inference fields unique to this API
-    for idx, entry in enumerate(opinions_data):
-        start_idx, end_idx = page_ranges[idx]
-        first_num, last_num = _opinion_page_bounds(
-            pages_by_index.get(start_idx),
-            pages_by_index.get(end_idx),
-            start_idx,
-            end_idx,
-            first_page,
-        )
-        entry["end_page"] = end_idx
-        entry["first_page_number"] = first_num
-        entry["last_page_number"] = last_num
-
-    src_pdf.close()
+        # Augment each entry with filename-inference fields unique to this API
+        for idx, entry in enumerate(opinions_data):
+            start_idx, end_idx = page_ranges[idx]
+            first_num, last_num = _opinion_page_bounds(
+                pages_by_index.get(start_idx),
+                pages_by_index.get(end_idx),
+                start_idx,
+                end_idx,
+                first_page,
+            )
+            entry["end_page"] = end_idx
+            entry["first_page_number"] = first_num
+            entry["last_page_number"] = last_num
 
     return opinions_data
 
@@ -521,7 +514,6 @@ def build_redacted(
     rects_path = Path(rects) if rects is not None else output_dir / "redaction_rects.json"
 
     # Build minimal Document for the function
-    src_pdf = fitz.open(str(pdf_path))
     det_data = (
         json.loads((output_dir / "detections.json").read_text())
         if (output_dir / "detections.json").exists()
@@ -538,18 +530,18 @@ def build_redacted(
             }
 
     pages = []
-    for i in range(src_pdf.page_count):
-        pd = pages_data.get(i, {"img_width": 1700, "img_height": 2200})
-        pages.append(
-            Page(
-                index=i,
-                pdf_width=src_pdf[i].rect.width,
-                pdf_height=src_pdf[i].rect.height,
-                img_width=pd["img_width"],
-                img_height=pd["img_height"],
+    with fitz.open(str(pdf_path)) as src_pdf:
+        for i in range(src_pdf.page_count):
+            pd = pages_data.get(i, {"img_width": 1700, "img_height": 2200})
+            pages.append(
+                Page(
+                    index=i,
+                    pdf_width=src_pdf[i].rect.width,
+                    pdf_height=src_pdf[i].rect.height,
+                    img_width=pd["img_width"],
+                    img_height=pd["img_height"],
+                )
             )
-        )
-    src_pdf.close()
 
     document = Document(pdf_path=pdf_path, pages=pages, ocr_applied=True)
 
@@ -702,124 +694,121 @@ def generate(
         else:
             filenames.append(name)
 
-    src = fitz.open(str(pdf_path))
+    with fitz.open(str(pdf_path)) as src:
 
-    def _apply_page(fitz_page, src_idx, opinion, mode):
-        """Apply all rects for one page in one pass.
+        def _apply_page(fitz_page, src_idx, opinion, mode):
+            """Apply all rects for one page in one pass.
 
-        :param fitz_page: The ``fitz.Page`` to apply redactions to.
-        :param src_idx: Source page index in the original PDF.
-        :param opinion: Opinion dict (or ``None`` for full-redacted mode).
-        :param mode: One of ``"full"`` (all rects, no outside-opinion
-            whiteout) or ``"redacted"`` (all rects + outside-opinion
-            whiteout).
-        """
-        # Page rects (margins + redactions), all PDF points
-        for r in pages_rects.get(str(src_idx), []):
-            rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
-            if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
-                continue
-            if r["type"] == "margin":
-                fill = (1, 1, 1)
-            else:
-                fill = (0, 0, 0) if r["fill"] == "black" else (1, 1, 1)
-            fitz_page.add_redact_annot(rect, fill=fill)
-
-        # Outside-opinion whiteout (skip for full redacted)
-        if opinion is not None and mode != "full":
-            for orect in opinion.get("outside_rects", []):
-                if orect["page_index"] != src_idx:
+            :param fitz_page: The ``fitz.Page`` to apply redactions to.
+            :param src_idx: Source page index in the original PDF.
+            :param opinion: Opinion dict (or ``None`` for full-redacted mode).
+            :param mode: One of ``"full"`` (all rects, no outside-opinion
+                whiteout) or ``"redacted"`` (all rects + outside-opinion
+                whiteout).
+            """
+            # Page rects (margins + redactions), all PDF points
+            for r in pages_rects.get(str(src_idx), []):
+                rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+                if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
                     continue
-                rect = fitz.Rect(orect["x0"], orect["y0"] + 3, orect["x1"], orect["y1"])
-                if not rect.is_empty:
-                    fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
+                if r["type"] == "margin":
+                    fill = (1, 1, 1)
+                else:
+                    fill = (0, 0, 0) if r["fill"] == "black" else (1, 1, 1)
+                fitz_page.add_redact_annot(rect, fill=fill)
 
-        fitz_page.apply_redactions()
-
-    # ── Full redacted PDF ──
-    t0 = time.time()
-    full_out = fitz.open()
-    full_out.insert_pdf(src)
-    for page_idx in range(full_out.page_count):
-        _apply_page(full_out[page_idx], page_idx, None, "full")
-        if progress_callback and ((page_idx + 1) % 20 == 0 or page_idx == full_out.page_count - 1):
-            progress_callback(page_idx + 1, full_out.page_count, "Redacting pages...")
-
-    # Name: reporter.volume.first_page.last_page.redacted.pdf
-    first_pn = opinions[0].get("first_page_number", 1)
-    last_pn = opinions[-1].get("last_page_number", first_pn)
-    full_name = f"{prefix}{first_pn}.{last_pn}.redacted.pdf"
-    full_path = output_dir / full_name
-    full_out.save(str(full_path), garbage=4, deflate=True)
-    full_out.close()
-    print(
-        f"  Full redacted: {full_path.name} ({full_path.stat().st_size / 1024 / 1024:.1f} MB, {time.time() - t0:.0f}s)",
-        flush=True,
-    )
-
-    # ── Split opinions ──
-    redacted_dir = output_dir / "redacted"
-    redacted_dir.mkdir(exist_ok=True)
-
-    if unredacted:
-        unredacted_dir = output_dir / "unredacted"
-        unredacted_dir.mkdir(exist_ok=True)
-
-    if llm:
-        llm_dir = output_dir / "llm"
-        llm_dir.mkdir(exist_ok=True)
-
-    t0 = time.time()
-
-    # ── Redacted + unredacted: one PDF per opinion ──
-    for i, op in enumerate(opinions):
-        start_idx = op["caption_page"]
-        end_idx = op["end_page"]
-        filename = filenames[i]
-
-        out = fitz.open()
-        out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
-        for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
-            _apply_page(out[local_idx], src_idx, op, "redacted")
-        out.save(str(redacted_dir / filename), garbage=4, deflate=True)
-        out.close()
-
-        if unredacted:
-            out = fitz.open()
-            out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
-            for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
-                for orect in op.get("outside_rects", []):
+            # Outside-opinion whiteout (skip for full redacted)
+            if opinion is not None and mode != "full":
+                for orect in opinion.get("outside_rects", []):
                     if orect["page_index"] != src_idx:
                         continue
-                    rect = fitz.Rect(orect["x0"], orect["y0"], orect["x1"], orect["y1"])
+                    rect = fitz.Rect(orect["x0"], orect["y0"] + 3, orect["x1"], orect["y1"])
                     if not rect.is_empty:
-                        out[local_idx].add_redact_annot(rect, fill=(1, 1, 1))
-                out[local_idx].apply_redactions()
-            out.save(str(unredacted_dir / filename), garbage=4, deflate=True)
-            out.close()
+                        fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
 
-        done = i + 1
-        if done % 20 == 0 or done == len(opinions):
-            print(f"    Redacted {done}/{len(opinions)}", flush=True)
+            fitz_page.apply_redactions()
 
-    # ── LLM per-page split with CASEEND stamps on Key icons (opt-in) ──
-    if llm:
-        from blackletter.process import _split_llm_pages
+        # ── Full redacted PDF ──
+        t0 = time.time()
+        # Name: reporter.volume.first_page.last_page.redacted.pdf
+        first_pn = opinions[0].get("first_page_number", 1)
+        last_pn = opinions[-1].get("last_page_number", first_pn)
+        full_name = f"{prefix}{first_pn}.{last_pn}.redacted.pdf"
+        full_path = output_dir / full_name
+        with fitz.open() as full_out:
+            full_out.insert_pdf(src)
+            for page_idx in range(full_out.page_count):
+                _apply_page(full_out[page_idx], page_idx, None, "full")
+                if progress_callback and (
+                    (page_idx + 1) % 20 == 0 or page_idx == full_out.page_count - 1
+                ):
+                    progress_callback(page_idx + 1, full_out.page_count, "Redacting pages...")
+            full_out.save(str(full_path), garbage=4, deflate=True)
+        print(
+            f"  Full redacted: {full_path.name} ({full_path.stat().st_size / 1024 / 1024:.1f} MB, {time.time() - t0:.0f}s)",
+            flush=True,
+        )
 
-        t_llm = time.time()
-        key_by_page: dict[int, list[fitz.Rect]] = {}
-        for pi_str, rs in pages_rects.items():
-            rects = [
-                fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
-                for r in rs
-                if r.get("type") == "KEY_ICON"
-            ]
-            if rects:
-                key_by_page[int(pi_str)] = rects
-        total = _split_llm_pages(full_path, key_by_page, llm_dir)
-        print(f"    LLM {total} pages ({time.time() - t_llm:.0f}s)", flush=True)
+        # ── Split opinions ──
+        redacted_dir = output_dir / "redacted"
+        redacted_dir.mkdir(exist_ok=True)
 
-    src.close()
+        if unredacted:
+            unredacted_dir = output_dir / "unredacted"
+            unredacted_dir.mkdir(exist_ok=True)
+
+        if llm:
+            llm_dir = output_dir / "llm"
+            llm_dir.mkdir(exist_ok=True)
+
+        t0 = time.time()
+
+        # ── Redacted + unredacted: one PDF per opinion ──
+        for i, op in enumerate(opinions):
+            start_idx = op["caption_page"]
+            end_idx = op["end_page"]
+            filename = filenames[i]
+
+            with fitz.open() as out:
+                out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
+                for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+                    _apply_page(out[local_idx], src_idx, op, "redacted")
+                out.save(str(redacted_dir / filename), garbage=4, deflate=True)
+
+            if unredacted:
+                with fitz.open() as out:
+                    out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
+                    for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+                        for orect in op.get("outside_rects", []):
+                            if orect["page_index"] != src_idx:
+                                continue
+                            rect = fitz.Rect(orect["x0"], orect["y0"], orect["x1"], orect["y1"])
+                            if not rect.is_empty:
+                                out[local_idx].add_redact_annot(rect, fill=(1, 1, 1))
+                        out[local_idx].apply_redactions()
+                    out.save(str(unredacted_dir / filename), garbage=4, deflate=True)
+
+            done = i + 1
+            if done % 20 == 0 or done == len(opinions):
+                print(f"    Redacted {done}/{len(opinions)}", flush=True)
+
+        # ── LLM per-page split with CASEEND stamps on Key icons (opt-in) ──
+        if llm:
+            from blackletter.process import _split_llm_pages
+
+            t_llm = time.time()
+            key_by_page: dict[int, list[fitz.Rect]] = {}
+            for pi_str, rs in pages_rects.items():
+                rects = [
+                    fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+                    for r in rs
+                    if r.get("type") == "KEY_ICON"
+                ]
+                if rects:
+                    key_by_page[int(pi_str)] = rects
+            total = _split_llm_pages(full_path, key_by_page, llm_dir)
+            print(f"    LLM {total} pages ({time.time() - t_llm:.0f}s)", flush=True)
+
     print(f"  Split complete ({time.time() - t0:.0f}s)", flush=True)
 
     result = {
