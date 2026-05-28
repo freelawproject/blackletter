@@ -4,9 +4,13 @@
 
 The following changes are not yet released, but are code complete:
 
-- Close every `fitz.Document` via `with fitz.open(...)` in `margins.py`, `api.py`, and `process.py` so exceptions no longer leak the open (mmap-backed) Document, fixing the runaway memory growth seen in downstream scanning web pods
-
 ## Current
+
+0.0.11 (2026-05-28)
+
+- Close every `fitz.Document` via `with fitz.open(...)` in `margins.py`, `api.py`, and `process.py` so exceptions no longer leak the open (mmap-backed) Document, fixing the runaway memory growth seen in downstream scanning web pods (#47)
+
+## Past
 
 0.0.10 (2026-05-14)
 
@@ -14,8 +18,6 @@ The following changes are not yet released, but are code complete:
 - Remove `masked/` output entirely (per-opinion masked PDFs are no longer generated). Replaced with an opt-in `llm/` directory: one PDF per source page sliced from the fully redacted document, with an invisible `<--CASEEND-->` text stamp (`render_mode=3`) on every redacted Key-icon location so downstream LLM passes can detect opinion boundaries. Enable with `--llm` on `blackletter process` or `llm=True` on `api.generate()` (#45)
 - Drop the `WHITE_IN_MASKED` override from `api.generate._apply_page`: `PAGE_HEADER` and `STATE_ABBREVIATION` now use the fill colour from `redactions.json` in all output modes instead of being forced black outside masked mode (#45)
 - Delete `_build_masked_opinions` and `_delete_headnote_pages` (process.py); collapse `_apply_page`'s `mode` parameter from `{full, redacted, masked}` to `{full, redacted}` (api.py) (#45)
-
-## Past
 
 0.0.9 (2026-04-29)
 
