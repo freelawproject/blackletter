@@ -177,21 +177,20 @@ def _split_llm_pages(
         for pdf_idx in range(total):
             page_num = pdf_idx + 1
             page_pdf_path = output_dir / f"page_{page_num:04d}.pdf"
-            single = fitz.open()
-            single.insert_pdf(src_doc, from_page=pdf_idx, to_page=pdf_idx)
-            krs = key_by_page.get(pdf_idx, [])
-            if krs:
-                page = single[0]
-                for rect in krs:
-                    page.insert_text(
-                        (rect.x0 + 2, rect.y0 + rect.height / 2 + 3),
-                        "<--CASEEND-->",
-                        fontsize=8,
-                        fontname="helv",
-                        render_mode=3,
-                    )
-            single.save(str(page_pdf_path))
-            single.close()
+            with fitz.open() as single:
+                single.insert_pdf(src_doc, from_page=pdf_idx, to_page=pdf_idx)
+                krs = key_by_page.get(pdf_idx, [])
+                if krs:
+                    page = single[0]
+                    for rect in krs:
+                        page.insert_text(
+                            (rect.x0 + 2, rect.y0 + rect.height / 2 + 3),
+                            "<--CASEEND-->",
+                            fontsize=8,
+                            fontname="helv",
+                            render_mode=3,
+                        )
+                single.save(str(page_pdf_path))
     return total
 
 
@@ -200,30 +199,29 @@ def _apply_margin_rects(pdf_path: Path, margin_rects_path: Path) -> None:
     import json as _json
 
     margin_data = _json.loads(margin_rects_path.read_text())
-    doc = fitz.open(str(pdf_path))
-    _sample_imgs = doc[0].get_images(full=True) if doc.page_count else []
-    is_bitonal = bool(_sample_imgs and _sample_imgs[0][4] == 1)
-    for entry in margin_data:
-        pi = entry["page_index"]
-        if pi >= doc.page_count:
-            continue
-        page = doc[pi]
-        white = (1, 1, 1)
-        page_margin_rects = []
-        for r in entry.get("rects", []):
-            rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
-            page.add_redact_annot(rect, fill=white)
-            page_margin_rects.append((rect, white))
-        if is_bitonal and page_margin_rects:
-            _redact_bitonal_image(page, doc, page_margin_rects)
-            page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-        else:
-            page.apply_redactions()
-        # Overdraw with fill-only rects to cover 1pt stroke from apply_redactions
-        for rect, color in page_margin_rects:
-            page.draw_rect(rect, fill=color, color=None, width=0)
-    doc.save(str(pdf_path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
-    doc.close()
+    with fitz.open(str(pdf_path)) as doc:
+        _sample_imgs = doc[0].get_images(full=True) if doc.page_count else []
+        is_bitonal = bool(_sample_imgs and _sample_imgs[0][4] == 1)
+        for entry in margin_data:
+            pi = entry["page_index"]
+            if pi >= doc.page_count:
+                continue
+            page = doc[pi]
+            white = (1, 1, 1)
+            page_margin_rects = []
+            for r in entry.get("rects", []):
+                rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+                page.add_redact_annot(rect, fill=white)
+                page_margin_rects.append((rect, white))
+            if is_bitonal and page_margin_rects:
+                _redact_bitonal_image(page, doc, page_margin_rects)
+                page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+            else:
+                page.apply_redactions()
+            # Overdraw with fill-only rects to cover 1pt stroke from apply_redactions
+            for rect, color in page_margin_rects:
+                page.draw_rect(rect, fill=color, color=None, width=0)
+        doc.save(str(pdf_path), incremental=True, encryption=fitz.PDF_ENCRYPT_KEEP)
 
 
 def _redact_bitonal_image(fitz_page, fitz_doc, redaction_rects):
@@ -292,208 +290,208 @@ def compute_redaction_rects(
     pages_by_index = {p.index: p for p in document.pages}
     mid = document.pages[0].midpoint
 
-    src_pdf = fitz.open(str(document.pdf_path))
-
-    # Pre-compute headnote rects
-    all_keys, all_dets = _sorted_detections(document, mid)
-    all_headnote_rects = []
-    for caption, key in opinions:
-        opinion_dets = _detections_in_range(
-            all_keys, all_dets, caption.sort_key(mid), key.sort_key(mid)
-        )
-        end_marker = _find_redaction_end(
-            opinion_dets, caption, key, mid, reporter=document.reporter
-        )
-        if end_marker is not None:
-            start = _find_redaction_start(opinion_dets, caption, mid)
-            all_headnote_rects.extend(
-                _redaction_rects(
-                    caption,
-                    end_marker,
-                    pages_by_index,
-                    start_marker=start if start is not caption else None,
-                )
+    with fitz.open(str(document.pdf_path)) as src_pdf:
+        # Pre-compute headnote rects
+        all_keys, all_dets = _sorted_detections(document, mid)
+        all_headnote_rects = []
+        for caption, key in opinions:
+            opinion_dets = _detections_in_range(
+                all_keys, all_dets, caption.sort_key(mid), key.sort_key(mid)
             )
-        else:
-            all_headnote_rects.extend(
-                _headnote_fallback_rects(opinion_dets, caption, pages_by_index, mid)
+            end_marker = _find_redaction_end(
+                opinion_dets, caption, key, mid, reporter=document.reporter
             )
-
-    # Refine headnote rects to line-level with docTR
-    if all_headnote_rects and not skip_doctr:
-        all_headnote_rects = refine_headnote_rects(src_pdf, all_headnote_rects, pages_by_index)
-
-    result = {}
-
-    def _add_px(page_idx, x0, y0, x1, y1, fill, rtype):
-        """Add rect in image pixel coordinates."""
-        if x0 >= x1 or y0 >= y1:
-            return
-        if page_idx not in result:
-            result[page_idx] = []
-        result[page_idx].append(
-            {
-                "x0": round(x0, 1),
-                "y0": round(y0, 1),
-                "x1": round(x1, 1),
-                "y1": round(y1, 1),
-                "fill": fill,
-                "type": rtype,
-            }
-        )
-
-    for page in document.pages:
-        src_idx = page.index
-        fitz_page = src_pdf[src_idx]
-        sx, sy = page.scale_x, page.scale_y
-
-        # Headnote zones — compute in image pixel coords
-        hb, ft = _margin_bounds(page)
-
-        # Use right-column HEADNOTE detections to establish the inner column
-        # boundary: the leftmost x0 of any right-column HEADNOTE is where the
-        # right column starts. The left column ends 10px before that.
-        mid_px = page.midpoint
-        # Right-column HEADNOTEs: center in right half, left edge at least 75% across
-        right_hn = [
-            d
-            for d in page.detections
-            if d.label == Label.HEADNOTE and d.bbox.center_x > mid_px and d.bbox.x1 >= mid_px * 0.75
-        ]
-        right_col_inner_pdf = min(d.bbox.x1 for d in right_hn) * sx if right_hn else None
-
-        for rect_page_idx, rect in all_headnote_rects:
-            if rect_page_idx == src_idx:
-                # Determine column from the raw rect center BEFORE tightening
-                mid_pdf = mid_px * sx
-                raw_center_x = (rect.x0 + rect.x1) / 2
-                is_left_col = raw_center_x < mid_pdf
-                # Tighten to text in PDF points first
-                tight = _tighten_to_text(fitz_page, rect)
-                if tight is not None:
-                    rect = tight
-                text_bot = _text_bottom(fitz_page, rect)
-                text_left, text_right = _text_x_bounds(fitz_page, rect)
-                if right_col_inner_pdf is not None:
-                    if is_left_col:
-                        new_x0 = text_left
-                        new_x1 = min(text_right, right_col_inner_pdf)
-                    else:
-                        new_x0 = max(text_left, right_col_inner_pdf)
-                        new_x1 = text_right
-                else:
-                    # No right-column headnotes — keep original column x bounds
-                    new_x0 = rect.x0
-                    new_x1 = rect.x1
-                rect = fitz.Rect(
-                    new_x0,
-                    max(rect.y0, hb),
-                    new_x1,
-                    min(rect.y1, ft, text_bot),
+            if end_marker is not None:
+                start = _find_redaction_start(opinion_dets, caption, mid)
+                all_headnote_rects.extend(
+                    _redaction_rects(
+                        caption,
+                        end_marker,
+                        pages_by_index,
+                        start_marker=start if start is not caption else None,
+                    )
                 )
-                if rect.is_empty or rect.x0 >= rect.x1 or rect.y0 >= rect.y1:
-                    continue
-                # Convert to image pixels
-                rx0 = rect.x0 / sx
-                ry0 = rect.y0 / sy
-                rx1 = rect.x1 / sx
-                ry1 = rect.y1 / sy
-                _add_px(src_idx, rx0, ry0, rx1, ry1, "black", "headnote")
-
-        # Per-detection redactions — output in image pixel coords
-        for d in page.detections:
-            if d.label not in (_REDACT_WHITE | _REDACT_BLACK):
-                continue
-            if _check_excluded(d, excluded):
-                continue
-            _is_approved = approved and _check_excluded(d, approved)
-            if not _is_approved and d.confidence < LABEL_CONFIDENCE.get(
-                d.label, CONFIDENCE_THRESHOLD
-            ):
-                continue
-            _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
-            if _skip_tighten:
-                # Use raw YOLO bbox (image pixels)
-                fill = "black" if d.label in _REDACT_BLACK else "white"
-                _add_px(src_idx, d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, fill, d.label.name)
             else:
-                # Tighten in PDF coords, convert back to pixels
-                rect = d.bbox.to_fitz_pdf_rect(sx, sy)
-                tight = _tighten_to_text(fitz_page, rect, skip=False)
-                if tight is not None:
-                    rect = tight
-                fill = "black" if d.label in _REDACT_BLACK else "white"
+                all_headnote_rects.extend(
+                    _headnote_fallback_rects(opinion_dets, caption, pages_by_index, mid)
+                )
+
+        # Refine headnote rects to line-level with docTR
+        if all_headnote_rects and not skip_doctr:
+            all_headnote_rects = refine_headnote_rects(src_pdf, all_headnote_rects, pages_by_index)
+
+        result = {}
+
+        def _add_px(page_idx, x0, y0, x1, y1, fill, rtype):
+            """Add rect in image pixel coordinates."""
+            if x0 >= x1 or y0 >= y1:
+                return
+            if page_idx not in result:
+                result[page_idx] = []
+            result[page_idx].append(
+                {
+                    "x0": round(x0, 1),
+                    "y0": round(y0, 1),
+                    "x1": round(x1, 1),
+                    "y1": round(y1, 1),
+                    "fill": fill,
+                    "type": rtype,
+                }
+            )
+
+        for page in document.pages:
+            src_idx = page.index
+            fitz_page = src_pdf[src_idx]
+            sx, sy = page.scale_x, page.scale_y
+
+            # Headnote zones — compute in image pixel coords
+            hb, ft = _margin_bounds(page)
+
+            # Use right-column HEADNOTE detections to establish the inner column
+            # boundary: the leftmost x0 of any right-column HEADNOTE is where the
+            # right column starts. The left column ends 10px before that.
+            mid_px = page.midpoint
+            # Right-column HEADNOTEs: center in right half, left edge at least 75% across
+            right_hn = [
+                d
+                for d in page.detections
+                if d.label == Label.HEADNOTE
+                and d.bbox.center_x > mid_px
+                and d.bbox.x1 >= mid_px * 0.75
+            ]
+            right_col_inner_pdf = min(d.bbox.x1 for d in right_hn) * sx if right_hn else None
+
+            for rect_page_idx, rect in all_headnote_rects:
+                if rect_page_idx == src_idx:
+                    # Determine column from the raw rect center BEFORE tightening
+                    mid_pdf = mid_px * sx
+                    raw_center_x = (rect.x0 + rect.x1) / 2
+                    is_left_col = raw_center_x < mid_pdf
+                    # Tighten to text in PDF points first
+                    tight = _tighten_to_text(fitz_page, rect)
+                    if tight is not None:
+                        rect = tight
+                    text_bot = _text_bottom(fitz_page, rect)
+                    text_left, text_right = _text_x_bounds(fitz_page, rect)
+                    if right_col_inner_pdf is not None:
+                        if is_left_col:
+                            new_x0 = text_left
+                            new_x1 = min(text_right, right_col_inner_pdf)
+                        else:
+                            new_x0 = max(text_left, right_col_inner_pdf)
+                            new_x1 = text_right
+                    else:
+                        # No right-column headnotes — keep original column x bounds
+                        new_x0 = rect.x0
+                        new_x1 = rect.x1
+                    rect = fitz.Rect(
+                        new_x0,
+                        max(rect.y0, hb),
+                        new_x1,
+                        min(rect.y1, ft, text_bot),
+                    )
+                    if rect.is_empty or rect.x0 >= rect.x1 or rect.y0 >= rect.y1:
+                        continue
+                    # Convert to image pixels
+                    rx0 = rect.x0 / sx
+                    ry0 = rect.y0 / sy
+                    rx1 = rect.x1 / sx
+                    ry1 = rect.y1 / sy
+                    _add_px(src_idx, rx0, ry0, rx1, ry1, "black", "headnote")
+
+            # Per-detection redactions — output in image pixel coords
+            for d in page.detections:
+                if d.label not in (_REDACT_WHITE | _REDACT_BLACK):
+                    continue
+                if _check_excluded(d, excluded):
+                    continue
+                _is_approved = approved and _check_excluded(d, approved)
+                if not _is_approved and d.confidence < LABEL_CONFIDENCE.get(
+                    d.label, CONFIDENCE_THRESHOLD
+                ):
+                    continue
+                _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
+                if _skip_tighten:
+                    # Use raw YOLO bbox (image pixels)
+                    fill = "black" if d.label in _REDACT_BLACK else "white"
+                    _add_px(src_idx, d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, fill, d.label.name)
+                else:
+                    # Tighten in PDF coords, convert back to pixels
+                    rect = d.bbox.to_fitz_pdf_rect(sx, sy)
+                    tight = _tighten_to_text(fitz_page, rect, skip=False)
+                    if tight is not None:
+                        rect = tight
+                    fill = "black" if d.label in _REDACT_BLACK else "white"
+                    _add_px(
+                        src_idx,
+                        rect.x0 / sx,
+                        rect.y0 / sy,
+                        rect.x1 / sx,
+                        rect.y1 / sy,
+                        fill,
+                        d.label.name,
+                    )
+
+            # CASE_SEQUENCE
+            caption_rects = []
+            for d in page.detections:
+                if d.label == Label.CASE_CAPTION:
+                    caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
+
+            _CS_INSET = 3.0
+            _CS_MIN_PX = 40  # min width/height in image pixels
+            _CS_MAX_PX = 60  # max width/height in image pixels
+            for d in page.detections:
+                if d.label != Label.CASE_SEQUENCE:
+                    continue
+                if _check_excluded(d, excluded):
+                    continue
+                # Clamp raw YOLO bbox to min/max size in pixels, then convert
+                bx0, by0 = d.bbox.x1, d.bbox.y1
+                bx1, by1 = d.bbox.x2, d.bbox.y2
+                cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
+                pw = max(_CS_MIN_PX, min(bx1 - bx0, _CS_MAX_PX))
+                ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
+                bx0, bx1 = cx - pw / 2, cx + pw / 2
+                by0, by1 = cy - ph / 2, cy + ph / 2
+                rect = BBox(bx0, by0, bx1, by1).to_fitz_pdf_rect(sx, sy)
+                # Small inset
+                rect = fitz.Rect(
+                    rect.x0 + _CS_INSET,
+                    rect.y0 + _CS_INSET,
+                    rect.x1 - _CS_INSET,
+                    rect.y1 - _CS_INSET,
+                )
+                if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
+                    continue
                 _add_px(
                     src_idx,
                     rect.x0 / sx,
                     rect.y0 / sy,
                     rect.x1 / sx,
                     rect.y1 / sy,
-                    fill,
-                    d.label.name,
+                    "black",
+                    "CASE_SEQUENCE",
                 )
 
-        # CASE_SEQUENCE
-        caption_rects = []
-        for d in page.detections:
-            if d.label == Label.CASE_CAPTION:
-                caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
+            # Key icons — use raw YOLO bbox (image pixels)
+            valid_key_icons = {
+                id(d)
+                for d in _filter_key_icons_by_size(
+                    [x for x in page.detections if x.label == Label.KEY_ICON]
+                )
+            }
+            for d in page.detections:
+                if d.label != Label.KEY_ICON:
+                    continue
+                if id(d) not in valid_key_icons:
+                    continue
+                if _check_excluded(d, excluded):
+                    continue
+                if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
+                    continue
+                _add_px(src_idx, d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, "black", "KEY_ICON")
 
-        _CS_INSET = 3.0
-        _CS_MIN_PX = 40  # min width/height in image pixels
-        _CS_MAX_PX = 60  # max width/height in image pixels
-        for d in page.detections:
-            if d.label != Label.CASE_SEQUENCE:
-                continue
-            if _check_excluded(d, excluded):
-                continue
-            # Clamp raw YOLO bbox to min/max size in pixels, then convert
-            bx0, by0 = d.bbox.x1, d.bbox.y1
-            bx1, by1 = d.bbox.x2, d.bbox.y2
-            cx, cy = (bx0 + bx1) / 2, (by0 + by1) / 2
-            pw = max(_CS_MIN_PX, min(bx1 - bx0, _CS_MAX_PX))
-            ph = max(_CS_MIN_PX, min(by1 - by0, _CS_MAX_PX))
-            bx0, bx1 = cx - pw / 2, cx + pw / 2
-            by0, by1 = cy - ph / 2, cy + ph / 2
-            rect = BBox(bx0, by0, bx1, by1).to_fitz_pdf_rect(sx, sy)
-            # Small inset
-            rect = fitz.Rect(
-                rect.x0 + _CS_INSET,
-                rect.y0 + _CS_INSET,
-                rect.x1 - _CS_INSET,
-                rect.y1 - _CS_INSET,
-            )
-            if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
-                continue
-            _add_px(
-                src_idx,
-                rect.x0 / sx,
-                rect.y0 / sy,
-                rect.x1 / sx,
-                rect.y1 / sy,
-                "black",
-                "CASE_SEQUENCE",
-            )
-
-        # Key icons — use raw YOLO bbox (image pixels)
-        valid_key_icons = {
-            id(d)
-            for d in _filter_key_icons_by_size(
-                [x for x in page.detections if x.label == Label.KEY_ICON]
-            )
-        }
-        for d in page.detections:
-            if d.label != Label.KEY_ICON:
-                continue
-            if id(d) not in valid_key_icons:
-                continue
-            if _check_excluded(d, excluded):
-                continue
-            if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
-                continue
-            _add_px(src_idx, d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, "black", "KEY_ICON")
-
-    src_pdf.close()
     return [{"page_index": pi, "rects": rects} for pi, rects in sorted(result.items())]
 
 
@@ -517,94 +515,91 @@ def _split_from_redacted(
     opinion ending on that page uses the first number.
     """
     pages_by_index = {p.index: p for p in document.pages}
-    redacted = fitz.open(str(redacted_pdf_path))
+    with fitz.open(str(redacted_pdf_path)) as redacted:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        paths = []
+        total = len(opinions)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    paths = []
-    total = len(opinions)
+        # Each opinion runs from its caption page to its key page.
+        page_ranges: list[tuple[int, int]] = []
+        for idx, (caption, key) in enumerate(opinions):
+            page_ranges.append((caption.page_index, key.page_index))
 
-    # Each opinion runs from its caption page to its key page.
-    page_ranges: list[tuple[int, int]] = []
-    for idx, (caption, key) in enumerate(opinions):
-        page_ranges.append((caption.page_index, key.page_index))
+        # Pre-compute base names using actual page numbers
+        from collections import Counter as _Counter
 
-    # Pre-compute base names using actual page numbers
-    from collections import Counter as _Counter
+        _reporter = document.reporter or ""
+        _volume = document.volume or ""
+        _bases: list[str] = []
+        for idx, (caption, _key) in enumerate(opinions):
+            start_idx, end_idx = page_ranges[idx]
+            first_num, last_num = _opinion_page_bounds(
+                pages_by_index.get(start_idx),
+                pages_by_index.get(end_idx),
+                start_idx,
+                end_idx,
+                first_page,
+            )
+            _bases.append(f"{_reporter}.{_volume}.{first_num:04d}-{last_num:04d}")
 
-    _reporter = document.reporter or ""
-    _volume = document.volume or ""
-    _bases: list[str] = []
-    for idx, (caption, _key) in enumerate(opinions):
-        start_idx, end_idx = page_ranges[idx]
-        first_num, last_num = _opinion_page_bounds(
-            pages_by_index.get(start_idx),
-            pages_by_index.get(end_idx),
-            start_idx,
-            end_idx,
-            first_page,
-        )
-        _bases.append(f"{_reporter}.{_volume}.{first_num:04d}-{last_num:04d}")
+        _name_counts = _Counter(_bases)
+        _name_seq: dict[str, int] = {}
 
-    _name_counts = _Counter(_bases)
-    _name_seq: dict[str, int] = {}
+        for idx, (caption, key) in enumerate(opinions):
+            start_idx, end_idx = page_ranges[idx]
+            with fitz.open() as out_pdf:
+                out_pdf.insert_pdf(redacted, from_page=start_idx, to_page=end_idx)
 
-    for idx, (caption, key) in enumerate(opinions):
-        start_idx, end_idx = page_ranges[idx]
-        out_pdf = fitz.open()
-        out_pdf.insert_pdf(redacted, from_page=start_idx, to_page=end_idx)
+                # Apply outside-opinion whiteout on first/last pages
+                for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+                    if src_idx not in pages_by_index:
+                        continue
+                    page = pages_by_index[src_idx]
+                    fitz_page = out_pdf[local_idx]
+                    is_first = src_idx == start_idx
+                    is_last = src_idx == end_idx
 
-        # Apply outside-opinion whiteout on first/last pages
-        for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
-            if src_idx not in pages_by_index:
-                continue
-            page = pages_by_index[src_idx]
-            fitz_page = out_pdf[local_idx]
-            is_first = src_idx == start_idx
-            is_last = src_idx == end_idx
+                    if is_first or is_last:
+                        outside_rects = list(
+                            _outside_opinion_rects(
+                                page, fitz_page.rect.width, caption, key, is_first, is_last
+                            )
+                        )
+                        for rect in outside_rects:
+                            fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
 
-            if is_first or is_last:
-                outside_rects = list(
-                    _outside_opinion_rects(
-                        page, fitz_page.rect.width, caption, key, is_first, is_last
-                    )
-                )
-                for rect in outside_rects:
-                    fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
+                        # Bitonal-safe redaction
+                        _sample = fitz_page.get_images(full=True) if out_pdf.page_count else []
+                        _is_bit = bool(_sample and _sample[0][4] == 1)
+                        if _is_bit:
+                            white_rects = [(rect, (1, 1, 1)) for rect in outside_rects]
+                            if white_rects:
+                                _redact_bitonal_image(fitz_page, out_pdf, white_rects)
+                                fitz_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+                            else:
+                                fitz_page.apply_redactions()
+                        else:
+                            fitz_page.apply_redactions()
+                        # Overdraw with fill-only rects to cover 1pt stroke
+                        for rect in outside_rects:
+                            fitz_page.draw_rect(rect, fill=(1, 1, 1), color=None, width=0)
 
-                # Bitonal-safe redaction
-                _sample = fitz_page.get_images(full=True) if out_pdf.page_count else []
-                _is_bit = bool(_sample and _sample[0][4] == 1)
-                if _is_bit:
-                    white_rects = [(rect, (1, 1, 1)) for rect in outside_rects]
-                    if white_rects:
-                        _redact_bitonal_image(fitz_page, out_pdf, white_rects)
-                        fitz_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-                    else:
-                        fitz_page.apply_redactions()
+                # Build filename — use -1/-2/-3 suffix when multiple opinions share the same page range
+                base = _bases[idx]
+                if _name_counts[base] > 1:
+                    _name_seq[base] = _name_seq.get(base, 0) + 1
+                    name = f"{base}-{_name_seq[base]}.pdf"
                 else:
-                    fitz_page.apply_redactions()
-                # Overdraw with fill-only rects to cover 1pt stroke
-                for rect in outside_rects:
-                    fitz_page.draw_rect(rect, fill=(1, 1, 1), color=None, width=0)
+                    name = f"{base}.pdf"
+                out_path = output_dir / name
 
-        # Build filename — use -1/-2/-3 suffix when multiple opinions share the same page range
-        base = _bases[idx]
-        if _name_counts[base] > 1:
-            _name_seq[base] = _name_seq.get(base, 0) + 1
-            name = f"{base}-{_name_seq[base]}.pdf"
-        else:
-            name = f"{base}.pdf"
-        out_path = output_dir / name
+                out_pdf.save(str(out_path), garbage=4, deflate=True)
+            paths.append(out_path)
 
-        out_pdf.save(str(out_path), garbage=4, deflate=True)
-        out_pdf.close()
-        paths.append(out_path)
+            done = idx + 1
+            if done % 20 == 0 or done == total:
+                print(f"    Split {done}/{total}", flush=True)
 
-        done = idx + 1
-        if done % 20 == 0 or done == total:
-            print(f"    Split {done}/{total}", flush=True)
-
-    redacted.close()
     print(f"  Wrote {len(paths)} redacted PDFs", flush=True)
     return paths
 
@@ -626,54 +621,51 @@ def _build_redacted_from_rects(
     for entry in rects_data:
         rects_by_page[entry["page_index"]] = entry["rects"]
 
-    src_pdf = fitz.open(str(document.pdf_path))
-    out_pdf = fitz.open()
-    out_pdf.insert_pdf(src_pdf)
+    with fitz.open(str(document.pdf_path)) as src_pdf, fitz.open() as out_pdf:
+        out_pdf.insert_pdf(src_pdf)
 
-    # Detect bitonal
-    _sample_imgs = out_pdf[0].get_images(full=True) if out_pdf.page_count else []
-    is_bitonal = bool(_sample_imgs and _sample_imgs[0][4] == 1)
+        # Detect bitonal
+        _sample_imgs = out_pdf[0].get_images(full=True) if out_pdf.page_count else []
+        is_bitonal = bool(_sample_imgs and _sample_imgs[0][4] == 1)
 
-    total_pages = len(document.pages)
-    pages_by_idx = {p.index: p for p in document.pages}
-    for page in document.pages:
-        src_idx = page.index
-        fitz_page = out_pdf[src_idx]
-        page_rects = rects_by_page.get(src_idx, [])
+        total_pages = len(document.pages)
+        pages_by_idx = {p.index: p for p in document.pages}
+        for page in document.pages:
+            src_idx = page.index
+            fitz_page = out_pdf[src_idx]
+            page_rects = rects_by_page.get(src_idx, [])
 
-        # Convert image pixel coords → PDF points
-        p = pages_by_idx.get(src_idx)
-        if p and p.img_width > 1:
-            to_pdf_x = p.pdf_width / p.img_width
-            to_pdf_y = p.pdf_height / p.img_height
-        else:
-            to_pdf_x = to_pdf_y = 1.0
+            # Convert image pixel coords → PDF points
+            p = pages_by_idx.get(src_idx)
+            if p and p.img_width > 1:
+                to_pdf_x = p.pdf_width / p.img_width
+                to_pdf_y = p.pdf_height / p.img_height
+            else:
+                to_pdf_x = to_pdf_y = 1.0
 
-        page_redact_rects = []
-        for r in page_rects:
-            rect = fitz.Rect(
-                r["x0"] * to_pdf_x, r["y0"] * to_pdf_y, r["x1"] * to_pdf_x, r["y1"] * to_pdf_y
-            )
-            if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
-                continue
-            fill_tuple = (0, 0, 0) if r.get("fill") == "black" else (1, 1, 1)
-            page_redact_rects.append((fitz.Rect(rect), fill_tuple))
-            fitz_page.add_redact_annot(rect, fill=fill_tuple)
+            page_redact_rects = []
+            for r in page_rects:
+                rect = fitz.Rect(
+                    r["x0"] * to_pdf_x, r["y0"] * to_pdf_y, r["x1"] * to_pdf_x, r["y1"] * to_pdf_y
+                )
+                if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
+                    continue
+                fill_tuple = (0, 0, 0) if r.get("fill") == "black" else (1, 1, 1)
+                page_redact_rects.append((fitz.Rect(rect), fill_tuple))
+                fitz_page.add_redact_annot(rect, fill=fill_tuple)
 
-        if is_bitonal and page_redact_rects:
-            _redact_bitonal_image(fitz_page, out_pdf, page_redact_rects)
-            fitz_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-        else:
-            fitz_page.apply_redactions()
+            if is_bitonal and page_redact_rects:
+                _redact_bitonal_image(fitz_page, out_pdf, page_redact_rects)
+                fitz_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+            else:
+                fitz_page.apply_redactions()
 
-        pg = page.index + 1
-        if pg % 20 == 0 or pg == total_pages:
-            print(f"    Redacted {pg}/{total_pages} pages", flush=True)
+            pg = page.index + 1
+            if pg % 20 == 0 or pg == total_pages:
+                print(f"    Redacted {pg}/{total_pages} pages", flush=True)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    out_pdf.save(str(output_path), garbage=4, deflate=True)
-    out_pdf.close()
-    src_pdf.close()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        out_pdf.save(str(output_path), garbage=4, deflate=True)
 
     size_mb = output_path.stat().st_size / (1024 * 1024)
     print(f"  Saved {output_path.name} ({size_mb:.1f} MB)")
@@ -694,143 +686,140 @@ def _build_full_redacted(
     pages_by_index = {p.index: p for p in document.pages}
     mid = document.pages[0].midpoint
 
-    src_pdf = fitz.open(str(document.pdf_path))
-    out_pdf = fitz.open()
-    out_pdf.insert_pdf(src_pdf)
+    with fitz.open(str(document.pdf_path)) as src_pdf, fitz.open() as out_pdf:
+        out_pdf.insert_pdf(src_pdf)
 
-    # Detect bitonal — need special redaction path to avoid CCITT corruption
-    _sample_imgs = out_pdf[0].get_images(full=True) if out_pdf.page_count else []
-    is_bitonal = bool(_sample_imgs and _sample_imgs[0][4] == 1)
+        # Detect bitonal — need special redaction path to avoid CCITT corruption
+        _sample_imgs = out_pdf[0].get_images(full=True) if out_pdf.page_count else []
+        is_bitonal = bool(_sample_imgs and _sample_imgs[0][4] == 1)
 
-    # Pre-compute headnote rects for every opinion
-    all_keys, all_dets = _sorted_detections(document, mid)
-    all_headnote_rects: list[tuple[int, fitz.Rect]] = []
-    for caption, key in opinions:
-        page = pages_by_index[caption.page_index]
-        opinion_dets = _detections_in_range(
-            all_keys, all_dets, caption.sort_key(mid), key.sort_key(mid)
-        )
-        end_marker = _find_redaction_end(
-            opinion_dets, caption, key, mid, reporter=document.reporter
-        )
-        if end_marker is not None:
-            start = _find_redaction_start(opinion_dets, caption, mid)
-            all_headnote_rects.extend(
-                _redaction_rects(
-                    caption,
-                    end_marker,
-                    pages_by_index,
-                    start_marker=start if start is not caption else None,
+        # Pre-compute headnote rects for every opinion
+        all_keys, all_dets = _sorted_detections(document, mid)
+        all_headnote_rects: list[tuple[int, fitz.Rect]] = []
+        for caption, key in opinions:
+            page = pages_by_index[caption.page_index]
+            opinion_dets = _detections_in_range(
+                all_keys, all_dets, caption.sort_key(mid), key.sort_key(mid)
+            )
+            end_marker = _find_redaction_end(
+                opinion_dets, caption, key, mid, reporter=document.reporter
+            )
+            if end_marker is not None:
+                start = _find_redaction_start(opinion_dets, caption, mid)
+                all_headnote_rects.extend(
+                    _redaction_rects(
+                        caption,
+                        end_marker,
+                        pages_by_index,
+                        start_marker=start if start is not caption else None,
+                    )
                 )
-            )
-        else:
-            all_headnote_rects.extend(
-                _headnote_fallback_rects(opinion_dets, caption, pages_by_index, mid)
-            )
+            else:
+                all_headnote_rects.extend(
+                    _headnote_fallback_rects(opinion_dets, caption, pages_by_index, mid)
+                )
 
-    # Refine block rects to line-level with docTR
-    all_headnote_rects = refine_headnote_rects(src_pdf, all_headnote_rects, pages_by_index)
+        # Refine block rects to line-level with docTR
+        all_headnote_rects = refine_headnote_rects(src_pdf, all_headnote_rects, pages_by_index)
 
-    # Process each page
-    total_pages = len(document.pages)
-    for page in document.pages:
-        src_idx = page.index
-        fitz_page = out_pdf[src_idx]
-        sx, sy = page.scale_x, page.scale_y
+        # Process each page
+        total_pages = len(document.pages)
+        for page in document.pages:
+            src_idx = page.index
+            fitz_page = out_pdf[src_idx]
+            sx, sy = page.scale_x, page.scale_y
 
-        # Collect page number rects — never redact these
-        pn_rects = _collect_page_number_rects(page, fitz_page, sx, sy)
+            # Collect page number rects — never redact these
+            pn_rects = _collect_page_number_rects(page, fitz_page, sx, sy)
 
-        # Collect caption rects — CASE_SEQUENCE must not overlap these
-        caption_rects = []
-        for d in page.detections:
-            if d.label == Label.CASE_CAPTION:
-                caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
+            # Collect caption rects — CASE_SEQUENCE must not overlap these
+            caption_rects = []
+            for d in page.detections:
+                if d.label == Label.CASE_CAPTION:
+                    caption_rects.append(d.bbox.to_fitz_pdf_rect(sx, sy))
 
-        page_redact_rects: list[tuple[fitz.Rect, tuple]] = []
-        add_safe = _make_add_safe(fitz_page, pn_rects, collector=page_redact_rects)
+            page_redact_rects: list[tuple[fitz.Rect, tuple]] = []
+            add_safe = _make_add_safe(fitz_page, pn_rects, collector=page_redact_rects)
 
-        # Headnote blackout
-        header_bottom, footer_top = _margin_bounds(page)
-        for rect_page_idx, rect in all_headnote_rects:
-            if rect_page_idx != src_idx:
-                continue
-            # `_build_full_redacted` always runs on post-OCR PDFs so text bounds
-            # are reliable; match that by passing ocr_applied=False to get the
-            # text-tightening branch.
-            clipped = _clip_headnote_rect(
-                fitz_page, rect, header_bottom, footer_top, ocr_applied=False
-            )
-            if clipped is not None:
-                add_safe(clipped, (0, 0, 0))
+            # Headnote blackout
+            header_bottom, footer_top = _margin_bounds(page)
+            for rect_page_idx, rect in all_headnote_rects:
+                if rect_page_idx != src_idx:
+                    continue
+                # `_build_full_redacted` always runs on post-OCR PDFs so text bounds
+                # are reliable; match that by passing ocr_applied=False to get the
+                # text-tightening branch.
+                clipped = _clip_headnote_rect(
+                    fitz_page, rect, header_bottom, footer_top, ocr_applied=False
+                )
+                if clipped is not None:
+                    add_safe(clipped, (0, 0, 0))
 
-        # Per-detection redactions
-        for d in page.detections:
-            if d.label not in (_REDACT_WHITE | _REDACT_BLACK):
-                continue
-            if _check_excluded(d, excluded):
-                continue
-            if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
-                continue
-            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
-            _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
-            if not _skip_tighten:
-                tight = _tighten_to_text(fitz_page, rect, skip=False)
-                if tight is not None:
-                    rect = tight
-            fill = (0, 0, 0) if d.label in _REDACT_BLACK else (1, 1, 1)
-            add_safe(rect, fill)
+            # Per-detection redactions
+            for d in page.detections:
+                if d.label not in (_REDACT_WHITE | _REDACT_BLACK):
+                    continue
+                if _check_excluded(d, excluded):
+                    continue
+                if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
+                    continue
+                rect = d.bbox.to_fitz_pdf_rect(sx, sy)
+                _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
+                if not _skip_tighten:
+                    tight = _tighten_to_text(fitz_page, rect, skip=False)
+                    if tight is not None:
+                        rect = tight
+                fill = (0, 0, 0) if d.label in _REDACT_BLACK else (1, 1, 1)
+                add_safe(rect, fill)
 
-        # CASE_SEQUENCE: redact black, but never overlap CASE_CAPTION
-        for rect in _iter_case_sequence_rects(page, sx, sy, caption_rects, excluded):
-            add_safe(rect, (0, 0, 0))
+            # CASE_SEQUENCE: redact black, but never overlap CASE_CAPTION
+            for rect in _iter_case_sequence_rects(page, sx, sy, caption_rects, excluded):
+                add_safe(rect, (0, 0, 0))
 
-        # Key icon redactions (always black, ratio-filtered only)
-        valid_key_icons = {
-            id(d)
-            for d in _filter_key_icons_by_size(
-                [x for x in page.detections if x.label == Label.KEY_ICON]
-            )
-        }
-        for d in page.detections:
-            if d.label != Label.KEY_ICON:
-                continue
-            if id(d) not in valid_key_icons:
-                continue
-            if _check_excluded(d, excluded):
-                continue
-            if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
-                continue
-            rect = d.bbox.to_fitz_pdf_rect(sx, sy)
-            add_safe(rect, (0, 0, 0))
+            # Key icon redactions (always black, ratio-filtered only)
+            valid_key_icons = {
+                id(d)
+                for d in _filter_key_icons_by_size(
+                    [x for x in page.detections if x.label == Label.KEY_ICON]
+                )
+            }
+            for d in page.detections:
+                if d.label != Label.KEY_ICON:
+                    continue
+                if id(d) not in valid_key_icons:
+                    continue
+                if _check_excluded(d, excluded):
+                    continue
+                if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
+                    continue
+                rect = d.bbox.to_fitz_pdf_rect(sx, sy)
+                add_safe(rect, (0, 0, 0))
 
-        if is_bitonal and page_redact_rects:
-            _redact_bitonal_image(fitz_page, out_pdf, page_redact_rects)
-            fitz_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
-        else:
-            fitz_page.apply_redactions()
-        pg = page.index + 1
-        if pg % 20 == 0 or pg == total_pages:
-            print(f"    Redacted {pg}/{total_pages} pages", flush=True)
+            if is_bitonal and page_redact_rects:
+                _redact_bitonal_image(fitz_page, out_pdf, page_redact_rects)
+                fitz_page.apply_redactions(images=fitz.PDF_REDACT_IMAGE_NONE)
+            else:
+                fitz_page.apply_redactions()
+            pg = page.index + 1
+            if pg % 20 == 0 or pg == total_pages:
+                print(f"    Redacted {pg}/{total_pages} pages", flush=True)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    out_pdf.save(str(output_path), garbage=4, deflate=True)
-    out_pdf.close()
-    src_pdf.close()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        out_pdf.save(str(output_path), garbage=4, deflate=True)
     size_mb = output_path.stat().st_size / (1024 * 1024)
     if size_mb > 50:
         # Skip recompression if already bitonal (1-bit images can't be compressed further)
-        reopen = fitz.open(str(output_path))
-        sample_imgs = reopen[0].get_images(full=True) if reopen.page_count else []
-        is_bitonal = bool(sample_imgs and sample_imgs[0][4] == 1)
-        if is_bitonal:
-            reopen.close()
-            print("  Skipping recompression (bitonal)")
-        else:
-            print(f"  Recompressing images ({size_mb:.1f} MB > 50 MB limit)...")
-            recompress_images(reopen)
-            data = reopen.tobytes(garbage=4, deflate=True)
-            reopen.close()
+        data = None
+        with fitz.open(str(output_path)) as reopen:
+            sample_imgs = reopen[0].get_images(full=True) if reopen.page_count else []
+            is_bitonal = bool(sample_imgs and sample_imgs[0][4] == 1)
+            if is_bitonal:
+                print("  Skipping recompression (bitonal)")
+            else:
+                print(f"  Recompressing images ({size_mb:.1f} MB > 50 MB limit)...")
+                recompress_images(reopen)
+                data = reopen.tobytes(garbage=4, deflate=True)
+        if data is not None:
             output_path.write_bytes(data)
             size_mb = output_path.stat().st_size / (1024 * 1024)
     print(f"  Saved {output_path.name} ({size_mb:.1f} MB)")
@@ -843,42 +832,41 @@ def _extract_images(document, output_dir: Path) -> int:
     Returns the number of images extracted.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
-    src_pdf = fitz.open(str(document.pdf_path))
-    # 300 DPI: PDF points are 72 per inch, so scale factor = 300/72
-    mat = fitz.Matrix(300 / 72, 300 / 72)
-    count = 0
+    with fitz.open(str(document.pdf_path)) as src_pdf:
+        # 300 DPI: PDF points are 72 per inch, so scale factor = 300/72
+        mat = fitz.Matrix(300 / 72, 300 / 72)
+        count = 0
 
-    for page in document.pages:
-        sx, sy = page.scale_x, page.scale_y
-        fitz_page = src_pdf[page.index]
+        for page in document.pages:
+            sx, sy = page.scale_x, page.scale_y
+            fitz_page = src_pdf[page.index]
 
-        # Collect IMAGE detections above confidence threshold
-        images = [
-            d
-            for d in page.detections
-            if d.label == Label.IMAGE
-            and d.confidence >= LABEL_CONFIDENCE.get(Label.IMAGE, CONFIDENCE_THRESHOLD)
-        ]
-        if not images:
-            continue
+            # Collect IMAGE detections above confidence threshold
+            images = [
+                d
+                for d in page.detections
+                if d.label == Label.IMAGE
+                and d.confidence >= LABEL_CONFIDENCE.get(Label.IMAGE, CONFIDENCE_THRESHOLD)
+            ]
+            if not images:
+                continue
 
-        # Sort by reading order (top-to-bottom, left-to-right)
-        images.sort(key=lambda d: d.sort_key(page.midpoint))
+            # Sort by reading order (top-to-bottom, left-to-right)
+            images.sort(key=lambda d: d.sort_key(page.midpoint))
 
-        for seq, det in enumerate(images, start=1):
-            clip = det.bbox.to_fitz_pdf_rect(sx, sy)
-            pix = fitz_page.get_pixmap(matrix=mat, clip=clip)
+            for seq, det in enumerate(images, start=1):
+                clip = det.bbox.to_fitz_pdf_rect(sx, sy)
+                pix = fitz_page.get_pixmap(matrix=mat, clip=clip)
 
-            # Use detected page number, fall back to index + first_page
-            page_num = page.page_number
-            if page_num is None:
-                page_num = page.index + document.first_page
+                # Use detected page number, fall back to index + first_page
+                page_num = page.page_number
+                if page_num is None:
+                    page_num = page.index + document.first_page
 
-            fname = f"{page_num:04d}-{seq:03d}.png"
-            pix.save(str(output_dir / fname))
-            count += 1
+                fname = f"{page_num:04d}-{seq:03d}.png"
+                pix.save(str(output_dir / fname))
+                count += 1
 
-    src_pdf.close()
     return count
 
 
@@ -958,10 +946,9 @@ def cmd_process(args: argparse.Namespace) -> None:
     # ── Bitonal conversion ──
     if getattr(args, "bitonal", False):
         # Skip if already bitonal (BitsPerComponent == 1)
-        doc_check = fitz.open(str(args.pdf))
-        sample_imgs = doc_check[0].get_images(full=True) if doc_check.page_count else []
-        is_bitonal = bool(sample_imgs and sample_imgs[0][4] == 1)
-        doc_check.close()
+        with fitz.open(str(args.pdf)) as doc_check:
+            sample_imgs = doc_check[0].get_images(full=True) if doc_check.page_count else []
+            is_bitonal = bool(sample_imgs and sample_imgs[0][4] == 1)
         if is_bitonal:
             print("Source PDF is already bitonal, skipping conversion.", flush=True)
         else:
@@ -1078,38 +1065,37 @@ def cmd_process(args: argparse.Namespace) -> None:
 
             large_model = YOLO(str(large_model_path))
             mat = fitz.Matrix(DPI / 72, DPI / 72)
-            pdf_file = fitz.open(str(document.pdf_path))
-            added = 0
-            for pi in missing_sa:
-                pix = pdf_file[pi].get_pixmap(matrix=mat)
-                img = _PILImage.frombytes("RGB", (pix.width, pix.height), pix.samples)
-                results = large_model([img], conf=0.50, verbose=False)
-                for box in results[0].boxes:
-                    cls = int(box.cls[0].item())
-                    conf = float(box.conf[0].item())
-                    if cls == int(Label.STATE_ABBREVIATION) and conf >= 0.50:
-                        bbox = box.xyxy[0].tolist()
-                        det = Detection(
-                            bbox=BBox.from_xyxy(bbox),
-                            label=Label.STATE_ABBREVIATION,
-                            confidence=float(box.conf[0].item()),
-                            page_index=pi,
-                        )
-                        _pages_by_idx[pi].detections.append(det)
-                        detections_data.append(
-                            {
-                                "page_index": pi,
-                                "label": "STATE_ABBREVIATION",
-                                "label_id": int(Label.STATE_ABBREVIATION),
-                                "confidence": round(float(box.conf[0].item()), 3),
-                                "bbox": [round(v, 1) for v in bbox],
-                                "page_number": _pages_by_idx[pi].page_number,
-                                "img_width": pix.width,
-                                "img_height": pix.height,
-                            }
-                        )
-                        added += 1
-            pdf_file.close()
+            with fitz.open(str(document.pdf_path)) as pdf_file:
+                added = 0
+                for pi in missing_sa:
+                    pix = pdf_file[pi].get_pixmap(matrix=mat)
+                    img = _PILImage.frombytes("RGB", (pix.width, pix.height), pix.samples)
+                    results = large_model([img], conf=0.50, verbose=False)
+                    for box in results[0].boxes:
+                        cls = int(box.cls[0].item())
+                        conf = float(box.conf[0].item())
+                        if cls == int(Label.STATE_ABBREVIATION) and conf >= 0.50:
+                            bbox = box.xyxy[0].tolist()
+                            det = Detection(
+                                bbox=BBox.from_xyxy(bbox),
+                                label=Label.STATE_ABBREVIATION,
+                                confidence=float(box.conf[0].item()),
+                                page_index=pi,
+                            )
+                            _pages_by_idx[pi].detections.append(det)
+                            detections_data.append(
+                                {
+                                    "page_index": pi,
+                                    "label": "STATE_ABBREVIATION",
+                                    "label_id": int(Label.STATE_ABBREVIATION),
+                                    "confidence": round(float(box.conf[0].item()), 3),
+                                    "bbox": [round(v, 1) for v in bbox],
+                                    "page_number": _pages_by_idx[pi].page_number,
+                                    "img_width": pix.width,
+                                    "img_height": pix.height,
+                                }
+                            )
+                            added += 1
             if added:
                 with open(detections_path, "w") as _f:
                     _json.dump(detections_data, _f)
@@ -1298,34 +1284,30 @@ def reprocess_section(
     pdf_end = page_end - first_page
 
     # Extract section
-    src_pdf = fitz.open(str(ocr_pdf_path))
     section_path = Path(tempfile.mktemp(suffix=".pdf"))
-    section_pdf = fitz.open()
-    section_pdf.insert_pdf(src_pdf, from_page=pdf_start, to_page=pdf_end)
-    section_pdf.save(str(section_path))
-    section_pdf.close()
-    src_pdf.close()
+    with fitz.open(str(ocr_pdf_path)) as src_pdf, fitz.open() as section_pdf:
+        section_pdf.insert_pdf(src_pdf, from_page=pdf_start, to_page=pdf_end)
+        section_pdf.save(str(section_path))
 
     print(f"Reprocessing section: pages {page_start}-{page_end} ({pdf_end - pdf_start + 1} pages)")
 
     # Apply drawn redactions to section extract before YOLO (non-destructive to OCR PDF)
     if redactions:
-        sec = fitz.open(str(section_path))
-        applied = 0
-        for r in redactions:
-            # Convert absolute page_number to local section index
-            local_idx = r["page_number"] - first_page - pdf_start
-            if 0 <= local_idx < sec.page_count:
-                page = sec[local_idx]
-                rect = fitz.Rect(r["x"], r["y"], r["x"] + r["width"], r["y"] + r["height"])
-                fill_color = (1, 1, 1) if r.get("fill") == "white" else (0, 0, 0)
-                page.add_redact_annot(rect, fill=fill_color)
-                page.apply_redactions()
-                applied += 1
-        if applied:
-            sec.save(str(section_path), garbage=4, deflate=True)
-            print(f"  Applied {applied} redaction(s) to section extract")
-        sec.close()
+        with fitz.open(str(section_path)) as sec:
+            applied = 0
+            for r in redactions:
+                # Convert absolute page_number to local section index
+                local_idx = r["page_number"] - first_page - pdf_start
+                if 0 <= local_idx < sec.page_count:
+                    page = sec[local_idx]
+                    rect = fitz.Rect(r["x"], r["y"], r["x"] + r["width"], r["y"] + r["height"])
+                    fill_color = (1, 1, 1) if r.get("fill") == "white" else (0, 0, 0)
+                    page.add_redact_annot(rect, fill=fill_color)
+                    page.apply_redactions()
+                    applied += 1
+            if applied:
+                sec.save(str(section_path), garbage=4, deflate=True)
+                print(f"  Applied {applied} redaction(s) to section extract")
 
     # Scan section (no OCR needed — already has text layer)
     yolo_model = YOLO(str(model))
@@ -1472,12 +1454,11 @@ def rebuild_full_redacted_from_detections(
     raw = _json.loads(detections_json_path.read_text())
 
     # Get PDF page dimensions
-    src_pdf = fitz.open(str(ocr_pdf_path))
-    page_dims: dict[int, tuple[float, float]] = {}
-    for i in range(len(src_pdf)):
-        r = src_pdf.load_page(i).rect
-        page_dims[i] = (r.width, r.height)
-    src_pdf.close()
+    with fitz.open(str(ocr_pdf_path)) as src_pdf:
+        page_dims: dict[int, tuple[float, float]] = {}
+        for i in range(len(src_pdf)):
+            r = src_pdf.load_page(i).rect
+            page_dims[i] = (r.width, r.height)
 
     # Group detections by page_index
     pages_data = _group_detections_by_page(raw)
@@ -1561,12 +1542,11 @@ def generate_files(
     print(f"Loaded {len(raw)} detections from {det_path.name}", flush=True)
 
     # Reconstruct Document from detections
-    src_pdf = fitz.open(str(ocr_pdf))
-    page_dims = {}
-    for i in range(len(src_pdf)):
-        r = src_pdf.load_page(i).rect
-        page_dims[i] = (r.width, r.height)
-    src_pdf.close()
+    with fitz.open(str(ocr_pdf)) as src_pdf:
+        page_dims = {}
+        for i in range(len(src_pdf)):
+            r = src_pdf.load_page(i).rect
+            page_dims[i] = (r.width, r.height)
 
     pages_data = _group_detections_by_page(raw, include_page_number_end=True)
 
