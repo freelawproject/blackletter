@@ -4,15 +4,17 @@
 
 The following changes are not yet released, but are code complete:
 
-- Fix `TypeError` in `_ocr_crop_multi`'s page-number validation when `exp_start` is set but `exp_end` is `None`, which crashed `analyze_pdf` on scans with a known start page but unknown end page
-
 ## Current
+
+0.0.12 (2026-05-29)
+
+- Fix `TypeError` in `_ocr_crop_multi`'s page-number validation when `exp_start` is set but `exp_end` is `None`, which crashed `analyze_pdf` on scans with a known start page but unknown end page (#50)
+
+## Past
 
 0.0.11 (2026-05-28)
 
 - Close every `fitz.Document` via `with fitz.open(...)` in `margins.py`, `api.py`, and `process.py` so exceptions no longer leak the open (mmap-backed) Document, fixing the runaway memory growth seen in downstream scanning web pods (#47)
-
-## Past
 
 0.0.10 (2026-05-14)
 
