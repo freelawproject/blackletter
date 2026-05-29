@@ -140,7 +140,7 @@ def _ocr_crop_multi(
     def is_valid(text, typ):
         if typ == "range":
             return True
-        if typ == "single" and exp_start is not None:
+        if typ == "single" and exp_start is not None and exp_end is not None:
             try:
                 num = int(text)
                 return (exp_start - margin) <= num <= (exp_end + margin)

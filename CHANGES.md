@@ -4,6 +4,8 @@
 
 The following changes are not yet released, but are code complete:
 
+- Fix `TypeError` in `_ocr_crop_multi`'s page-number validation when `exp_start` is set but `exp_end` is `None`, which crashed `analyze_pdf` on scans with a known start page but unknown end page
+
 ## Current
 
 0.0.11 (2026-05-28)
