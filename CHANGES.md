@@ -4,6 +4,8 @@
 
 The following changes are not yet released, but are code complete:
 
+- Fix `validate()` flagging real numbered pages as duplicates when a PDF starts with unnumbered front matter: pages with no detected number fell back to a `logical = pdf_page` placeholder that collided with the real page numbers. Only genuinely detected single page numbers now participate in `page_map` duplicate detection (#53)
+
 ## Current
 
 0.0.12 (2026-05-29)
