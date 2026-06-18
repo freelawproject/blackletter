@@ -4,15 +4,17 @@
 
 The following changes are not yet released, but are code complete:
 
+## Current
+
+0.0.13 (2026-06-18)
+
 - Fix `validate()` flagging real numbered pages as duplicates when a PDF starts with unnumbered front matter: pages with no detected number fell back to a `logical = pdf_page` placeholder that collided with the real page numbers. Only genuinely detected single page numbers now participate in `page_map` duplicate detection (#53)
 
-## Current
+## Past
 
 0.0.12 (2026-05-29)
 
 - Fix `TypeError` in `_ocr_crop_multi`'s page-number validation when `exp_start` is set but `exp_end` is `None`, which crashed `analyze_pdf` on scans with a known start page but unknown end page (#50)
-
-## Past
 
 0.0.11 (2026-05-28)
 
