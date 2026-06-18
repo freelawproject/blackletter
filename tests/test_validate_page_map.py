@@ -1,7 +1,8 @@
 """Regression tests for page_map duplicate detection in validate._build_issues.
 
-Guards issue #90: unnumbered front matter (cover, table of contents) must not
-"steal" logical page numbers and flag the real, numbered pages as duplicates.
+Guards against unnumbered front matter (cover, table of contents) "stealing"
+logical page numbers and flagging the real, numbered pages as duplicates
+(#52; surfaced in the scanning portal, freelawproject/scanning#100).
 """
 
 from blackletter.validate import _build_issues

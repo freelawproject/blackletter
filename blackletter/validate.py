@@ -337,9 +337,8 @@ def _build_issues(
         # duplicate detection. Front-matter / undetected / out-of-range pages
         # fall back to ``logical = pdf_page`` purely as a display placeholder;
         # that placeholder must not be treated as a real page number, otherwise
-        # unnumbered front matter (e.g. cover + TOC on PDF pages 1-13) would
-        # "steal" logical numbers 1-13 and flag the real opinion pages numbered
-        # 1-13 as duplicates.
+        # unnumbered front matter (cover, tables, etc.) would "steal" the low
+        # logical numbers and flag the real numbered pages as duplicates.
         detected_single = False
         if r["pdf_page"] in out_of_range_pages:
             logical = r["pdf_page"]
