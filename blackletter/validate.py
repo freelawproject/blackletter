@@ -333,11 +333,19 @@ def _build_issues(
 
     for r in analysis["results"]:
         pdf_idx = r["pdf_page"] - 1
+        # Only pages with a genuinely detected page number participate in
+        # duplicate detection. Front-matter / undetected / out-of-range pages
+        # fall back to ``logical = pdf_page`` purely as a display placeholder;
+        # that placeholder must not be treated as a real page number, otherwise
+        # unnumbered front matter (cover, tables, etc.) would "steal" the low
+        # logical numbers and flag the real numbered pages as duplicates.
+        detected_single = False
         if r["pdf_page"] in out_of_range_pages:
             logical = r["pdf_page"]
         elif r["detected"] and r["type"] == "single":
             try:
                 logical = int(r["detected"])
+                detected_single = True
             except ValueError:
                 logical = r["pdf_page"]
         elif r["detected"] and r["type"] == "range":
@@ -354,15 +362,15 @@ def _build_issues(
         else:
             logical = r["pdf_page"]
 
-        is_dupe = logical in seen_logical
         entry: dict = {
             "type": "pdf_page",
             "pdf_index": pdf_idx,
             "logical_number": logical,
         }
-        if is_dupe:
-            entry["duplicate"] = True
-        seen_logical[logical] = pdf_idx
+        if detected_single:
+            if logical in seen_logical:
+                entry["duplicate"] = True
+            seen_logical[logical] = pdf_idx
         page_map.append(entry)
 
     # Insert missing page placeholders
