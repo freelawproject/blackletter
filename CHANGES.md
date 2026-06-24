@@ -4,6 +4,8 @@
 
 The following changes are not yet released, but are code complete:
 
+- Flag every copy of a repeated page number as `duplicate` in `page_map`, not just the 2nd and later copies, so per-page duplicate markers match the `duplicate_page` issue's page list. Missing-page placeholders still anchor on the first copy (#55)
+
 ## Current
 
 0.0.13 (2026-06-18)
