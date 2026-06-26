@@ -329,7 +329,14 @@ def _build_issues(
     # --- Build page map ---
     page_map: list[dict] = []
     out_of_range_pages = {r["pdf_page"] for r in analysis.get("out_of_range", [])}
-    seen_logical: dict[int, int] = {}
+    # Maps a logical number to the first page_map entry that claimed it, so a
+    # later repeat can back-flag that first entry too (every copy of a repeated
+    # number is marked ``duplicate``, matching the duplicate_page issue's page
+    # list). ``extra_copy_indices`` tracks only the 2nd-and-later copies, whose
+    # logical numbers are unreliable and so are skipped when anchoring missing
+    # page placeholders.
+    seen_logical: dict[int, dict] = {}
+    extra_copy_indices: set[int] = set()
 
     for r in analysis["results"]:
         pdf_idx = r["pdf_page"] - 1
@@ -370,7 +377,11 @@ def _build_issues(
         if detected_single:
             if logical in seen_logical:
                 entry["duplicate"] = True
-            seen_logical[logical] = pdf_idx
+                extra_copy_indices.add(pdf_idx)
+                # Back-flag the first occurrence so every copy is marked.
+                seen_logical[logical]["duplicate"] = True
+            else:
+                seen_logical[logical] = entry
         page_map.append(entry)
 
     # Insert missing page placeholders
@@ -379,7 +390,10 @@ def _build_issues(
         for gap_num in actually_missing:
             insert_pos = len(page_map)
             for i, entry in enumerate(page_map):
-                if entry["logical_number"] > gap_num and not entry.get("duplicate"):
+                if (
+                    entry["logical_number"] > gap_num
+                    and entry.get("pdf_index") not in extra_copy_indices
+                ):
                     insert_pos = i
                     break
             inserts.append((insert_pos, gap_num))

@@ -3,6 +3,10 @@
 Guards against unnumbered front matter (cover, table of contents) "stealing"
 logical page numbers and flagging the real, numbered pages as duplicates
 (#52; surfaced in the scanning portal, freelawproject/scanning#100).
+
+Also covers #55: every copy of a repeated page number is flagged
+``duplicate`` (matching the duplicate_page issue's page list), while
+missing-page placeholders still anchor on the first copy.
 """
 
 from blackletter.validate import _build_issues
@@ -49,8 +53,9 @@ class TestPageMapDuplicates:
         flagged = [e["pdf_index"] for e in page_map if e.get("duplicate")]
         assert flagged == []
 
-    def test_genuine_duplicate_is_still_flagged(self):
-        # Two pages both genuinely read "2" -> the second is a real duplicate.
+    def test_all_copies_of_a_duplicate_are_flagged(self):
+        # Two pages both genuinely read "2"; every copy is flagged (not just
+        # the later one), matching the duplicate_page issue's page list (#55).
         results = [
             {"pdf_page": 1, "detected": None, "type": None},
             {"pdf_page": 2, "detected": "1", "type": "single"},
@@ -67,4 +72,33 @@ class TestPageMapDuplicates:
         page_map = _build_issues(analysis, 5, 1, 3)["page_map"]
 
         flagged = [e["pdf_index"] for e in page_map if e.get("duplicate")]
-        assert flagged == [3]  # only the second "2", pdf_page 4 (index 3)
+        assert flagged == [2, 3]  # both "2" pages: pdf_page 3 and 4
+
+    def test_missing_page_anchors_before_first_duplicate_copy(self):
+        # Page 3 is missing and page 4 is duplicated. The missing-3 placeholder
+        # must still land before the FIRST copy of "4" (the reliable anchor),
+        # even though every copy of "4" is now flagged duplicate (#55).
+        results = [
+            {"pdf_page": 1, "detected": "1", "type": "single"},
+            {"pdf_page": 2, "detected": "2", "type": "single"},
+            {"pdf_page": 3, "detected": "4", "type": "single"},
+            {"pdf_page": 4, "detected": "4", "type": "single"},
+        ]
+        analysis = _analysis(
+            results,
+            duplicates={4: [3, 4]},
+            seen_nums={1: [1], 2: [2], 4: [3, 4]},
+        )
+        analysis["missing_pages"] = [3]
+
+        page_map = _build_issues(analysis, 4, 1, 4)["page_map"]
+
+        flagged = [e["pdf_index"] for e in page_map if e.get("duplicate")]
+        assert flagged == [2, 3]  # both "4" copies flagged
+
+        # The missing-3 placeholder sits before the first "4" (pdf_index 2).
+        missing_pos = next(
+            i for i, e in enumerate(page_map) if e["type"] == "missing" and e["logical_number"] == 3
+        )
+        first_four_pos = next(i for i, e in enumerate(page_map) if e.get("pdf_index") == 2)
+        assert missing_pos == first_four_pos - 1
