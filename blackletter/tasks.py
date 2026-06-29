@@ -97,6 +97,7 @@ def ocr_chunk(
     page_end: int,
     language: str = "eng",
     optimize: int = 1,
+    tess_model: str = "best",
 ) -> str:
     """OCR a page range.
 
@@ -109,13 +110,15 @@ def ocr_chunk(
         page_end: Last page index (exclusive).
         language: Tesseract language code.
         optimize: ocrmypdf optimization level.
+        tess_model: Tesseract model tier ("fast", "main", "best", or
+            "system"). Defaults to "best". Downloaded on demand.
 
     Returns:
         Path to OCR'd chunk PDF.
     """
     import tempfile
 
-    from blackletter.ocr import _silence_ocr_loggers
+    from blackletter.ocr import _silence_ocr_loggers, _tessdata_prefix, ensure_tessdata
 
     # Extract pages
     src = fitz.open(str(src_path))
@@ -130,16 +133,17 @@ def ocr_chunk(
 
     import ocrmypdf
 
-    ocrmypdf.ocr(
-        str(chunk_in),
-        str(dst_path),
-        pdf_renderer="auto",
-        optimize=optimize,
-        output_type="pdf",
-        language=[language],
-        tesseract_timeout=120,
-        progress_bar=False,
-    )
+    with _tessdata_prefix(ensure_tessdata(tess_model, language)):
+        ocrmypdf.ocr(
+            str(chunk_in),
+            str(dst_path),
+            pdf_renderer="auto",
+            optimize=optimize,
+            output_type="pdf",
+            language=[language],
+            tesseract_timeout=120,
+            progress_bar=False,
+        )
 
     chunk_in.unlink(missing_ok=True)
     return str(dst_path)

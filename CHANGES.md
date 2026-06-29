@@ -4,6 +4,9 @@
 
 The following changes are not yet released, but are code complete:
 
+- Add a configurable Tesseract model tier to the OCR step. `ocr_pdf()`, `api.ocr()`, and `ocr_chunk()` accept a `tess_model` argument (`"fast"`, `"main"`, `"best"`, or `"system"`), defaulting to `"best"`. The selected `eng.traineddata` is downloaded on demand and applied via `TESSDATA_PREFIX`, letting callers trade OCR speed for accuracy (`fast` benchmarks ~3.8x faster than `best`, `main` ~2.8x faster at near-best accuracy)
+- Cache downloaded tessdata under `$BLACKLETTER_TESSDATA_DIR` when set (otherwise `blackletter/tessdata/`), and add `prefetch_tessdata()` plus a `python -m blackletter.ocr --models fast,main,best` entry point to pre-download tiers at Docker build time
+
 ## Current
 
 0.0.13 (2026-06-18)

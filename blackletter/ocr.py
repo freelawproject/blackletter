@@ -15,9 +15,13 @@ Adapted from scanning-utils/process_scan.py.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import logging
+import os
+import shutil
 import tempfile
+import urllib.request
 from pathlib import Path
 
 import fitz
@@ -43,6 +47,142 @@ def _silence_ocr_loggers() -> None:
     for name in list(logging.root.manager.loggerDict):
         if name.startswith("ocrmypdf"):
             logging.getLogger(name).setLevel(logging.ERROR)
+
+
+# Tesseract model tiers, downloaded on demand into ``blackletter/tessdata/<tier>``.
+# "fast"/"main"/"best" map to the official tessdata repos; "system" (or None)
+# uses whatever model Tesseract finds by default.
+_TESSDATA_URLS = {
+    "fast": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main/{lang}.traineddata",
+    "main": "https://raw.githubusercontent.com/tesseract-ocr/tessdata/main/{lang}.traineddata",
+    "best": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_best/main/{lang}.traineddata",
+}
+# Model-independent assets Tesseract needs alongside ``<lang>.traineddata`` when
+# ``TESSDATA_PREFIX`` points at a custom directory.
+_TESSDATA_SHARED = ("configs", "tessconfigs", "osd.traineddata", "pdf.ttf")
+
+
+def _find_system_tessdata() -> Path | None:
+    """Locate the system tessdata directory (for shared config/osd assets).
+
+    :param: None.
+    :returns: Path to a tessdata dir containing ``configs/``, or ``None`` if
+        no system install is found.
+    """
+    candidates: list[Path] = []
+    env = os.environ.get("TESSDATA_PREFIX")
+    if env:
+        candidates.append(Path(env))
+    candidates += [
+        Path("/usr/share/tessdata"),
+        Path("/usr/local/share/tessdata"),
+        Path("/opt/homebrew/share/tessdata"),
+    ]
+    candidates += sorted(Path("/usr/share/tesseract-ocr").glob("*/tessdata"))
+    for c in candidates:
+        if c and (c / "configs").is_dir():
+            return c
+    return None
+
+
+def ensure_tessdata(model: str = "best", language: str = "eng") -> Path | None:
+    """Ensure a Tesseract model tier is available, return its TESSDATA_PREFIX.
+
+    Downloads ``<language>.traineddata`` for the requested tier into the
+    cache directory (``$BLACKLETTER_TESSDATA_DIR`` if set, otherwise
+    ``blackletter/tessdata/``) if absent, then symlinks the system
+    ``configs``/``tessconfigs``/``osd`` so Tesseract can find its config
+    files when ``TESSDATA_PREFIX`` points at the custom directory.
+
+    :param model: One of ``"fast"``, ``"main"``, ``"best"`` (downloaded on
+        demand), or ``"system"``/``None`` to use the system-installed model.
+    :param language: Tesseract language code. Only ``eng`` can be fetched;
+        other languages fall back to the system model.
+    :returns: Path to use as ``TESSDATA_PREFIX``, or ``None`` to leave the
+        environment untouched (system default).
+    """
+    if model in (None, "", "system"):
+        return None
+    if model not in _TESSDATA_URLS:
+        raise ValueError(
+            f"Unknown tess_model {model!r}; choose 'fast', 'main', 'best', or 'system'."
+        )
+
+    cache_root = os.environ.get("BLACKLETTER_TESSDATA_DIR")
+    root = Path(cache_root) if cache_root else Path(__file__).resolve().parent / "tessdata"
+    base = root / model
+    base.mkdir(parents=True, exist_ok=True)
+    traineddata = base / f"{language}.traineddata"
+
+    if not traineddata.is_file() or traineddata.stat().st_size < 500_000:
+        if language != "eng":
+            # Only English models are fetched here; defer to the system model.
+            return None
+        url = _TESSDATA_URLS[model].format(lang=language)
+        print(f"  Downloading {model} tessdata ({language})...", flush=True)
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "blackletter"})
+            with urllib.request.urlopen(req) as resp, open(traineddata, "wb") as fh:
+                shutil.copyfileobj(resp, fh)
+        except Exception as exc:
+            traineddata.unlink(missing_ok=True)
+            raise RuntimeError(f"Failed to download {model} tessdata from {url}: {exc}") from exc
+
+    # Tesseract looks for its config files under TESSDATA_PREFIX too, so link
+    # them from the system install when overriding the prefix (best-effort).
+    sys_dir = _find_system_tessdata()
+    if sys_dir:
+        for item in _TESSDATA_SHARED:
+            src = sys_dir / item
+            dst = base / item
+            if src.exists() and not dst.exists():
+                try:
+                    dst.symlink_to(src)
+                except OSError:
+                    pass
+    return base
+
+
+def prefetch_tessdata(
+    models: tuple[str, ...] = ("fast", "main", "best"),
+    language: str = "eng",
+) -> dict[str, Path | None]:
+    """Pre-download several Tesseract model tiers up front.
+
+    Useful at Docker build time so the models are baked into the image and
+    no download happens at runtime. Set ``$BLACKLETTER_TESSDATA_DIR`` to
+    control where they are cached.
+
+    :param models: Tiers to fetch (default: all three, "fast", "main",
+        "best").
+    :param language: Tesseract language code.
+    :returns: Mapping from tier name to its resolved cache directory.
+    """
+    return {m: ensure_tessdata(m, language) for m in models}
+
+
+@contextlib.contextmanager
+def _tessdata_prefix(tessdata_dir: Path | None):
+    """Temporarily point ``TESSDATA_PREFIX`` at *tessdata_dir* (noop if ``None``).
+
+    Restores the previous value on exit so a long-lived caller's environment
+    is not mutated permanently.
+
+    :param tessdata_dir: Directory to use as ``TESSDATA_PREFIX``, or ``None``.
+    :returns: None.
+    """
+    if tessdata_dir is None:
+        yield
+        return
+    prev = os.environ.get("TESSDATA_PREFIX")
+    os.environ["TESSDATA_PREFIX"] = str(tessdata_dir)
+    try:
+        yield
+    finally:
+        if prev is None:
+            os.environ.pop("TESSDATA_PREFIX", None)
+        else:
+            os.environ["TESSDATA_PREFIX"] = prev
 
 
 def _render_bitonal_page(
@@ -223,6 +363,7 @@ def ocr_pdf(
     target_kb: int = DEFAULT_TARGET_KB,
     language: str = "eng",
     optimize: int = 1,
+    tess_model: str = "best",
 ) -> Path:
     """Downsample and OCR an image-only PDF.
 
@@ -237,6 +378,8 @@ def ocr_pdf(
         output_path: Path for output PDF. Defaults to {stem}_ocr.pdf.
         target_kb: Target size per page in KB.
         language: Tesseract language code.
+        tess_model: Tesseract model tier ("fast", "main", "best", or
+            "system"). Defaults to "best". Downloaded on demand.
 
     Returns:
         Path to the OCR'd PDF.
@@ -276,6 +419,10 @@ def ocr_pdf(
     import multiprocessing
     import subprocess
     import sys
+
+    # Resolve the Tesseract model tier (downloads on first use).
+    tessdata_dir = ensure_tessdata(tess_model, language)
+    _ocr_env = {**os.environ, "TESSDATA_PREFIX": str(tessdata_dir)} if tessdata_dir else None
 
     n_workers = max(1, multiprocessing.cpu_count() // 2)
 
@@ -354,6 +501,7 @@ print("DONE", flush=True)
                 [sys.executable, "-c", script],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
+                env=_ocr_env,
             )
             procs.append((i, p))
 
@@ -444,17 +592,18 @@ print("DONE", flush=True)
 
         pm = _get_pm()
         pm._pm.register(_ProgressPlugin())
-        _ocrmypdf.ocr(
-            str(tmp_path),
-            str(output_path),
-            pdf_renderer="auto",
-            optimize=optimize,
-            output_type="pdf",
-            language=[language],
-            tesseract_timeout=120,
-            progress_bar=True,
-            plugin_manager=pm,
-        )
+        with _tessdata_prefix(tessdata_dir):
+            _ocrmypdf.ocr(
+                str(tmp_path),
+                str(output_path),
+                pdf_renderer="auto",
+                optimize=optimize,
+                output_type="pdf",
+                language=[language],
+                tesseract_timeout=120,
+                progress_bar=True,
+                plugin_manager=pm,
+            )
 
     if tmp_path != input_path:
         tmp_path.unlink(missing_ok=True)
@@ -596,3 +745,25 @@ def bitonal_convert(
 
     final_mb = dst_path.stat().st_size / (1024 * 1024)
     print(f"  Bitonal: {orig_mb:.1f} MB -> {final_mb:.1f} MB")
+
+
+if __name__ == "__main__":
+    # Pre-download Tesseract model tiers, e.g. at Docker build time:
+    #   python -m blackletter.ocr --models fast,main,best
+    import argparse
+
+    _ap = argparse.ArgumentParser(
+        prog="python -m blackletter.ocr",
+        description="Pre-download Tesseract model tiers into the cache dir "
+        "($BLACKLETTER_TESSDATA_DIR if set, else blackletter/tessdata/).",
+    )
+    _ap.add_argument(
+        "--models",
+        default="fast,main,best",
+        help="Comma-separated tiers to fetch (default: fast,main,best).",
+    )
+    _ap.add_argument("--language", default="eng", help="Language code (default: eng).")
+    _args = _ap.parse_args()
+    _tiers = tuple(m.strip() for m in _args.models.split(",") if m.strip())
+    for _name, _path in prefetch_tessdata(_tiers, _args.language).items():
+        print(f"  {_name}: {_path}")

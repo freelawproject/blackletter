@@ -168,4 +168,7 @@ output/
 # Large model files (hosted on Hugging Face)
 blackletter/weights/large.pt
 
+# Tesseract models downloaded on demand by ensure_tessdata()
+blackletter/tessdata/
+
 uv.lock

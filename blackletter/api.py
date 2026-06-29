@@ -142,6 +142,7 @@ def ocr(
     volume: str = "",
     first_page: int = 1,
     language: str = "eng",
+    tess_model: str = "best",
 ) -> Path:
     """OCR a PDF (add text layer via ocrmypdf/Tesseract).
 
@@ -151,9 +152,11 @@ def ocr(
     :param volume: Volume number for the output filename.
     :param first_page: First page number (used to build the output filename).
     :param language: Tesseract language code.
+    :param tess_model: Tesseract model tier ("fast", "main", "best", or
+        "system"). Defaults to "best". Downloaded on demand.
     :returns: Path to the OCR'd PDF.
     """
-    from blackletter.ocr import _silence_ocr_loggers
+    from blackletter.ocr import _silence_ocr_loggers, _tessdata_prefix, ensure_tessdata
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -172,16 +175,17 @@ def ocr(
 
     print(f"  OCR {total_pages} pages...", flush=True)
     t0 = time.time()
-    ocrmypdf.ocr(
-        str(pdf_path),
-        str(output_path),
-        pdf_renderer="auto",
-        optimize=1,
-        output_type="pdf",
-        language=[language],
-        tesseract_timeout=120,
-        progress_bar=False,
-    )
+    with _tessdata_prefix(ensure_tessdata(tess_model, language)):
+        ocrmypdf.ocr(
+            str(pdf_path),
+            str(output_path),
+            pdf_renderer="auto",
+            optimize=1,
+            output_type="pdf",
+            language=[language],
+            tesseract_timeout=120,
+            progress_bar=False,
+        )
     print(f"  OCR done ({time.time() - t0:.0f}s)", flush=True)
     return output_path
 
