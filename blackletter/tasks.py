@@ -98,6 +98,8 @@ def ocr_chunk(
     language: str = "eng",
     optimize: int = 1,
     tess_model: str = "best",
+    engine: str = "tesseract",
+    paddle_use_gpu: bool = False,
 ) -> str:
     """OCR a page range.
 
@@ -112,13 +114,21 @@ def ocr_chunk(
         optimize: ocrmypdf optimization level.
         tess_model: Tesseract model tier ("fast", "main", "best", or
             "system"). Defaults to "best". Downloaded on demand.
+        engine: OCR engine, "tesseract" (default) or "paddle". "paddle"
+            requires the ocrmypdf-paddleocr plugin to be installed.
+        paddle_use_gpu: Run PaddleOCR on the GPU (engine="paddle" only).
 
     Returns:
         Path to OCR'd chunk PDF.
     """
     import tempfile
 
-    from blackletter.ocr import _silence_ocr_loggers, _tessdata_prefix, ensure_tessdata
+    from blackletter.ocr import (
+        _ocr_engine_kwargs,
+        _silence_ocr_loggers,
+        _tessdata_prefix,
+        ensure_tessdata,
+    )
 
     # Extract pages
     src = fitz.open(str(src_path))
@@ -133,17 +143,30 @@ def ocr_chunk(
 
     import ocrmypdf
 
-    with _tessdata_prefix(ensure_tessdata(tess_model, language)):
+    engine_kwargs = _ocr_engine_kwargs(engine, paddle_use_gpu)
+    if engine == "paddle":
         ocrmypdf.ocr(
             str(chunk_in),
             str(dst_path),
-            pdf_renderer="auto",
+            pdf_renderer="hocr",
             optimize=optimize,
             output_type="pdf",
             language=[language],
-            tesseract_timeout=120,
             progress_bar=False,
+            **engine_kwargs,
         )
+    else:
+        with _tessdata_prefix(ensure_tessdata(tess_model, language)):
+            ocrmypdf.ocr(
+                str(chunk_in),
+                str(dst_path),
+                pdf_renderer="auto",
+                optimize=optimize,
+                output_type="pdf",
+                language=[language],
+                tesseract_timeout=120,
+                progress_bar=False,
+            )
 
     chunk_in.unlink(missing_ok=True)
     return str(dst_path)

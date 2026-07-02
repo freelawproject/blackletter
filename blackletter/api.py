@@ -143,8 +143,11 @@ def ocr(
     first_page: int = 1,
     language: str = "eng",
     tess_model: str = "best",
+    engine: str = "tesseract",
+    paddle_use_gpu: bool = False,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> Path:
-    """OCR a PDF (add text layer via ocrmypdf/Tesseract).
+    """OCR a PDF (add text layer via ocrmypdf/Tesseract or PaddleOCR).
 
     :param pdf_path: Path to the source PDF.
     :param output_dir: Directory to write the OCR'd PDF into.
@@ -154,9 +157,21 @@ def ocr(
     :param language: Tesseract language code.
     :param tess_model: Tesseract model tier ("fast", "main", "best", or
         "system"). Defaults to "best". Downloaded on demand.
+    :param engine: OCR engine, "tesseract" (default) or "paddle". "paddle"
+        requires the ocrmypdf-paddleocr plugin to be installed.
+    :param paddle_use_gpu: Run PaddleOCR on the GPU (engine="paddle" only).
+    :param progress_callback: Optional callable(current, total, message)
+        invoked per page as OCR proceeds.
     :returns: Path to the OCR'd PDF.
     """
-    from blackletter.ocr import _silence_ocr_loggers, _tessdata_prefix, ensure_tessdata
+    from blackletter.ocr import (
+        _ocr_engine_kwargs,
+        _progress_plugin,
+        _serial_executor_plugin,
+        _silence_ocr_loggers,
+        _tessdata_prefix,
+        ensure_tessdata,
+    )
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -175,17 +190,51 @@ def ocr(
 
     print(f"  OCR {total_pages} pages...", flush=True)
     t0 = time.time()
-    with _tessdata_prefix(ensure_tessdata(tess_model, language)):
+    engine_kwargs = _ocr_engine_kwargs(engine, paddle_use_gpu)
+    use_progress = progress_callback is not None
+    if engine == "paddle":
+        # PaddleOCR must run serially in the calling thread (GPU + one cached
+        # model), so always drive it through a plugin manager carrying the
+        # engine plugin, a serial executor, and (optionally) the progress
+        # relay. plugins=[...] and plugin_manager=... are mutually exclusive,
+        # so the engine plugin is popped and registered on the manager instead.
+        from ocrmypdf._plugin_manager import get_plugin_manager
+
+        pm = get_plugin_manager(engine_kwargs.pop("plugins", []))
+        pm._pm.register(_serial_executor_plugin())
+        if use_progress:
+            pm._pm.register(_progress_plugin(progress_callback, total_pages))
+        engine_kwargs["plugin_manager"] = pm
         ocrmypdf.ocr(
             str(pdf_path),
             str(output_path),
-            pdf_renderer="auto",
+            pdf_renderer="hocr",
             optimize=1,
             output_type="pdf",
             language=[language],
-            tesseract_timeout=120,
-            progress_bar=False,
+            progress_bar=use_progress,
+            **engine_kwargs,
         )
+    else:
+        if use_progress:
+            # Put any engine plugin and the progress relay in one plugin manager.
+            from ocrmypdf._plugin_manager import get_plugin_manager
+
+            pm = get_plugin_manager(engine_kwargs.pop("plugins", []))
+            pm._pm.register(_progress_plugin(progress_callback, total_pages))
+            engine_kwargs["plugin_manager"] = pm
+        with _tessdata_prefix(ensure_tessdata(tess_model, language)):
+            ocrmypdf.ocr(
+                str(pdf_path),
+                str(output_path),
+                pdf_renderer="auto",
+                optimize=1,
+                output_type="pdf",
+                language=[language],
+                tesseract_timeout=120,
+                progress_bar=use_progress,
+                **engine_kwargs,
+            )
     print(f"  OCR done ({time.time() - t0:.0f}s)", flush=True)
     return output_path
 

@@ -16,6 +16,7 @@ Adapted from scanning-utils/process_scan.py.
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import io
 import logging
 import os
@@ -183,6 +184,103 @@ def _tessdata_prefix(tessdata_dir: Path | None):
             os.environ.pop("TESSDATA_PREFIX", None)
         else:
             os.environ["TESSDATA_PREFIX"] = prev
+
+
+# ocrmypdf plugin module providing the PaddleOCR engine. Ships with
+# blackletter (see ``blackletter/paddle_ocr.py``), so it is always importable
+# when blackletter is installed; PaddleOCR itself comes via the [analyze] extra.
+_PADDLE_PLUGIN = "blackletter.paddle_ocr"
+
+
+def _ocr_engine_kwargs(engine: str = "tesseract", paddle_use_gpu: bool = False) -> dict:
+    """Return ocrmypdf keyword arguments for the chosen OCR engine.
+
+    For ``"paddle"``, enables blackletter's native PaddleOCR engine plugin
+    and forces ``jobs=1`` (one cached model; CUDA does not survive
+    ``fork()``). PaddleOCR uses the GPU automatically when paddlepaddle is
+    CUDA-enabled, so ``paddle_use_gpu`` is accepted for API compatibility
+    but no longer needed. For ``"tesseract"`` returns an empty dict (the
+    default engine, configured separately via ``TESSDATA_PREFIX``).
+
+    :param engine: ``"tesseract"`` or ``"paddle"``.
+    :param paddle_use_gpu: Deprecated/ignored (GPU is auto-detected).
+    :returns: Keyword arguments to pass to ``ocrmypdf.ocr``.
+    """
+    if engine == "tesseract":
+        return {}
+    if engine != "paddle":
+        raise ValueError(f"Unknown engine {engine!r}; choose 'tesseract' or 'paddle'.")
+    if importlib.util.find_spec("paddleocr") is None:
+        raise RuntimeError(
+            "engine='paddle' requires PaddleOCR. Install it with:\n"
+            "  pip install blackletter[analyze]"
+        )
+    return {"plugins": [_PADDLE_PLUGIN], "jobs": 1}
+
+
+def _progress_plugin(progress_callback, total_pages: int = 0):
+    """Build an ocrmypdf plugin instance that relays per-page OCR progress.
+
+    The returned plugin overrides ocrmypdf's progress-bar class with one
+    that calls ``progress_callback(current, total, message)`` as pages are
+    OCR'd. Register it on a plugin manager passed to ``ocrmypdf.ocr``.
+
+    :param progress_callback: Callable invoked as ``(current, total, msg)``.
+    :param total_pages: Fallback page total when ocrmypdf supplies none.
+    :returns: A plugin object suitable for ``plugin_manager.register``.
+    """
+    from ocrmypdf import hookimpl
+
+    class _CallbackProgress:
+        def __init__(self, *, total=None, desc=None, unit=None, disable=False, **kw):
+            self._total = total or total_pages
+            self._unit = unit
+            self._current = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def update(self, n=1, *, completed=None):
+            self._current += n
+            cur = int(self._current)
+            if self._unit == "page" and (cur % 10 == 0 or cur == self._total):
+                progress_callback(cur, self._total, f"OCR: {cur}/{self._total} pages...")
+
+    class _ProgressPlugin:
+        @hookimpl
+        def get_progressbar_class(self):
+            return _CallbackProgress
+
+    return _ProgressPlugin()
+
+
+def _serial_executor_plugin():
+    """Build an ocrmypdf plugin that runs OCR serially in the calling thread.
+
+    ocrmypdf's default executor offloads each page to a freshly spawned
+    worker thread (``--use-threads``, the default) or a forked process. For
+    the PaddleOCR engine on a GPU worker this is a problem: a Paddle CUDA
+    context created on an ocrmypdf worker thread coexists badly with the
+    torch CUDA context the worker already initialised at startup, and the
+    first page's ``predict()`` hangs. Returning a ``SerialExecutor`` runs
+    every page in order in the thread that called ``ocrmypdf.ocr`` (one GPU,
+    one model, no extra threads/forks), which also makes the progress relay
+    fire reliably.
+
+    :returns: A plugin object suitable for ``plugin_manager.register``.
+    """
+    from ocrmypdf import hookimpl
+    from ocrmypdf._concurrent import SerialExecutor
+
+    class _SerialExecutorPlugin:
+        @hookimpl
+        def get_executor(self, progressbar_class):
+            return SerialExecutor(pbar_class=progressbar_class)
+
+    return _SerialExecutorPlugin()
 
 
 def _render_bitonal_page(
@@ -364,6 +462,8 @@ def ocr_pdf(
     language: str = "eng",
     optimize: int = 1,
     tess_model: str = "best",
+    engine: str = "tesseract",
+    paddle_use_gpu: bool = False,
 ) -> Path:
     """Downsample and OCR an image-only PDF.
 
@@ -380,6 +480,10 @@ def ocr_pdf(
         language: Tesseract language code.
         tess_model: Tesseract model tier ("fast", "main", "best", or
             "system"). Defaults to "best". Downloaded on demand.
+        engine: OCR engine, "tesseract" (default) or "paddle". "paddle"
+            requires the ocrmypdf-paddleocr plugin to be installed and
+            runs single-process (jobs=1).
+        paddle_use_gpu: Run PaddleOCR on the GPU (engine="paddle" only).
 
     Returns:
         Path to the OCR'd PDF.
@@ -420,13 +524,36 @@ def ocr_pdf(
     import subprocess
     import sys
 
-    # Resolve the Tesseract model tier (downloads on first use).
-    tessdata_dir = ensure_tessdata(tess_model, language)
+    # Resolve OCR engine settings; Tesseract model tier downloads on first use.
+    engine_kwargs = _ocr_engine_kwargs(engine, paddle_use_gpu)
+    tessdata_dir = ensure_tessdata(tess_model, language) if engine == "tesseract" else None
     _ocr_env = {**os.environ, "TESSDATA_PREFIX": str(tessdata_dir)} if tessdata_dir else None
 
     n_workers = max(1, multiprocessing.cpu_count() // 2)
 
-    if n_pages >= 20 and n_workers > 1:
+    if engine == "paddle":
+        # ── PaddleOCR via the native ocrmypdf engine: serial, in the calling
+        # thread. One GPU, one cached model; a Paddle CUDA context on an
+        # ocrmypdf worker thread hangs (see _serial_executor_plugin). ──
+        print(f"  OCR step 2: Adding text layer (paddleocr) — {n_pages} pages...", flush=True)
+        _silence_ocr_loggers()
+        import ocrmypdf as _paddle_ocrmypdf
+        from ocrmypdf._plugin_manager import get_plugin_manager
+
+        pm = get_plugin_manager(engine_kwargs.pop("plugins", []))
+        pm._pm.register(_serial_executor_plugin())
+        engine_kwargs["plugin_manager"] = pm
+        _paddle_ocrmypdf.ocr(
+            str(tmp_path),
+            str(output_path),
+            pdf_renderer="hocr",
+            optimize=optimize,
+            output_type="pdf",
+            language=[language],
+            progress_bar=False,
+            **engine_kwargs,
+        )
+    elif n_pages >= 20 and n_workers > 1:
         # ── Parallel OCR: split into chunks, OCR each, merge ──
         print(
             f"  OCR step 2: Adding text layer — {n_pages} pages ({n_workers} workers)...",
