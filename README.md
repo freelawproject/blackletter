@@ -11,11 +11,26 @@ Proprietary annotations removed from judicial opinions include headnotes, captio
 pip install blackletter
 ```
 
+The base install covers opinion pairing, redaction, margin and page-number
+helpers, and OCR — everything that runs without a detection/OCR model. The
+heavy inference frameworks live in optional extras, so a consumer that offloads
+detection (e.g. to a remote GPU worker) can keep a lean install:
+
+| Install | Adds | Use for |
+|---|---|---|
+| `blackletter` | base pipeline: pairing, redaction, margins, validation, OCR | pairing/redaction when detection is offloaded |
+| `blackletter[detect]` | local YOLO detection (ultralytics + torch, doctr) | running `detect()` and the `process` / `draw` CLI locally |
+| `blackletter[analyze]` | PaddleOCR analyze pipeline (paddlepaddle, paddleocr) | `analyze_pdf()` / page-number validation |
+| `blackletter[detect,analyze]` | both of the above | the full local pipeline |
+
+The `process` and `draw` commands in the Quick Start below run YOLO detection,
+so they need `blackletter[detect]` (or `blackletter[detect,analyze]`).
+
 Or install from source:
 ```bash
 git clone https://github.com/freelawproject/blackletter
 cd blackletter
-pip install -e .
+pip install -e '.[detect,analyze]'
 ```
 
 ## Quick Start

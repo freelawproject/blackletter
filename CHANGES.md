@@ -4,6 +4,7 @@
 
 The following changes are not yet released, but are code complete:
 
+- **Breaking (packaging):** split the heavy inference stack out of the base dependencies into optional extras. `ultralytics` + `python-doctr[torch]` now install via `blackletter[detect]`, and `paddlepaddle` + `paddleocr` remain in `blackletter[analyze]`. The base install (`pip install blackletter`) keeps only pairing, redaction, margins, validation, and OCR, and switches to `opencv-python-headless`. Consumers that run detection locally must install `blackletter[detect,analyze]`; those that offload detection can stay lean. No API changes — all heavy imports were already lazy or CLI-only
 - Flag every copy of a repeated page number as `duplicate` in `page_map`, not just the 2nd and later copies, so per-page duplicate markers match the `duplicate_page` issue's page list. Missing-page placeholders still anchor on the first copy (#55)
 
 ## Current
