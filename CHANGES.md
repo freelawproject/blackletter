@@ -4,17 +4,19 @@
 
 The following changes are not yet released, but are code complete:
 
+## Current
+
+0.1.0 (2026-07-10)
+
 - **Breaking (packaging):** split the heavy inference stack out of the base dependencies into optional extras. `ultralytics` + `python-doctr[torch]` + `huggingface_hub` now install via `blackletter[detect]`; `blackletter[analyze]` adds PaddleOCR on top of `detect` (the analyze pipeline runs YOLO too). The base install (`pip install blackletter`) keeps only pairing, redaction, margins, validation, and OCR. Base stays on `opencv-python` (not `-headless`): the `detect`/`analyze` extras pull `opencv-python` transitively via ultralytics and python-doctr, and both cv2 distributions own the same top-level `cv2` package, so a headless base would double-install a conflicting cv2 whenever an extra is present (#61). Consumers that run detection locally must install `blackletter[detect]` (or `[analyze]`); those that offload detection can stay lean and call redaction helpers with `skip_doctr=True`. To keep every advertised install path importable: the CLI's top-level `ultralytics` import moved into `cmd_draw`, and `compute_rects` / `pair_and_compute_rects` now propagate `skip_doctr` so lean-base callers can compute rects from remote detections without `doctr`
 - Flag every copy of a repeated page number as `duplicate` in `page_map`, not just the 2nd and later copies, so per-page duplicate markers match the `duplicate_page` issue's page list. Missing-page placeholders still anchor on the first copy (#55)
 - Add an optional `progress_callback` to `api.ocr()` that reports `(pages_done, total_pages)` as Tesseract completes pages, so consumers can surface OCR progress without copying the whole function. Default behavior (no callback, no progress bar) is unchanged (#60)
 
-## Current
+## Past
 
 0.0.13 (2026-06-18)
 
 - Fix `validate()` flagging real numbered pages as duplicates when a PDF starts with unnumbered front matter: pages with no detected number fell back to a `logical = pdf_page` placeholder that collided with the real page numbers. Only genuinely detected single page numbers now participate in `page_map` duplicate detection (#53)
-
-## Past
 
 0.0.12 (2026-05-29)
 
