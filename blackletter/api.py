@@ -55,7 +55,7 @@ def ensure_weights(models: list[str] | None = None) -> dict[str, Path]:
     :rtype: dict[str, Path]
     :raises RuntimeError: If ``huggingface_hub`` is not installed but
         a download is required. Install with
-        ``pip install blackletter[analyze]``.
+        ``pip install blackletter[detect]``.
     :raises FileNotFoundError: If a requested weight is missing from
         the installation and has no Hugging Face source.
     """
@@ -81,7 +81,7 @@ def ensure_weights(models: list[str] | None = None) -> dict[str, Path]:
         except ImportError as exc:
             raise RuntimeError(
                 f"huggingface_hub is required to download {name}.pt. "
-                "Install with `pip install blackletter[analyze]`."
+                "Install with `pip install blackletter[detect]`."
             ) from exc
 
         repo_id, filename = source
@@ -464,7 +464,8 @@ def compute_rects(
     :param output_dir: Directory containing detections.json.
     :param excluded: Set of page indices to exclude from pairing.
     :param approved: Set of page indices pre-approved for redaction.
-    :param skip_doctr: Unused, kept for backwards compatibility.
+    :param skip_doctr: Skip the docTR headnote-refinement pass. Set True on a
+        lean base install (no ``detect`` extra) to avoid importing ``doctr``.
     :returns: List of redaction rect dicts.
     """
     from blackletter.tasks import pair_and_compute_rects as _pair_compute
@@ -483,6 +484,7 @@ def compute_rects(
         str(output_dir),
         excluded=excluded,
         approved=approved,
+        skip_doctr=skip_doctr,
     )
     print(f"  Computed {result['rects_count']} rects ({time.time() - t0:.0f}s)", flush=True)
 

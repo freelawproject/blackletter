@@ -7,8 +7,6 @@ import logging
 import sys
 from pathlib import Path
 
-from ultralytics import YOLO
-
 from blackletter.api import ensure_weights
 from blackletter.models import Label
 from blackletter.scanner import (
@@ -159,6 +157,8 @@ def cmd_validate(args: argparse.Namespace) -> None:
 
 def cmd_draw(args: argparse.Namespace) -> None:
     """Scan and draw bounding boxes on the full PDF."""
+    from ultralytics import YOLO
+
     model = YOLO(str(args.model))
 
     print(f"Scanning {args.pdf}...")

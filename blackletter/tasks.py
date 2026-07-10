@@ -348,11 +348,16 @@ def pair_and_compute_rects(
     volume: str = "",
     excluded: set | None = None,
     approved: set | None = None,
+    skip_doctr: bool = False,
 ) -> dict:
     """Pair opinions and compute redaction/margin rects.
 
     Reads detections.json + pages_meta.json from output_dir,
     runs pairing, computes rects with docTR, saves results.
+
+    Set ``skip_doctr=True`` to skip the docTR headnote-refinement pass,
+    which avoids importing ``doctr`` (only available via the ``detect``
+    extra) — required when computing rects on a lean base install.
 
     Returns:
         Dict with opinions_count, rects_count.
@@ -429,7 +434,9 @@ def pair_and_compute_rects(
         json.dump(opinions_data, f)
 
     # Compute redaction rects
-    rects = compute_redaction_rects(document, opinions, excluded=excluded, approved=approved)
+    rects = compute_redaction_rects(
+        document, opinions, excluded=excluded, approved=approved, skip_doctr=skip_doctr
+    )
     with open(output_dir / "redaction_rects.json", "w") as f:
         json.dump(rects, f)
 

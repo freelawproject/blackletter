@@ -18,13 +18,14 @@ detection (e.g. to a remote GPU worker) can keep a lean install:
 
 | Install | Adds | Use for |
 |---|---|---|
-| `blackletter` | base pipeline: pairing, redaction, margins, validation, OCR | pairing/redaction when detection is offloaded |
-| `blackletter[detect]` | local YOLO detection (ultralytics + torch, doctr) | running `detect()` and the `process` / `draw` CLI locally |
-| `blackletter[analyze]` | PaddleOCR analyze pipeline (paddlepaddle, paddleocr) | `analyze_pdf()` / page-number validation |
-| `blackletter[detect,analyze]` | both of the above | the full local pipeline |
+| `blackletter` | base pipeline: pairing, redaction, margins, validation, OCR | pairing/redaction when detection is offloaded (pass `skip_doctr=True`) |
+| `blackletter[detect]` | local YOLO detection (ultralytics + torch, doctr, huggingface_hub) | running `detect()` and the `process` / `draw` CLI locally |
+| `blackletter[analyze]` | the analyze pipeline: PaddleOCR (paddlepaddle, paddleocr) **plus** `detect` | `analyze_pdf()` / page-number validation |
+| `blackletter[detect,analyze]` | same as `[analyze]` | the full local pipeline |
 
-The `process` and `draw` commands in the Quick Start below run YOLO detection,
-so they need `blackletter[detect]` (or `blackletter[detect,analyze]`).
+Notes:
+- `[analyze]` includes `[detect]` — the analyze pipeline runs YOLO in addition to PaddleOCR.
+- On the base install, docTR headnote refinement is unavailable, so redaction helpers must be called with `skip_doctr=True`; the `process` and `draw` CLI commands run YOLO and require `[detect]`.
 
 Or install from source:
 ```bash
