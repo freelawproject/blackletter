@@ -183,9 +183,9 @@ def ocr(
         from ocrmypdf._plugin_manager import get_plugin_manager
 
         class _CallbackProgressBar:
-            def __init__(self, *, total=None, unit=None, **kwargs):
+            def __init__(self, *, total=None, desc=None, unit=None, **kwargs):
                 self._total = total or total_pages
-                self._unit = unit
+                self._desc = desc
                 self._current = 0
 
             def __enter__(self):
@@ -195,15 +195,18 @@ def ocr(
                 return False
 
             def update(self, n=1, *, completed=None):
-                # ocrmypdf drives several progress bars; only the
-                # page-unit ones track pages (the OCR pass, then the
-                # optimize pass — each a fresh bar instance, so the count
-                # restarts at zero per phase).
-                if self._unit != "page":
+                # ocrmypdf builds a fresh progress bar per phase. Several
+                # use unit="page" (the pdfinfo "Scanning contents" scan
+                # that runs *before* OCR, and the OCR pass itself), so
+                # matching on unit alone would report the pre-OCR scan
+                # filling to 100% and then reset to 0% for OCR. Track only
+                # the "OCR" bar to keep the reported count monotonic.
+                if self._desc != "OCR":
                     return
-                self._current += n
-                # The optimize pass reports fractional steps; report a
+                # The OCR pass calls update(0.5) twice per page
+                # (ocrmypdf/_pipelines/ocr.py), so accumulate and report a
                 # clean integer page count clamped to the total.
+                self._current += n
                 done = min(int(self._current), self._total)
                 progress_callback(done, self._total)
 
