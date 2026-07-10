@@ -201,6 +201,7 @@ After redaction, Blackletter automatically white-outs scan artifacts in page mar
 
 - Python 3.12+
 - Tesseract OCR (for image-only PDFs)
+- libgl1 (Linux only): the base install uses non-headless `opencv-python`, which loads `libGL.so.1` when `cv2` is imported. Minimal images (e.g. `python:3.12-slim`, distroless) don't ship it by default.
 
 Install tesseract:
 ```bash
@@ -209,6 +210,12 @@ brew install tesseract
 
 # Ubuntu/Debian
 sudo apt install tesseract-ocr
+```
+
+Install libgl1 (Linux):
+```bash
+# Ubuntu/Debian
+sudo apt install libgl1
 ```
 
 ## License
