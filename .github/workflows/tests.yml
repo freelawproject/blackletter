@@ -28,7 +28,9 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv pip install --system -e ".[dev]"
+        # detect: tests exercise YOLO detection (ultralytics + torch). analyze
+        # (paddle) is not needed by the suite, so keep it out to keep CI light.
+        run: uv pip install --system -e ".[dev,detect]"
 
       - name: Run tests
         run: pytest

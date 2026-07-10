@@ -20,13 +20,17 @@ classifiers = [
     "Topic :: Text Processing :: General",
 ]
 
+# Base deps cover pairing, redaction (with skip_doctr=True), margins,
+# validation, OCR and PDF handling — everything that runs without a GPU model.
+# Heavy detection/OCR frameworks live in the `detect` / `analyze` extras so a
+# consumer that offloads inference (e.g. to RunPod) can install a lean tree.
+# cv2 is the only heavy top-level import in the base modules (scanner.py); the
+# headless build drops the GUI/GL libs and lets consumers skip libgl1.
 dependencies = [
-    "ultralytics>=8.0.0",
-    "opencv-python>=4.8.0",
+    "opencv-python-headless>=4.8.0",
     "pymupdf>=1.23.0",
     "pillow>=12.0.0",
     "ocrmypdf>=16.0.0",
-    "python-doctr[torch]>=1.0.1",
 ]
 
 [project.optional-dependencies]
@@ -35,11 +39,21 @@ dev = [
     "pytest-cov>=4.0",
     "ruff>=0.1.0",
 ]
+# Local YOLO detection (torch-backed). Also required by the CLI `process`/`draw`
+# commands and by refine.py's doctr headnote model. huggingface_hub downloads
+# the on-demand `large.pt` weight. Not needed when detection is offloaded.
+detect = [
+    "ultralytics>=8.0.0",
+    "python-doctr[torch]>=1.0.1",
+    "huggingface_hub>=0.20.0",
+]
+# The analyze pipeline (analyze_pdf / page-number validation) runs YOLO in
+# addition to PaddleOCR, so it builds on `detect`.
 analyze = [
+    "blackletter[detect]",
     "paddlepaddle>=3.0.0",
     "paddleocr>=3.0.0",
     "pypdfium2>=4.0.0",
-    "huggingface_hub>=0.20.0",
 ]
 
 [project.urls]
