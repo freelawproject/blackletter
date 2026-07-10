@@ -142,6 +142,7 @@ def ocr(
     volume: str = "",
     first_page: int = 1,
     language: str = "eng",
+    progress_callback: Callable[[int, int], None] | None = None,
 ) -> Path:
     """OCR a PDF (add text layer via ocrmypdf/Tesseract).
 
@@ -151,6 +152,9 @@ def ocr(
     :param volume: Volume number for the output filename.
     :param first_page: First page number (used to build the output filename).
     :param language: Tesseract language code.
+    :param progress_callback: Optional callable invoked with
+        ``(pages_done, total_pages)`` as Tesseract completes pages. When
+        omitted the OCR runs with no progress bar (the default).
     :returns: Path to the OCR'd PDF.
     """
     from blackletter.ocr import _silence_ocr_loggers
@@ -170,6 +174,50 @@ def ocr(
 
     import ocrmypdf
 
+    # ocrmypdf only exposes per-page progress through its progress-bar
+    # plugin hook, so a callback requires enabling the bar and routing
+    # its updates to the caller.
+    plugin_manager = None
+    if progress_callback is not None:
+        from ocrmypdf import hookimpl
+        from ocrmypdf._plugin_manager import get_plugin_manager
+
+        class _CallbackProgressBar:
+            def __init__(self, *, total=None, desc=None, unit=None, **kwargs):
+                self._total = total or total_pages
+                self._desc = desc
+                self._current = 0
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def update(self, n=1, *, completed=None):
+                # ocrmypdf builds a fresh progress bar per phase. Several
+                # use unit="page" (the pdfinfo "Scanning contents" scan
+                # that runs *before* OCR, and the OCR pass itself), so
+                # matching on unit alone would report the pre-OCR scan
+                # filling to 100% and then reset to 0% for OCR. Track only
+                # the "OCR" bar to keep the reported count monotonic.
+                if self._desc != "OCR":
+                    return
+                # The OCR pass calls update(0.5) twice per page
+                # (ocrmypdf/_pipelines/ocr.py), so accumulate and report a
+                # clean integer page count clamped to the total.
+                self._current += n
+                done = min(int(self._current), self._total)
+                progress_callback(done, self._total)
+
+        class _CallbackProgressPlugin:
+            @hookimpl
+            def get_progressbar_class(self):
+                return _CallbackProgressBar
+
+        plugin_manager = get_plugin_manager()
+        plugin_manager._pm.register(_CallbackProgressPlugin())
+
     print(f"  OCR {total_pages} pages...", flush=True)
     t0 = time.time()
     ocrmypdf.ocr(
@@ -180,7 +228,8 @@ def ocr(
         output_type="pdf",
         language=[language],
         tesseract_timeout=120,
-        progress_bar=False,
+        progress_bar=progress_callback is not None,
+        plugin_manager=plugin_manager,
     )
     print(f"  OCR done ({time.time() - t0:.0f}s)", flush=True)
     return output_path
