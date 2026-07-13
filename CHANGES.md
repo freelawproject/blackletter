@@ -4,6 +4,8 @@
 
 The following changes are not yet released, but are code complete:
 
+- **Breaking (packaging):** move `python-doctr[torch]` out of the `detect` extra into a new `refine` extra, so `blackletter[detect]` / `blackletter[analyze]` no longer install docTR (~200 MB of dependencies). docTR is only used by the line-level headnote-refinement pass in `refine.py`; consumers that call redaction with `skip_doctr=True` (e.g. the scanning web/daemon image) never invoke it. Installs that run refinement — including the `process` CLI command — must now add `[refine]` (e.g. `blackletter[analyze,refine]`). With docTR missing, the refinement pass raises a clear `ImportError` pointing at `pip install blackletter[refine]` / `skip_doctr=True` (#64)
+
 ## Current
 
 0.1.0 (2026-07-10)
