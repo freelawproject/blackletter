@@ -513,8 +513,8 @@ def compute_rects(
     :param output_dir: Directory containing detections.json.
     :param excluded: Set of page indices to exclude from pairing.
     :param approved: Set of page indices pre-approved for redaction.
-    :param skip_doctr: Skip the docTR headnote-refinement pass. Set True on a
-        lean base install (no ``detect`` extra) to avoid importing ``doctr``.
+    :param skip_doctr: Skip the docTR headnote-refinement pass. Set True on an
+        install without the ``refine`` extra to avoid importing ``doctr``.
     :returns: List of redaction rect dicts.
     """
     from blackletter.tasks import pair_and_compute_rects as _pair_compute

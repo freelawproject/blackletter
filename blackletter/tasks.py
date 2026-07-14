@@ -356,8 +356,8 @@ def pair_and_compute_rects(
     runs pairing, computes rects with docTR, saves results.
 
     Set ``skip_doctr=True`` to skip the docTR headnote-refinement pass,
-    which avoids importing ``doctr`` (only available via the ``detect``
-    extra) — required when computing rects on a lean base install.
+    which avoids importing ``doctr`` (only available via the ``refine``
+    extra) — required when computing rects without that extra installed.
 
     Returns:
         Dict with opinions_count, rects_count.

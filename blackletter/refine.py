@@ -16,7 +16,15 @@ _SCALE = DPI / 72  # PDF points → pixels
 def _get_doctr_model():
     """Lazy-load docTR detection model (singleton)."""
     if not hasattr(_get_doctr_model, "_model"):
-        from doctr.models import detection_predictor
+        try:
+            from doctr.models import detection_predictor
+        except ImportError as e:
+            raise ImportError(
+                "python-doctr is required for line-level headnote refinement "
+                "but is not installed. Install it with "
+                "`pip install blackletter[refine]`, or pass skip_doctr=True "
+                "to skip the refinement pass."
+            ) from e
 
         _get_doctr_model._model = detection_predictor(arch="db_resnet50", pretrained=True)
     return _get_doctr_model._model
