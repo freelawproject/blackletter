@@ -103,7 +103,7 @@ Options:
   -o, --output PATH         Base output directory (required)
   --model PATH              Path to custom YOLO model weights
   --medium                  Use the medium model (17 classes)
-  --large                   Use the large model (21 classes, auto-downloaded)
+  --large                   Use the large model (21 classes)
   --footnotes               Extract footnotes into separate PDFs
   --unredacted              Also generate unredacted opinion PDFs
   --llm                     Also generate per-page LLM PDFs with <--CASEEND--> stamps

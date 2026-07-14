@@ -938,7 +938,12 @@ def cmd_process(args: argparse.Namespace) -> None:
 
     _t_total = _time.time()
 
-    model = YOLO(str(args.model))
+    model_path = Path(args.model)
+    if not model_path.is_file():
+        from blackletter.api import ensure_weights
+
+        model_path = ensure_weights([model_path.stem])[model_path.stem]
+    model = YOLO(str(model_path))
 
     base_dir = _build_output_dir(args)
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -1310,6 +1315,11 @@ def reprocess_section(
                 print(f"  Applied {applied} redaction(s) to section extract")
 
     # Scan section (no OCR needed — already has text layer)
+    model = Path(model)
+    if not model.is_file():
+        from blackletter.api import ensure_weights
+
+        model = ensure_weights([model.stem])[model.stem]
     yolo_model = YOLO(str(model))
     cb = progress_callback
     document = scan(
