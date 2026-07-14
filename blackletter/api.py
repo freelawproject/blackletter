@@ -31,9 +31,9 @@ import fitz
 # the package (to keep it small); all are downloaded on demand to
 # ``blackletter/weights/``.
 _HF_WEIGHTS: dict[str, tuple[str, str]] = {
-    "small": ("flooie/blackletter-weights", "small.pt"),
-    "medium": ("flooie/blackletter-weights", "medium.pt"),
-    "large": ("flooie/blackletter-weights", "large.pt"),
+    "small": ("freelawproject/blackletter-weights", "small.pt"),
+    "medium": ("freelawproject/blackletter-weights", "medium.pt"),
+    "large": ("freelawproject/blackletter-weights", "large.pt"),
 }
 
 

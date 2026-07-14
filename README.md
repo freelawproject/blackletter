@@ -84,7 +84,7 @@ Blackletter uses three YOLO models, selected via CLI flags:
 | `--medium` | `medium.pt` | 17 | Better structural detection |
 | `--large` | `large.pt` | 21 | Highest accuracy, detects additional elements (editorial, judges, docket, court, citation, date) |
 
-The models are hosted at [flooie/blackletter-weights](https://huggingface.co/flooie/blackletter-weights) and are downloaded automatically to `blackletter/weights/` on first use, keeping the package itself small.
+The models are hosted at [freelawproject/blackletter-weights](https://huggingface.co/freelawproject/blackletter-weights) and are downloaded automatically to `blackletter/weights/` on first use, keeping the package itself small.
 
 ## Command Line Options
 

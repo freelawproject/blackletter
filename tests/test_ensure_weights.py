@@ -15,7 +15,7 @@ import pytest
 from blackletter import api
 
 
-HF_REPO = "flooie/blackletter-weights"
+HF_REPO = "freelawproject/blackletter-weights"
 
 
 def _fake_package(tmp_path, monkeypatch) -> Path:
