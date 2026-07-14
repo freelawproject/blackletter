@@ -22,8 +22,9 @@ classifiers = [
 
 # Base deps cover pairing, redaction (with skip_doctr=True), margins,
 # validation, OCR and PDF handling — everything that runs without a GPU model.
-# Heavy detection/OCR frameworks live in the `detect` / `analyze` extras so a
-# consumer that offloads inference (e.g. to RunPod) can install a lean tree.
+# Heavy detection/OCR frameworks live in the `detect` / `analyze` / `refine`
+# extras so a consumer that offloads inference (e.g. to RunPod) can install a
+# lean tree.
 # cv2 is the only heavy top-level import in the base modules (scanner.py). Base
 # uses the non-headless `opencv-python` on purpose: the `detect`/`analyze`/
 # `refine` extras pull `opencv-python` transitively (via ultralytics and
