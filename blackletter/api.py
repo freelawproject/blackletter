@@ -27,23 +27,23 @@ from pathlib import Path
 import fitz
 
 
-# Hugging Face sources for weights not bundled in the package.
-# ``small`` and ``medium`` ship inside ``blackletter/weights/`` via
-# ``package-data`` in ``pyproject.toml``; ``large`` is too big for
-# PyPI and is downloaded on demand.
+# Hugging Face sources for the YOLO weights. No weights are bundled in
+# the package (to keep it small); all are downloaded on demand to
+# ``blackletter/weights/``.
 _HF_WEIGHTS: dict[str, tuple[str, str]] = {
-    "large": ("flooie/blackletter-large", "large.pt"),
+    "small": ("flooie/blackletter-weights", "small.pt"),
+    "medium": ("flooie/blackletter-weights", "medium.pt"),
+    "large": ("flooie/blackletter-weights", "large.pt"),
 }
 
 
 def ensure_weights(models: list[str] | None = None) -> dict[str, Path]:
     """Ensure named YOLO weights exist under ``blackletter/weights/``.
 
-    For bundled weights (``small``, ``medium``), this simply resolves
-    the path. For weights sourced from Hugging Face (currently only
-    ``large``), downloads them to the package weights directory if
-    they are not already present. Safe to call repeatedly; a noop when
-    every requested weight is already on disk.
+    Weights already on disk simply resolve to their path; missing ones
+    are downloaded from Hugging Face into the package weights
+    directory. Safe to call repeatedly; a noop when every requested
+    weight is already on disk.
 
     Call this before :func:`detect` if you want to guarantee that a
     weight is available rather than relying on :func:`detect`'s

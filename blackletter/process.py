@@ -1253,7 +1253,7 @@ def reprocess_section(
         first_page: Logical page number of the first page in the full PDF.
         reporter: Reporter abbreviation for filenames.
         volume: Volume number for filenames.
-        model: Path to YOLO model. Defaults to bundled model.
+        model: Path to YOLO model. Defaults to the small model.
         excluded: Detection exclusions for _pair_opinions().
         injected: Manual detections to inject before pairing. Each dict has
             page_index (absolute), label_id, bbox [x1,y1,x2,y2], img_width,
@@ -1733,7 +1733,7 @@ def process(
         reporter: Reporter abbreviation (e.g. "f3d", "a3d").
         volume: Volume number.
         first_page: Page number of the first page in the PDF.
-        model: Path to YOLO model weights. Defaults to bundled model.
+        model: Path to YOLO model weights. Defaults to the small model.
         large: Use the large model (analyze.pt) with more detection classes.
         footnotes: Extract footnotes into separate PDFs.
         unredacted: Also generate unredacted opinion PDFs.

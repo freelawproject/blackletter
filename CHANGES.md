@@ -4,6 +4,8 @@
 
 The following changes are not yet released, but are code complete:
 
+- **Breaking (packaging):** stop bundling `small.pt` and `medium.pt` in the package (~72 MB smaller wheel). All three YOLO weights are now downloaded on demand from [flooie/blackletter-weights](https://huggingface.co/flooie/blackletter-weights) via `ensure_weights`, the same way `large.pt` already was; `large.pt` moves from `flooie/blackletter-large` to the same consolidated repo. Downloading requires `huggingface_hub` (installed with `blackletter[detect]`) (#59)
+
 ## Current
 
 0.1.0 (2026-07-10)
