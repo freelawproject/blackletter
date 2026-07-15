@@ -27,23 +27,29 @@ from pathlib import Path
 import fitz
 
 
-# Hugging Face sources for weights not bundled in the package.
-# ``small`` and ``medium`` ship inside ``blackletter/weights/`` via
-# ``package-data`` in ``pyproject.toml``; ``large`` is too big for
-# PyPI and is downloaded on demand.
+# Hugging Face sources for the YOLO weights. No weights are bundled in
+# the package (to keep it small); all are downloaded on demand to
+# ``blackletter/weights/``.
 _HF_WEIGHTS: dict[str, tuple[str, str]] = {
-    "large": ("flooie/blackletter-large", "large.pt"),
+    "small": ("freelawproject/blackletter-weights", "small.pt"),
+    "medium": ("freelawproject/blackletter-weights", "medium.pt"),
+    "large": ("freelawproject/blackletter-weights", "large.pt"),
 }
+
+# Commit sha the weights are downloaded at. Pinning (instead of tracking
+# ``main``) protects against a compromised repo serving different
+# binaries: torch weight files are pickles and can execute code on load.
+# Bump this sha deliberately whenever new weights are uploaded.
+_HF_REVISION = "3808b7ef889420cf145e26483106d04ca4de811d"
 
 
 def ensure_weights(models: list[str] | None = None) -> dict[str, Path]:
     """Ensure named YOLO weights exist under ``blackletter/weights/``.
 
-    For bundled weights (``small``, ``medium``), this simply resolves
-    the path. For weights sourced from Hugging Face (currently only
-    ``large``), downloads them to the package weights directory if
-    they are not already present. Safe to call repeatedly; a noop when
-    every requested weight is already on disk.
+    Weights already on disk simply resolve to their path; missing ones
+    are downloaded from Hugging Face into the package weights
+    directory. Safe to call repeatedly; a noop when every requested
+    weight is already on disk.
 
     Call this before :func:`detect` if you want to guarantee that a
     weight is available rather than relying on :func:`detect`'s
@@ -89,6 +95,7 @@ def ensure_weights(models: list[str] | None = None) -> dict[str, Path]:
         downloaded = hf_hub_download(
             repo_id=repo_id,
             filename=filename,
+            revision=_HF_REVISION,
             local_dir=str(weights_dir),
         )
         resolved[name] = Path(downloaded)

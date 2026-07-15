@@ -938,7 +938,12 @@ def cmd_process(args: argparse.Namespace) -> None:
 
     _t_total = _time.time()
 
-    model = YOLO(str(args.model))
+    model_path = Path(args.model)
+    if not model_path.is_file():
+        from blackletter.api import ensure_weights
+
+        model_path = ensure_weights([model_path.stem])[model_path.stem]
+    model = YOLO(str(model_path))
 
     base_dir = _build_output_dir(args)
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -1253,7 +1258,7 @@ def reprocess_section(
         first_page: Logical page number of the first page in the full PDF.
         reporter: Reporter abbreviation for filenames.
         volume: Volume number for filenames.
-        model: Path to YOLO model. Defaults to bundled model.
+        model: Path to YOLO model. Defaults to the small model.
         excluded: Detection exclusions for _pair_opinions().
         injected: Manual detections to inject before pairing. Each dict has
             page_index (absolute), label_id, bbox [x1,y1,x2,y2], img_width,
@@ -1310,6 +1315,11 @@ def reprocess_section(
                 print(f"  Applied {applied} redaction(s) to section extract")
 
     # Scan section (no OCR needed — already has text layer)
+    model = Path(model)
+    if not model.is_file():
+        from blackletter.api import ensure_weights
+
+        model = ensure_weights([model.stem])[model.stem]
     yolo_model = YOLO(str(model))
     cb = progress_callback
     document = scan(
@@ -1733,7 +1743,7 @@ def process(
         reporter: Reporter abbreviation (e.g. "f3d", "a3d").
         volume: Volume number.
         first_page: Page number of the first page in the PDF.
-        model: Path to YOLO model weights. Defaults to bundled model.
+        model: Path to YOLO model weights. Defaults to the small model.
         large: Use the large model (analyze.pt) with more detection classes.
         footnotes: Extract footnotes into separate PDFs.
         unredacted: Also generate unredacted opinion PDFs.

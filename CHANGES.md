@@ -4,6 +4,7 @@
 
 The following changes are not yet released, but are code complete:
 
+- **Breaking (packaging):** stop bundling `small.pt` and `medium.pt` in the package (~72 MB smaller wheel). All three YOLO weights are now downloaded on demand from [freelawproject/blackletter-weights](https://huggingface.co/freelawproject/blackletter-weights) via `ensure_weights`, the same way `large.pt` already was; `large.pt` moves from `flooie/blackletter-large` to the same consolidated repo. Downloads are pinned to a specific commit of the weights repo so a compromised repo can't serve different binaries. Downloading requires `huggingface_hub` (installed with `blackletter[detect]`) (#59)
 - **Breaking (packaging):** move `python-doctr[torch]` out of the `detect` extra into a new `refine` extra, so `blackletter[detect]` / `blackletter[analyze]` no longer install docTR (~200 MB of dependencies). docTR is only used by the line-level headnote-refinement pass in `refine.py`; consumers that call redaction with `skip_doctr=True` (e.g. the scanning web/daemon image) never invoke it. Installs that run refinement — including the `process` CLI command — must now add `[refine]` (e.g. `blackletter[analyze,refine]`). With docTR missing, the refinement pass raises a clear `ImportError` pointing at `pip install blackletter[refine]` / `skip_doctr=True` (#64)
 
 ## Current

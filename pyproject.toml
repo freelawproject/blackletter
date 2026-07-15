@@ -46,8 +46,8 @@ dev = [
     "ruff>=0.1.0",
 ]
 # Local YOLO detection (torch-backed). Also required by the CLI `process`/`draw`
-# commands. huggingface_hub downloads the on-demand `large.pt` weight. Not
-# needed when detection is offloaded.
+# commands. huggingface_hub downloads the on-demand model weights. Not needed
+# when detection is offloaded.
 detect = [
     "ultralytics>=8.0.0",
     "huggingface_hub>=0.20.0",
@@ -80,7 +80,9 @@ blackletter = "blackletter.cli:main"
 where = ["."]
 include = ["blackletter*"]
 
-[tool.setuptools.package-data]
+# Weights are downloaded from Hugging Face at runtime; never ship them,
+# even if a developer has local copies under blackletter/weights/.
+[tool.setuptools.exclude-package-data]
 blackletter = ["weights/*.pt"]
 
 [tool.ruff]

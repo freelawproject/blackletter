@@ -23,7 +23,7 @@ LARGE_MODEL = Path(__file__).resolve().parent / "weights" / "large.pt"
 
 
 def _ensure_model(path: Path) -> None:
-    """Ensure the model at ``path`` is present; download bundled weights if missing."""
+    """Ensure the model at ``path`` is present; download the weights if missing."""
     if path.is_file():
         return
     try:
@@ -211,7 +211,7 @@ def main() -> None:
         "--model",
         type=Path,
         default=None,
-        help="Path to YOLO model for page number detection (default: bundled analyze.pt)",
+        help="Path to YOLO model for page number detection (default: large.pt)",
     )
     p_validate.add_argument(
         "--first-page",

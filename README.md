@@ -78,15 +78,15 @@ Additionally produces:
 
 ## Models
 
-Blackletter bundles three YOLO models, selected via CLI flags:
+Blackletter uses three YOLO models, selected via CLI flags:
 
 | Flag | File | Classes | Description |
 |------|------|---------|-------------|
-| *(default)* | `small.pt` | 14 | Bundled — fast, handles most cases |
-| `--medium` | `medium.pt` | 17 | Bundled — better structural detection |
-| `--large` | `large.pt` | 21 | Downloaded on first use from Hugging Face — highest accuracy, detects additional elements (editorial, judges, docket, court, citation, date) |
+| *(default)* | `small.pt` | 14 | Fast, handles most cases |
+| `--medium` | `medium.pt` | 17 | Better structural detection |
+| `--large` | `large.pt` | 21 | Highest accuracy, detects additional elements (editorial, judges, docket, court, citation, date) |
 
-The large model is hosted at [flooie/blackletter-large](https://huggingface.co/flooie/blackletter-large) and is downloaded automatically to `blackletter/models/large.pt` the first time `--large` is used.
+The models are hosted at [freelawproject/blackletter-weights](https://huggingface.co/freelawproject/blackletter-weights) and are downloaded automatically to `blackletter/weights/` on first use, keeping the package itself small.
 
 ## Command Line Options
 
@@ -105,7 +105,7 @@ Options:
   -o, --output PATH         Base output directory (required)
   --model PATH              Path to custom YOLO model weights
   --medium                  Use the medium model (17 classes)
-  --large                   Use the large model (21 classes, auto-downloaded)
+  --large                   Use the large model (21 classes)
   --footnotes               Extract footnotes into separate PDFs
   --unredacted              Also generate unredacted opinion PDFs
   --llm                     Also generate per-page LLM PDFs with <--CASEEND--> stamps

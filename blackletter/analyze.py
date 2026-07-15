@@ -540,8 +540,8 @@ def analyze_pdf(
     :param max_pages: Maximum number of pages to process.
     :param num_workers: Number of parallel workers (default:
         min(4, cpu_count)).
-    :param model: Path to YOLO model. Defaults to blackletter's bundled
-        large.pt.
+    :param model: Path to YOLO model. Defaults to large.pt (downloaded
+        from Hugging Face if missing).
     :param progress_callback: Optional callable(current, total, message)
         called after each page.
     :returns: Dict with keys ``total_pages``, ``results``,

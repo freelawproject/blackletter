@@ -165,7 +165,7 @@ dmypy.json
 # Project output
 output/
 
-# Large model files (hosted on Hugging Face)
-blackletter/weights/large.pt
+# Model weights (hosted on Hugging Face, downloaded on demand)
+blackletter/weights/*.pt
 
 uv.lock
