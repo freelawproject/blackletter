@@ -36,6 +36,12 @@ _HF_WEIGHTS: dict[str, tuple[str, str]] = {
     "large": ("freelawproject/blackletter-weights", "large.pt"),
 }
 
+# Commit sha the weights are downloaded at. Pinning (instead of tracking
+# ``main``) protects against a compromised repo serving different
+# binaries: torch weight files are pickles and can execute code on load.
+# Bump this sha deliberately whenever new weights are uploaded.
+_HF_REVISION = "3808b7ef889420cf145e26483106d04ca4de811d"
+
 
 def ensure_weights(models: list[str] | None = None) -> dict[str, Path]:
     """Ensure named YOLO weights exist under ``blackletter/weights/``.
@@ -89,6 +95,7 @@ def ensure_weights(models: list[str] | None = None) -> dict[str, Path]:
         downloaded = hf_hub_download(
             repo_id=repo_id,
             filename=filename,
+            revision=_HF_REVISION,
             local_dir=str(weights_dir),
         )
         resolved[name] = Path(downloaded)

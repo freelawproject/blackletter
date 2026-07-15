@@ -62,7 +62,7 @@ class TestMissingWeightsDownload:
         fake_pkg = _fake_package(tmp_path, monkeypatch)
         weights_dir = fake_pkg / "weights"
 
-        def fake_download(*, repo_id, filename, local_dir):
+        def fake_download(*, repo_id, filename, revision, local_dir):
             assert repo_id == HF_REPO
             Path(local_dir).mkdir(parents=True, exist_ok=True)
             target = Path(local_dir) / filename
@@ -77,6 +77,7 @@ class TestMissingWeightsDownload:
         fake_hf.hf_hub_download.assert_called_once_with(
             repo_id=HF_REPO,
             filename=f"{name}.pt",
+            revision=api._HF_REVISION,
             local_dir=str(weights_dir),
         )
         assert resolved[name] == weights_dir / f"{name}.pt"
