@@ -107,3 +107,45 @@ class TestLazyUltralyticsImport:
             """
         )
         assert out == "AttributeError"
+
+
+class TestLazyDoctrImport:
+    """docTR lives in the optional ``refine`` extra; importing blackletter
+    modules must not load it, and its absence must fail with a clear error."""
+
+    def test_import_refine_does_not_load_doctr(self):
+        out = _run(
+            """
+            import sys
+            import blackletter.refine  # noqa: F401
+            print('doctr' in sys.modules)
+            """
+        )
+        assert out == "False"
+
+    def test_import_process_does_not_load_doctr(self):
+        out = _run(
+            """
+            import sys
+            import blackletter.process  # noqa: F401
+            print('doctr' in sys.modules)
+            """
+        )
+        assert out == "False"
+
+    def test_missing_doctr_raises_helpful_import_error(self):
+        """Without the ``refine`` extra, the error must name the fix."""
+        out = _run(
+            """
+            import sys
+            sys.modules['doctr'] = None  # force ImportError even if installed
+            from blackletter.refine import _get_doctr_model
+            try:
+                _get_doctr_model()
+            except ImportError as exc:
+                assert 'blackletter[refine]' in str(exc), str(exc)
+                assert 'skip_doctr' in str(exc), str(exc)
+                print('ImportError')
+            """
+        )
+        assert out == "ImportError"

@@ -19,19 +19,21 @@ detection (e.g. to a remote GPU worker) can keep a lean install:
 | Install | Adds | Use for |
 |---|---|---|
 | `blackletter` | base pipeline: pairing, redaction, margins, validation, OCR | pairing/redaction when detection is offloaded (pass `skip_doctr=True`) |
-| `blackletter[detect]` | local YOLO detection (ultralytics + torch, doctr, huggingface_hub) | running `detect()` and the `process` / `draw` CLI locally |
+| `blackletter[detect]` | local YOLO detection (ultralytics + torch, huggingface_hub) | running `detect()` and the `draw` CLI locally |
+| `blackletter[refine]` | docTR line-level headnote refinement | redaction without `skip_doctr=True`; the `process` CLI |
 | `blackletter[analyze]` | the analyze pipeline: PaddleOCR (paddlepaddle, paddleocr) **plus** `detect` | `analyze_pdf()` / page-number validation |
-| `blackletter[detect,analyze]` | same as `[analyze]` | the full local pipeline |
+| `blackletter[analyze,refine]` | everything above | the full local pipeline |
 
 Notes:
 - `[analyze]` includes `[detect]` — the analyze pipeline runs YOLO in addition to PaddleOCR.
-- On the base install, docTR headnote refinement is unavailable, so redaction helpers must be called with `skip_doctr=True`; the `process` and `draw` CLI commands run YOLO and require `[detect]`.
+- Without `[refine]`, docTR headnote refinement is unavailable, so redaction helpers must be called with `skip_doctr=True`. `[refine]` is kept separate from `[detect]`/`[analyze]` so consumers that skip refinement (e.g. a web/daemon image) save ~200 MB of dependencies.
+- The `process` and `draw` CLI commands run YOLO and require `[detect]`; `process` also runs the refinement pass and requires `[refine]`.
 
 Or install from source:
 ```bash
 git clone https://github.com/freelawproject/blackletter
 cd blackletter
-pip install -e '.[detect,analyze]'
+pip install -e '.[analyze,refine]'
 ```
 
 ## Quick Start

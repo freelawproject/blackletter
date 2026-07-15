@@ -103,18 +103,19 @@ analyze = [
     { name = "paddleocr" },
     { name = "paddlepaddle" },
     { name = "pypdfium2" },
-    { name = "python-doctr" },
     { name = "ultralytics" },
 ]
 detect = [
     { name = "huggingface-hub" },
-    { name = "python-doctr" },
     { name = "ultralytics" },
 ]
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
+]
+refine = [
+    { name = "python-doctr" },
 ]
 
 [package.metadata]
@@ -130,11 +131,11 @@ requires-dist = [
     { name = "pypdfium2", marker = "extra == 'analyze'", specifier = ">=4.0.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.0" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=4.0" },
-    { name = "python-doctr", extras = ["torch"], marker = "extra == 'detect'", specifier = ">=1.0.1" },
+    { name = "python-doctr", extras = ["torch"], marker = "extra == 'refine'", specifier = ">=1.0.1" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.1.0" },
     { name = "ultralytics", marker = "extra == 'detect'", specifier = ">=8.0.0" },
 ]
-provides-extras = ["dev", "detect", "analyze"]
+provides-extras = ["dev", "detect", "refine", "analyze"]
 
 [[package]]
 name = "certifi"

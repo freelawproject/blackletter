@@ -22,12 +22,14 @@ classifiers = [
 
 # Base deps cover pairing, redaction (with skip_doctr=True), margins,
 # validation, OCR and PDF handling — everything that runs without a GPU model.
-# Heavy detection/OCR frameworks live in the `detect` / `analyze` extras so a
-# consumer that offloads inference (e.g. to RunPod) can install a lean tree.
+# Heavy detection/OCR frameworks live in the `detect` / `analyze` / `refine`
+# extras so a consumer that offloads inference (e.g. to RunPod) can install a
+# lean tree.
 # cv2 is the only heavy top-level import in the base modules (scanner.py). Base
-# uses the non-headless `opencv-python` on purpose: the `detect`/`analyze`
-# extras pull `opencv-python` transitively (via ultralytics and python-doctr),
-# and both cv2 distributions own the same top-level `cv2` package, so declaring
+# uses the non-headless `opencv-python` on purpose: the `detect`/`analyze`/
+# `refine` extras pull `opencv-python` transitively (via ultralytics and
+# python-doctr), and both cv2 distributions own the same top-level `cv2`
+# package, so declaring
 # `opencv-python-headless` here would double-install a conflicting cv2 whenever
 # an extra is present. Base callers that never touch cv2 pay only libgl1.
 dependencies = [
@@ -44,12 +46,18 @@ dev = [
     "ruff>=0.1.0",
 ]
 # Local YOLO detection (torch-backed). Also required by the CLI `process`/`draw`
-# commands and by refine.py's doctr headnote model. huggingface_hub downloads
-# the on-demand model weights. Not needed when detection is offloaded.
+# commands. huggingface_hub downloads the on-demand model weights. Not needed
+# when detection is offloaded.
 detect = [
     "ultralytics>=8.0.0",
-    "python-doctr[torch]>=1.0.1",
     "huggingface_hub>=0.20.0",
+]
+# docTR line-level headnote refinement (refine.py). Kept out of `detect` /
+# `analyze` so consumers that call redaction with `skip_doctr=True` (e.g. the
+# web/daemon image) don't pay ~200 MB for a model they never invoke. The CLI
+# `process` command runs the refinement pass and needs this extra.
+refine = [
+    "python-doctr[torch]>=1.0.1",
 ]
 # The analyze pipeline (analyze_pdf / page-number validation) runs YOLO in
 # addition to PaddleOCR, so it builds on `detect`.
