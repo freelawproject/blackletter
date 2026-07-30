@@ -542,7 +542,7 @@ def scan(
     first_page: int = 1,
     output_dir: Path | None = None,
     shrink: bool = False,
-    skip_ocr: bool = False,
+    ocr: bool = False,
     optimize: int = 1,
     output_name: str | None = None,
     device: str | None = None,
@@ -550,9 +550,13 @@ def scan(
 ) -> Document:
     """Scan a PDF and return a Document with all detections.
 
-    If the PDF has no text layer, automatically runs OCR first to add
-    one (required for accurate page number extraction and redaction
-    tightening).
+    No text layer is added. The geometry measures the page's ink instead
+    (see :func:`_measure_from_ink`), and page numbers are read from their
+    own crops, so nothing here needs one. Pass ``ocr=True`` to run the
+    ocrmypdf pre-pass anyway on a PDF that has no text layer, or use
+    :func:`blackletter.api.add_text_layer` afterwards on the files you
+    actually want searchable, which is cheaper and does not OCR content
+    that is about to be redacted.
 
     :param pdf_path: Path to the source PDF.
     :param model: Loaded YOLO model instance.
@@ -561,7 +565,8 @@ def scan(
     :param output_dir: Directory for intermediate and output files.
     :param shrink: Downsample images to ~148 KB/page even if the PDF
         already has a text layer.
-    :param skip_ocr: Never run OCR regardless of text layer presence.
+    :param ocr: Run the ocrmypdf pre-pass when the PDF has no text layer.
+        Off by default: the pipeline no longer needs it.
     :param optimize: OCR optimization level (passed to ocrmypdf).
     :param output_name: Custom stem for output filenames.
     :param device: YOLO inference device (e.g. ``"cpu"``, ``"cuda:0"``).
@@ -578,7 +583,7 @@ def scan(
     # Fix rotated pages first so all downstream coordinates are consistent.
     actual_path = _fix_rotated_pages(pdf_path, dest_dir, out_stem)
 
-    if not skip_ocr and needs_ocr(actual_path):
+    if ocr and needs_ocr(actual_path):
         print("  PDF has no text layer, running OCR...")
         ocr_out = dest_dir / f"{out_stem}.pdf"
         ocr_pdf(actual_path, ocr_out, optimize=optimize)

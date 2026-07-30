@@ -999,7 +999,7 @@ def cmd_process(args: argparse.Namespace) -> None:
 
     src_mb = args.pdf.stat().st_size / (1024 * 1024)
     _t0 = _time.time()
-    print("\n── Scan (OCR + YOLO) ──", flush=True)
+    print("\n── Scan (YOLO) ──", flush=True)
     print(f"Scanning {args.pdf.name} ({page_count} pages, {src_mb:.1f} MB)...", flush=True)
     device = "cpu" if getattr(args, "cpu", False) else None
     cb = getattr(args, "progress_callback", None)
@@ -1009,6 +1009,7 @@ def cmd_process(args: argparse.Namespace) -> None:
         first_page=args.first_page,
         output_dir=base_dir,
         shrink=shrink,
+        ocr=getattr(args, "ocr", False),
         optimize=getattr(args, "optimize", 1),
         output_name=scan_name,
         device=device,
@@ -1235,6 +1236,23 @@ def cmd_process(args: argparse.Namespace) -> None:
             f"  Wrote {n_llm} LLM page PDFs ({_time.time() - _t0:.0f}s)",
             flush=True,
         )
+    # ── Searchable text layer, last ──
+    # Deliberately after redaction and margin cleanup: OCRing the source
+    # first would spend the time on content that is about to be blacked
+    # out, and leave a text layer for apply_redactions to scrub.
+    if getattr(args, "text_layer", False):
+        from blackletter.api import add_text_layer
+
+        if cb:
+            cb(0, 0, "Adding text layer...")
+        _t0 = _time.time()
+        print("\nAdding text layer to the redacted PDFs...", flush=True)
+        add_text_layer(
+            [full_redacted_path, redacted_dir],
+            optimize=getattr(args, "optimize", 1),
+        )
+        print(f"  Text layer done ({_time.time() - _t0:.0f}s)", flush=True)
+
     print(f"\n── Total processing time: {_time.time() - _t_total:.0f}s ──", flush=True)
     if cb:
         cb(0, 0, "Done")
@@ -1338,7 +1356,6 @@ def reprocess_section(
         first_page=page_start,
         output_dir=output_dir,
         shrink=False,
-        skip_ocr=True,
         progress_callback=cb,
     )
     if reporter:
@@ -1883,5 +1900,23 @@ def build_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         default=1,
         choices=[0, 1, 2, 3],
         help="ocrmypdf optimization level (0=none, 1=lossless, 2=lossy, 3=aggressive)",
+    )
+    p.add_argument(
+        "--text-layer",
+        action="store_true",
+        help=(
+            "Add a searchable text layer to the generated PDFs (the full "
+            "redacted PDF and the per-opinion files in redacted/) after "
+            "redaction, instead of OCRing the source beforehand"
+        ),
+    )
+    p.add_argument(
+        "--ocr",
+        action="store_true",
+        help=(
+            "Run the ocrmypdf pre-pass over the source before detection. "
+            "Off by default and rarely wanted: the geometry measures the "
+            "page ink, so prefer --text-layer for searchable output"
+        ),
     )
     return p

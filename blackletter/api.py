@@ -4,24 +4,31 @@ Each function is one discrete step. Call only what you need.
 All functions work with file paths and return file paths or data.
 
 Usage:
-    from blackletter.api import ensure_weights, bitonal, ocr, detect, pair, compute_rects, build_redacted, split_opinions
+    from blackletter.api import ensure_weights, bitonal, detect, pair, compute_rects, build_redacted, split_opinions, add_text_layer
 
     ensure_weights(["large"])  # download large.pt from HF if absent
     bitonal_pdf = bitonal(source_pdf, output_dir)
-    ocr_pdf = ocr(bitonal_pdf, output_dir)
     detections = detect(bitonal_pdf, output_dir, models=["medium", "large"])
-    opinions = pair(detections, ocr_pdf, reporter="a3d", volume="333", first_page=1)
-    rects = compute_rects(ocr_pdf, output_dir)
-    redacted_pdf = build_redacted(ocr_pdf, output_dir)
-    opinion_files = split_opinions(ocr_pdf, output_dir, opinions=opinions)
+    opinions = pair(detections, bitonal_pdf, reporter="a3d", volume="333", first_page=1)
+    rects = compute_rects(bitonal_pdf, output_dir)
+    redacted_pdf = build_redacted(bitonal_pdf, output_dir)
+    opinion_files = split_opinions(bitonal_pdf, output_dir, opinions=opinions)
+    add_text_layer(opinion_files)  # optional, and only worth doing last
+
+No step needs a text layer: the geometry measures the page's ink. ``ocr``
+remains available as a pre-pass over a whole source document, but if what
+you want is searchable *output*, use ``add_text_layer`` on the files you
+are delivering instead. It runs after redaction, so no time is spent
+OCRing content that is about to be blacked out.
 """
 
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import fitz
@@ -240,6 +247,197 @@ def ocr(
     )
     print(f"  OCR done ({time.time() - t0:.0f}s)", flush=True)
     return output_path
+
+
+def _text_layer_jobs(total: int, jobs: int | None) -> int:
+    """How many files :func:`add_text_layer` should process at once.
+
+    :param total: Number of files that need a text layer.
+    :param jobs: Caller's request, or None to decide from the CPU count.
+    :returns: A worker count of at least 1 and never more than ``total``.
+    """
+    import multiprocessing
+
+    if jobs is None:
+        jobs = multiprocessing.cpu_count() // 2
+    return max(1, min(jobs, total))
+
+
+def _inner_jobs(workers: int) -> int | None:
+    """Cores to give each ocrmypdf run when ``workers`` run side by side.
+
+    Splitting the machine between the workers keeps it busy in both
+    regimes without oversubscribing it. A volume of short opinions is
+    dominated by ocrmypdf's fixed startup cost, so the win comes from
+    running many at once; a handful of long PDFs has little startup cost to
+    amortise and wants ocrmypdf's own page-level parallelism instead.
+
+    :param workers: How many files are being processed at once.
+    :returns: ocrmypdf's ``jobs`` value, or None to leave its default
+        (which is every core) alone for a single worker.
+    """
+    import multiprocessing
+
+    if workers <= 1:
+        return None
+    return max(1, multiprocessing.cpu_count() // workers)
+
+
+def _ocr_in_place(pdf: Path, language: str, optimize: int, jobs: int | None) -> None:
+    """OCR one PDF, replacing it only once ocrmypdf has succeeded.
+
+    The temporary file is created in the target's own directory so the
+    move is atomic, and removed on failure so a crashed run never leaves
+    a stray file beside a deliverable.
+
+    :param pdf: The PDF to give a text layer, modified in place.
+    :param language: Tesseract language code.
+    :param optimize: ocrmypdf optimization level (0-3).
+    :param jobs: ocrmypdf's internal worker count, or None for its default.
+    """
+    from blackletter.ocr import _silence_ocr_loggers
+
+    _silence_ocr_loggers()
+
+    import ocrmypdf
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False, dir=pdf.parent) as tmp:
+        tmp_path = Path(tmp.name)
+    extra = {} if jobs is None else {"jobs": jobs}
+    try:
+        ocrmypdf.ocr(
+            str(pdf),
+            str(tmp_path),
+            pdf_renderer="auto",
+            optimize=optimize,
+            output_type="pdf",
+            language=[language],
+            # Leave pages that already have text alone rather than
+            # failing on them or rasterising them away.
+            skip_text=True,
+            tesseract_timeout=120,
+            progress_bar=False,
+            **extra,
+        )
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    tmp_path.replace(pdf)
+
+
+def add_text_layer(
+    paths: str | Path | Iterable[str | Path],
+    language: str = "eng",
+    optimize: int = 1,
+    skip_existing: bool = True,
+    jobs: int | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> list[Path]:
+    """Add a searchable text layer to PDFs that already exist, in place.
+
+    This is the step to reach for when what you want is searchable
+    *output*. :func:`ocr` is a pre-pass over a whole source document,
+    named from reporter, volume and page numbers, and run before anything
+    is redacted; this runs over files that are already finished, so no CPU
+    is spent OCRing content that is about to be blacked out and no text
+    layer is left for ``apply_redactions`` to scrub.
+
+    Nothing calls this implicitly. A caller that wants searchable
+    deliverables asks for them, typically over the full redacted PDF and
+    the per-opinion PDFs in ``redacted/``, and typically not over
+    ``unredacted/`` (a searchable copy of the copyrighted text is the
+    opposite of the point).
+
+    Work is spread across files rather than within them, because that is
+    where the time goes: each ocrmypdf run carries several seconds of fixed
+    cost, which dominates for the short PDFs a volume splits into, and
+    ocrmypdf parallelises poorly over a handful of pages. Each file is
+    OCR'd to a temporary file beside it and moved into place only on
+    success, so a failure leaves the original untouched, and pages that
+    already carry text are left alone, so running this twice is safe.
+
+    :param paths: A PDF, a directory of PDFs (non-recursive), or an
+        iterable of either.
+    :param language: Tesseract language code.
+    :param optimize: ocrmypdf optimization level (0-3).
+    :param skip_existing: Skip files that already have a text layer
+        throughout. Pass False to OCR every file's text-less pages anyway.
+    :param jobs: How many files to process at once. Defaults to half the
+        CPU count, capped at the number of files. Pass 1 to run in the
+        calling process, which is also what happens for a single file.
+    :param progress_callback: Optional callable invoked with
+        ``(files_done, total_files, message)``.
+    :returns: The files that were given a text layer. Files skipped as
+        already searchable are not included.
+    """
+    from blackletter.ocr import needs_ocr
+
+    pdfs = _collect_pdfs(paths)
+    if skip_existing:
+        pdfs = [p for p in pdfs if needs_ocr(p)]
+    total = len(pdfs)
+    if not total:
+        print("  Text layer: nothing to do", flush=True)
+        return []
+
+    jobs = _text_layer_jobs(total, jobs)
+    inner_jobs = _inner_jobs(jobs)
+
+    written: list[Path] = []
+    done = 0
+    t0 = time.time()
+
+    def _report(pdf: Path) -> None:
+        nonlocal done
+        done += 1
+        written.append(pdf)
+        if progress_callback:
+            progress_callback(done, total, f"Text layer: {pdf.name}")
+        if done % 10 == 0 or done == total:
+            print(f"  Text layer {done}/{total}", flush=True)
+
+    if jobs == 1:
+        for pdf in pdfs:
+            _ocr_in_place(pdf, language, optimize, inner_jobs)
+            _report(pdf)
+    else:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        print(f"  Text layer: {total} PDFs across {jobs} workers", flush=True)
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = {
+                pool.submit(_ocr_in_place, pdf, language, optimize, inner_jobs): pdf for pdf in pdfs
+            }
+            for future in as_completed(futures):
+                future.result()
+                _report(futures[future])
+
+    print(
+        f"  Text layer added to {len(written)}/{total} PDFs ({time.time() - t0:.0f}s)",
+        flush=True,
+    )
+    return written
+
+
+def _collect_pdfs(paths: str | Path | Iterable[str | Path]) -> list[Path]:
+    """Expand a path, a directory, or an iterable of them into PDF files.
+
+    :param paths: A PDF, a directory of PDFs, or an iterable of either.
+    :returns: Existing ``.pdf`` files, directories expanded and sorted.
+    :raises FileNotFoundError: If a named path does not exist.
+    """
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    out: list[Path] = []
+    for raw in paths:
+        path = Path(raw)
+        if path.is_dir():
+            out.extend(sorted(p for p in path.glob("*.pdf") if p.is_file()))
+        elif path.is_file():
+            out.append(path)
+        else:
+            raise FileNotFoundError(path)
+    return out
 
 
 def detect(
