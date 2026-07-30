@@ -31,6 +31,7 @@ from blackletter.scanner import (
     _headnote_fallback_rects,
     _redaction_rects,
     _find_redaction_start,
+    _grow_rect_to_ink,
     _tighten_to_text,
     _text_bottom,
     _text_x_bounds,
@@ -289,6 +290,7 @@ def compute_redaction_rects(
     """
     pages_by_index = {p.index: p for p in document.pages}
     mid = document.pages[0].midpoint
+    _ocr_applied = document.ocr_applied
 
     with fitz.open(str(document.pdf_path)) as src_pdf:
         # Pre-compute headnote rects
@@ -368,11 +370,13 @@ def compute_redaction_rects(
                     raw_center_x = (rect.x0 + rect.x1) / 2
                     is_left_col = raw_center_x < mid_pdf
                     # Tighten to text in PDF points first
-                    tight = _tighten_to_text(fitz_page, rect)
+                    tight = _tighten_to_text(fitz_page, rect, ocr_applied=_ocr_applied)
                     if tight is not None:
                         rect = tight
-                    text_bot = _text_bottom(fitz_page, rect)
-                    text_left, text_right = _text_x_bounds(fitz_page, rect)
+                    text_bot = _text_bottom(fitz_page, rect, ocr_applied=_ocr_applied)
+                    text_left, text_right = _text_x_bounds(
+                        fitz_page, rect, ocr_applied=_ocr_applied
+                    )
                     if right_col_inner_pdf is not None:
                         if is_left_col:
                             new_x0 = text_left
@@ -390,6 +394,14 @@ def compute_redaction_rects(
                         new_x1,
                         min(rect.y1, ft, text_bot),
                     )
+                    # Take in characters the column edges clipped, without
+                    # crossing into the other column.
+                    rect = _grow_rect_to_ink(fitz_page, rect, _ocr_applied)
+                    if right_col_inner_pdf is not None:
+                        if is_left_col:
+                            rect.x1 = min(rect.x1, right_col_inner_pdf)
+                        else:
+                            rect.x0 = max(rect.x0, right_col_inner_pdf)
                     if rect.is_empty or rect.x0 >= rect.x1 or rect.y0 >= rect.y1:
                         continue
                     # Convert to image pixels
@@ -418,7 +430,7 @@ def compute_redaction_rects(
                 else:
                     # Tighten in PDF coords, convert back to pixels
                     rect = d.bbox.to_fitz_pdf_rect(sx, sy)
-                    tight = _tighten_to_text(fitz_page, rect, skip=False)
+                    tight = _tighten_to_text(fitz_page, rect, skip=False, ocr_applied=_ocr_applied)
                     if tight is not None:
                         rect = tight
                     fill = "black" if d.label in _REDACT_BLACK else "white"
@@ -685,6 +697,7 @@ def _build_full_redacted(
     """
     pages_by_index = {p.index: p for p in document.pages}
     mid = document.pages[0].midpoint
+    _ocr_applied = document.ocr_applied
 
     with fitz.open(str(document.pdf_path)) as src_pdf, fitz.open() as out_pdf:
         out_pdf.insert_pdf(src_pdf)
@@ -746,11 +759,8 @@ def _build_full_redacted(
             for rect_page_idx, rect in all_headnote_rects:
                 if rect_page_idx != src_idx:
                     continue
-                # `_build_full_redacted` always runs on post-OCR PDFs so text bounds
-                # are reliable; match that by passing ocr_applied=False to get the
-                # text-tightening branch.
                 clipped = _clip_headnote_rect(
-                    fitz_page, rect, header_bottom, footer_top, ocr_applied=False
+                    fitz_page, rect, header_bottom, footer_top, ocr_applied=_ocr_applied
                 )
                 if clipped is not None:
                     add_safe(clipped, (0, 0, 0))
@@ -766,7 +776,7 @@ def _build_full_redacted(
                 rect = d.bbox.to_fitz_pdf_rect(sx, sy)
                 _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
                 if not _skip_tighten:
-                    tight = _tighten_to_text(fitz_page, rect, skip=False)
+                    tight = _tighten_to_text(fitz_page, rect, skip=False, ocr_applied=_ocr_applied)
                     if tight is not None:
                         rect = tight
                 fill = (0, 0, 0) if d.label in _REDACT_BLACK else (1, 1, 1)
@@ -1131,7 +1141,7 @@ def cmd_process(args: argparse.Namespace) -> None:
     print("\nComputing margin rects...", flush=True)
     from blackletter.margins import compute_margin_rects
 
-    margin_rects = compute_margin_rects(document.pdf_path)
+    margin_rects = compute_margin_rects(document.pdf_path, pages=document.pages)
     margins_path = base_dir / "margin_rects.json"
     with open(margins_path, "w") as _f:
         _json.dump(margin_rects, _f)
@@ -1151,7 +1161,7 @@ def cmd_process(args: argparse.Namespace) -> None:
         cb(0, 0, "Cleaning margins...")
     _t0 = _time.time()
     print("\nCleaning margins...", flush=True)
-    clean_margins(document.pdf_path)
+    clean_margins(document.pdf_path, pages=document.pages)
     print(f"  Margins cleaned ({_time.time() - _t0:.0f}s)", flush=True)
 
     # ── Extract images ──
@@ -1635,7 +1645,7 @@ def generate_files(
         from blackletter.margins import clean_margins
 
         print("\nCleaning margins...", flush=True)
-        clean_margins(document.pdf_path)
+        clean_margins(document.pdf_path, pages=document.pages)
         print(f"  Margins cleaned ({_time.time() - _t0:.0f}s)", flush=True)
 
     # Extract images

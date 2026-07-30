@@ -88,9 +88,10 @@ wheels = [
 
 [[package]]
 name = "blackletter"
-version = "0.1.0"
+version = "0.1.1"
 source = { editable = "." }
 dependencies = [
+    { name = "numpy" },
     { name = "ocrmypdf" },
     { name = "opencv-python" },
     { name = "pillow" },
@@ -122,6 +123,7 @@ refine = [
 requires-dist = [
     { name = "blackletter", extras = ["detect"], marker = "extra == 'analyze'" },
     { name = "huggingface-hub", marker = "extra == 'detect'", specifier = ">=0.20.0" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "ocrmypdf", specifier = ">=16.0.0" },
     { name = "opencv-python", specifier = ">=4.8.0" },
     { name = "paddleocr", marker = "extra == 'analyze'", specifier = ">=3.0.0" },

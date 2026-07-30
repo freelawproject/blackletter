@@ -441,7 +441,7 @@ def pair_and_compute_rects(
         json.dump(rects, f)
 
     # Compute margin rects
-    margin_rects = compute_margin_rects(pdf_path)
+    margin_rects = compute_margin_rects(pdf_path, pages=document.pages)
     with open(output_dir / "margin_rects.json", "w") as f:
         json.dump(margin_rects, f)
 

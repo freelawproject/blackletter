@@ -33,6 +33,7 @@ classifiers = [
 # `opencv-python-headless` here would double-install a conflicting cv2 whenever
 # an extra is present. Base callers that never touch cv2 pay only libgl1.
 dependencies = [
+    "numpy>=1.26",
     "opencv-python>=4.8.0",
     "pymupdf>=1.23.0",
     "pillow>=12.0.0",

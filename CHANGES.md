@@ -4,6 +4,11 @@
 
 The following changes are not yet released, but are code complete:
 
+- Fix redaction and margin geometry on PDFs with no text layer, which previously failed silently rather than degrading: `_text_bottom` returned the top of its clip, so every headnote rect collapsed to zero height and was dropped, and `margins._text_bounds` returned nothing, so margin cleanup did nothing at all. Both now measure the page's ink (dark-pixel projections, new `blackletter.ink` module) when words are unavailable, so a bitonal PDF gets the same geometry a post-OCR one does. `Document.ocr_applied` is now honoured by `compute_redaction_rects` and `_build_full_redacted` as well, and means "prefer ink to these word boxes" rather than "skip tightening": our own OCR's positions are imprecise, while ink is measured from the pixels the OCR read (#68)
+- Correct `TEXT_COLUMN` detections against the page ink during `scan()` (`snap_text_columns_to_ink`). YOLO's column boxes land a median 0.4 pt (up to ~7 pt) inside the printed text, and three consumers read them — headnote rect x-bounds, the margin text band, and the outside-opinion masks — so a narrow box left the first or last character of every masked line behind. Each column may grow only to the middle of the gutter it shares with its neighbour, and an edge that runs the whole way to the growth limit is left where the detector put it (#68)
+- Tighten margin cleanup with detection geometry: `compute_margin_rects` and `clean_margins` accept the detected `pages` and intersect the measured content box with the `TEXT_COLUMN` band and the header row, so one bleed-through mark in a corner no longer widens the content box and shrinks the strip on that side. The four strips are also reshaped — full-width above and below the body, side strips spanning the body rows only — which covers the same region while keeping a side strip away from a page number printed outside the columns. On a real volume this raised masked area 23% and junk ink covered 3.3x, with no detection overlapped (#68)
+- `clean_margins` now computes its strips through `compute_margin_rects` instead of duplicating the geometry, so the two can no longer disagree (#68)
+
 ## Current
 
 0.1.1 (2026-07-15)
