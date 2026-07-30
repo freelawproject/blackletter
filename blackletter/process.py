@@ -10,6 +10,7 @@ from pathlib import Path
 
 import fitz
 
+from blackletter import ink
 from blackletter.models import BBox, Detection, Label
 from blackletter.refine import refine_headnote_rects
 from blackletter.scanner import (
@@ -31,7 +32,6 @@ from blackletter.scanner import (
     _headnote_fallback_rects,
     _redaction_rects,
     _find_redaction_start,
-    _grow_rect_to_ink,
     _tighten_to_text,
     _text_bottom,
     _text_x_bounds,
@@ -394,9 +394,6 @@ def compute_redaction_rects(
                         new_x1,
                         min(rect.y1, ft, text_bot),
                     )
-                    # Take in characters the column edges clipped, without
-                    # crossing into the other column.
-                    rect = _grow_rect_to_ink(fitz_page, rect, _ocr_applied)
                     if right_col_inner_pdf is not None:
                         if is_left_col:
                             rect.x1 = min(rect.x1, right_col_inner_pdf)
@@ -504,7 +501,151 @@ def compute_redaction_rects(
                     continue
                 _add_px(src_idx, d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, "black", "KEY_ICON")
 
+        # ── Headnote rects, finished against the detections ──
+        # Both passes work on the collected rects rather than inside the
+        # loop above, because each needs every headnote rect on its page.
+        for src_idx, page_rects in result.items():
+            page = pages_by_index.get(src_idx)
+            if page is None:
+                continue
+            _snap_headnote_x_to_columns(page, page_rects)
+            page_rects = _split_headnote_rects_at_headnotes(page, page_rects)
+            # Growth comes last, once each rect's edges are final: an edge
+            # that has just been snapped to a column box or cut at a
+            # detection is exactly the kind that clips a character.
+            _grow_headnote_rects(src_pdf[src_idx], page, page_rects, _ocr_applied)
+            result[src_idx] = page_rects
+
     return [{"page_index": pi, "rects": rects} for pi, rects in sorted(result.items())]
+
+
+def _grow_headnote_rects(fitz_page, page, rects: list[dict], ocr_applied: bool) -> None:
+    """Widen each headnote rect over ink that runs past its edges.
+
+    Both axes, unlike :func:`~blackletter.scanner._grow_rect_to_ink`, which
+    is horizontal only. There the vertical edges carry meaning: a marker
+    position, or the ink bottom, which already sits on the last line. Here
+    they do not: an edge snapped to a column box or cut at a detection is
+    just as likely to clip a line as a side edge is to clip a character.
+
+    Rects are modified in place, in image pixel coordinates.
+
+    :param fitz_page: The PDF page the rects were measured against.
+    :param page: The detected page, for its pixel-to-point scale.
+    :param rects: That page's rect dicts.
+    :param ocr_applied: Whether the text layer came from our own OCR.
+    """
+    from blackletter.scanner import _measure_from_ink
+
+    if not _measure_from_ink(fitz_page, ocr_applied):
+        return
+    sx, sy = page.scale_x, page.scale_y
+    for r in rects:
+        if r.get("type") != "headnote":
+            continue
+        grown = ink.grow_to_ink(
+            fitz_page,
+            fitz.Rect(r["x0"] * sx, r["y0"] * sy, r["x1"] * sx, r["y1"] * sy),
+        )
+        r["x0"] = round(grown.x0 / sx, 1)
+        r["y0"] = round(grown.y0 / sy, 1)
+        r["x1"] = round(grown.x1 / sx, 1)
+        r["y1"] = round(grown.y1 / sy, 1)
+
+
+def _snap_headnote_x_to_columns(page, rects: list[dict]) -> None:
+    """Snap headnote rects' side edges to their own ``TEXT_COLUMN`` box.
+
+    A headnote rect's x-bounds come from marker geometry and the text or
+    ink inside it, so two rects in the same column can end up a few points
+    apart. The column detections are one box per column, corrected against
+    the page ink by :func:`~blackletter.scanner.snap_text_columns_to_ink`,
+    which makes them both the tidier and the more accurate answer.
+
+    Only a column on the same side of the page midpoint is considered: on a
+    page whose left column was not detected, the nearest column box to a
+    left-hand rect is the *right* one, and snapping to it would move the
+    rect across the page.
+
+    Rects are modified in place, in image pixel coordinates.
+
+    :param page: The page whose detections to read.
+    :param rects: That page's rect dicts, as ``compute_redaction_rects``
+        collects them.
+    """
+    columns = [d for d in page.detections if d.label == Label.TEXT_COLUMN]
+    if not columns:
+        return
+    midpoint = page.img_width / 2
+    for r in rects:
+        if r.get("type") != "headnote":
+            continue
+        center = (r["x0"] + r["x1"]) / 2
+        same_side = [c for c in columns if (c.bbox.center_x < midpoint) == (center < midpoint)]
+        if not same_side:
+            continue
+        best = min(same_side, key=lambda c: abs(c.bbox.center_x - center))
+        r["x0"] = round(best.bbox.x1, 1)
+        r["x1"] = round(best.bbox.x2, 1)
+
+
+# Blank band left between the pieces of a split headnote rect, in image
+# pixels, so the two do not share an edge.
+HEADNOTE_SPLIT_GAP = 6.0
+
+
+def _split_headnote_rects_at_headnotes(page, rects: list[dict]) -> list[dict]:
+    """Split each headnote rect at the ``HEADNOTE`` detections inside it.
+
+    A headnote block runs from a marker to the end of its column, so one
+    rect can span several numbered headnotes with body text or a divider
+    between them. Cutting the rect at each detection's top edge blacks out
+    the headnotes and leaves whatever sits between them visible.
+
+    :param page: The page whose detections to read.
+    :param rects: That page's rect dicts, in image pixel coordinates.
+    :returns: The rect list with headnote rects replaced by their pieces,
+        other rects untouched and in their original order.
+    """
+    headnotes = sorted(
+        (d for d in page.detections if d.label == Label.HEADNOTE),
+        key=lambda d: d.bbox.y1,
+    )
+    if not headnotes:
+        return rects
+
+    gap = HEADNOTE_SPLIT_GAP
+    out: list[dict] = []
+    for r in rects:
+        if r.get("type") != "headnote":
+            out.append(r)
+            continue
+        # Detections that start inside this rect, ignoring ones flush with
+        # its own edges, and overlapping it horizontally (so a detection in
+        # the other column cannot cut it).
+        inside = [
+            d
+            for d in headnotes
+            if r["y0"] + gap < d.bbox.y1 < r["y1"] - gap
+            and d.bbox.x1 < r["x1"]
+            and d.bbox.x2 > r["x0"]
+        ]
+        merged: list[list[float]] = []
+        for d in inside:
+            if merged and d.bbox.y1 < merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], d.bbox.y2)
+            else:
+                merged.append([d.bbox.y1, d.bbox.y2])
+        if not merged:
+            out.append(r)
+            continue
+        top = r["y0"]
+        for split_y, _bottom in merged:
+            if split_y - gap / 2 > top:
+                out.append({**r, "y0": round(top, 1), "y1": round(split_y - gap / 2, 1)})
+            top = split_y + gap / 2
+        out.append({**r, "y0": round(top, 1), "y1": round(r["y1"], 1)})
+    return out
 
 
 def _split_from_redacted(

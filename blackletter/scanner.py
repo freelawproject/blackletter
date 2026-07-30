@@ -1493,6 +1493,12 @@ def _build_opinions_data(
             is_last = pi == key.page_index
             pw = src_pdf[pi].rect.width
             for rect in _outside_opinion_rects(page, pw, caption, key, is_first, is_last):
+                # These masks come from the column boxes, so their side
+                # edges can sit inside the printed text and leave the first
+                # or last character of every masked line in the gutter.
+                # Horizontal only: the vertical edges are the caption and
+                # key positions, which mean something.
+                rect = ink.grow_to_ink(src_pdf[pi], rect, margin_y=0.0)
                 outside_rects.append(
                     {
                         "page_index": pi,

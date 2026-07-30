@@ -963,6 +963,7 @@ def generate(
                 whiteout).
             """
             # Page rects (margins + redactions), all PDF points
+            applied: list[tuple[fitz.Rect, tuple]] = []
             for r in pages_rects.get(str(src_idx), []):
                 rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
                 if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
@@ -972,6 +973,7 @@ def generate(
                 else:
                     fill = (0, 0, 0) if r["fill"] == "black" else (1, 1, 1)
                 fitz_page.add_redact_annot(rect, fill=fill)
+                applied.append((rect, fill))
 
             # Outside-opinion whiteout (skip for full redacted)
             if opinion is not None and mode != "full":
@@ -981,8 +983,17 @@ def generate(
                     rect = fitz.Rect(orect["x0"], orect["y0"] + 3, orect["x1"], orect["y1"])
                     if not rect.is_empty:
                         fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
+                        applied.append((rect, (1, 1, 1)))
 
             fitz_page.apply_redactions()
+
+            # apply_redactions paints each rect with a fill *and* a 1pt
+            # stroke straddling its edge, and it strokes after filling, so
+            # where a black rect meets a white one the outer half of the
+            # black stroke survives as a hairline in the output. Repainting
+            # fill-only, in the same order, covers it.
+            for rect, fill in applied:
+                fitz_page.draw_rect(rect, fill=fill, color=None, width=0)
 
         # ── Full redacted PDF ──
         t0 = time.time()

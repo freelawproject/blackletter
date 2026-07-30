@@ -247,6 +247,56 @@ def _rects_for_bounds(
     return rects
 
 
+# Detections too noisy at a page edge to push a margin strip back. They are
+# the ones that bound the content box in the first place (see
+# ``_detection_bounds``), and a bleed-through blob labelled PAGE_NUMBER is
+# exactly what a strip is meant to cover.
+NO_PUSHBACK_LABELS = frozenset({Label.PAGE_NUMBER, Label.PAGE_HEADER, Label.STATE_ABBREVIATION})
+
+
+def _shrink_rects_for_detections(page: Page, rects: list[dict]) -> None:
+    """Pull back any strip that would cover a detection.
+
+    The bounds tightening in :func:`_tighten_bounds` positions the strips
+    from the column band and the header row, which says where the *text*
+    is. It says nothing about a key icon at the foot of a page, a caption
+    that reaches into a margin, or an image that bleeds outward, so a strip
+    can still land on one. Each strip is anchored to a page edge, and which
+    edge tells us which of its own edges to pull back.
+
+    Rects are modified in place, in PDF points.
+
+    :param page: The page whose detections to respect.
+    :param rects: That page's margin strips.
+    """
+    boxes = [
+        d.bbox.to_pdf(page.scale_x, page.scale_y)
+        for d in page.detections
+        if d.label not in NO_PUSHBACK_LABELS
+    ]
+    if not boxes:
+        return
+    pdf_w, pdf_h = page.pdf_width, page.pdf_height
+    for rect in rects:
+        full_width = rect["x0"] <= 1 and rect["x1"] >= pdf_w - 1
+        for box in boxes:
+            if not (
+                box.x1 < rect["x1"]
+                and box.x2 > rect["x0"]
+                and box.y1 < rect["y1"]
+                and box.y2 > rect["y0"]
+            ):
+                continue
+            if full_width and rect["y0"] <= 1:
+                rect["y1"] = min(rect["y1"], box.y1)
+            elif full_width and rect["y1"] >= pdf_h - 1:
+                rect["y0"] = max(rect["y0"], box.y2)
+            elif rect["x0"] <= 1:
+                rect["x1"] = min(rect["x1"], box.x1)
+            elif rect["x1"] >= pdf_w - 1:
+                rect["x0"] = max(rect["x0"], box.x2)
+
+
 def compute_margin_rects(
     pdf_path: Path,
     buffer: float = DEFAULT_BUFFER,
@@ -293,6 +343,8 @@ def compute_margin_rects(
             if detected is not None:
                 bounds = _tighten_bounds(bounds, detected)
             entry["rects"] = _rects_for_bounds(bounds, pw, ph, buffer)
+            if detected is not None:
+                _shrink_rects_for_detections(detected, entry["rects"])
             result.append(entry)
 
     return result
