@@ -20,7 +20,7 @@ from .process import _infer_from_filename
 RANGE_RE = re.compile(r"^(\d{1,4})\s*[–\-]\s*(\d{1,4})$")
 
 
-def _parse_expected_range(pdf_path: str | Path) -> tuple[int | None, int | None]:
+def parse_expected_range(pdf_path: str | Path) -> tuple[int | None, int | None]:
     """Extract expected first/last page numbers from filename.
 
     :param pdf_path: Path to the PDF file.
@@ -129,7 +129,109 @@ def _auto_correct(
     return new_results, corrections
 
 
-def _build_issues(
+def build_analysis(
+    ocr_results: list[dict],
+    exp_start: int | None = None,
+    exp_end: int | None = None,
+    out_of_range: list[dict] | None = None,
+) -> dict:
+    """Project per-page OCR results into the analysis :func:`build_issues` reads.
+
+    Split out of :func:`validate` so a caller holding OCR results can
+    rebuild the analysis without re-reading the PDF or re-running OCR. A
+    review UI needs exactly that: after someone corrects a page number by
+    hand, the sequence, duplicate and missing-page findings all change, and
+    re-OCRing a volume to learn that would be absurd.
+
+    :param ocr_results: Per-page result dicts, each with ``pdf_page``,
+        ``detected`` and optionally ``type``.
+    :param exp_start: Expected first printed page number, if known.
+    :param exp_end: Expected last printed page number, if known.
+    :param out_of_range: Results already known to fall outside
+        ``[exp_start, exp_end]``. Computed from ``ocr_results`` when
+        omitted; :func:`validate` passes its own, since auto-correction can
+        change the split.
+    :returns: The analysis dict, with ``results``, ``seq_issues``,
+        ``duplicates``, ``seen_nums``, ``all_nums``, ``missing_pages``,
+        ``ranges_found``, ``not_detected`` and ``out_of_range``.
+    """
+    if out_of_range is None:
+        out_of_range, seen_nums = _split_in_out_of_range(ocr_results, exp_start, exp_end)
+    else:
+        _, seen_nums = _split_in_out_of_range(ocr_results, exp_start, exp_end)
+
+    out_of_range_pages = {r["pdf_page"] for r in out_of_range}
+    all_nums = sorted(seen_nums.keys())
+    duplicates = {k: v for k, v in seen_nums.items() if len(v) > 1}
+
+    # Sequence analysis (skip out-of-range pages)
+    prev_num = prev_pdf = None
+    seq_issues: list[tuple] = []
+    for r in ocr_results:
+        if not r["detected"] or r.get("type") == "range":
+            prev_num = None
+            continue
+        try:
+            num = int(r["detected"])
+        except ValueError:
+            continue
+        if r["pdf_page"] in out_of_range_pages:
+            continue
+        if prev_num is not None:
+            diff = num - prev_num
+            if diff == 0:
+                seq_issues.append(("DUPLICATE", r["pdf_page"], num, prev_pdf, prev_num))
+            elif diff < 0:
+                seq_issues.append(("BACKWARD", r["pdf_page"], num, prev_pdf, prev_num))
+            elif diff > 2:
+                seq_issues.append(
+                    (
+                        "GAP",
+                        r["pdf_page"],
+                        num,
+                        prev_pdf,
+                        prev_num,
+                        list(range(prev_num + 1, num)),
+                    )
+                )
+        prev_num = num
+        prev_pdf = r["pdf_page"]
+
+    # Range coverage: a page printed "677-685" accounts for all of them.
+    ranges_found = [r for r in ocr_results if r.get("type") == "range"]
+    range_pages: set[int] = set()
+    for r in ranges_found:
+        m = RANGE_RE.match(r["detected"].replace("\u2013", "-"))
+        if m:
+            for pg in range(int(m.group(1)), int(m.group(2)) + 1):
+                range_pages.add(pg)
+
+    # Missing pages
+    if exp_start is not None and exp_end is not None and all_nums:
+        missing_pages = sorted(
+            (set(range(exp_start, exp_end + 1)) - set(all_nums)) - range_pages - {0}
+        )
+    elif all_nums:
+        missing_pages = sorted(
+            (set(range(all_nums[0], all_nums[-1] + 1)) - set(all_nums)) - range_pages - {0}
+        )
+    else:
+        missing_pages = []
+
+    return {
+        "results": ocr_results,
+        "seq_issues": seq_issues,
+        "duplicates": duplicates,
+        "seen_nums": seen_nums,
+        "all_nums": all_nums,
+        "missing_pages": missing_pages,
+        "ranges_found": ranges_found,
+        "not_detected": [r for r in ocr_results if not r["detected"]],
+        "out_of_range": out_of_range,
+    }
+
+
+def build_issues(
     analysis: dict,
     pdf_page_count: int,
     exp_start: int | None = None,
@@ -494,7 +596,7 @@ def validate(
 
     # Infer expected range from filename if not provided
     if exp_start is None:
-        exp_start, exp_end = _parse_expected_range(pdf_path)
+        exp_start, exp_end = parse_expected_range(pdf_path)
 
     # Run OCR analysis
     analysis = analyze_pdf(
@@ -519,78 +621,9 @@ def validate(
             # Re-split after corrections
             out_of_range, seen_nums = _split_in_out_of_range(ocr_results, exp_start, exp_end)
 
-    # Rebuild analysis with filtered data
-    out_of_range_pages = {r["pdf_page"] for r in out_of_range}
-    all_nums = sorted(seen_nums.keys())
-    duplicates = {k: v for k, v in seen_nums.items() if len(v) > 1}
+    filtered_analysis = build_analysis(ocr_results, exp_start, exp_end, out_of_range)
 
-    # Sequence analysis (skip out-of-range pages)
-    prev_num = prev_pdf = None
-    seq_issues: list[tuple] = []
-    for r in ocr_results:
-        if not r["detected"] or r.get("type") == "range":
-            prev_num = None
-            continue
-        try:
-            num = int(r["detected"])
-        except ValueError:
-            continue
-        if r["pdf_page"] in out_of_range_pages:
-            continue
-        if prev_num is not None:
-            diff = num - prev_num
-            if diff == 0:
-                seq_issues.append(("DUPLICATE", r["pdf_page"], num, prev_pdf, prev_num))
-            elif diff < 0:
-                seq_issues.append(("BACKWARD", r["pdf_page"], num, prev_pdf, prev_num))
-            elif diff > 2:
-                seq_issues.append(
-                    (
-                        "GAP",
-                        r["pdf_page"],
-                        num,
-                        prev_pdf,
-                        prev_num,
-                        list(range(prev_num + 1, num)),
-                    )
-                )
-        prev_num = num
-        prev_pdf = r["pdf_page"]
-
-    # Range coverage
-    ranges_found = [r for r in ocr_results if r.get("type") == "range"]
-    range_pages: set[int] = set()
-    for r in ranges_found:
-        m = RANGE_RE.match(r["detected"].replace("\u2013", "-"))
-        if m:
-            for pg in range(int(m.group(1)), int(m.group(2)) + 1):
-                range_pages.add(pg)
-
-    # Missing pages
-    if exp_start is not None and exp_end is not None and all_nums:
-        missing_pages = sorted(
-            (set(range(exp_start, exp_end + 1)) - set(all_nums)) - range_pages - {0}
-        )
-    elif all_nums:
-        missing_pages = sorted(
-            (set(range(all_nums[0], all_nums[-1] + 1)) - set(all_nums)) - range_pages - {0}
-        )
-    else:
-        missing_pages = []
-
-    filtered_analysis = {
-        "results": ocr_results,
-        "seq_issues": seq_issues,
-        "duplicates": duplicates,
-        "seen_nums": seen_nums,
-        "all_nums": all_nums,
-        "missing_pages": missing_pages,
-        "ranges_found": ranges_found,
-        "not_detected": [r for r in ocr_results if not r["detected"]],
-        "out_of_range": out_of_range,
-    }
-
-    result = _build_issues(
+    result = build_issues(
         filtered_analysis,
         pdf_page_count,
         exp_start=exp_start,
@@ -618,3 +651,11 @@ def validate(
     result["auto_corrections"] = corrections
 
     return result
+
+
+# Older private names, kept so existing imports keep working. ``validate``
+# runs OCR, analysis and issue building in one call, which is right for a
+# CLI and wrong for a review UI: correcting one page number should not
+# re-OCR a volume. The three steps are public for that reason.
+_parse_expected_range = parse_expected_range
+_build_issues = build_issues

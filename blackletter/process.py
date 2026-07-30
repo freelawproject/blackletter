@@ -553,6 +553,62 @@ def _grow_headnote_rects(fitz_page, page, rects: list[dict], ocr_applied: bool) 
         r["y1"] = round(grown.y1 / sy, 1)
 
 
+def page_body_covered(
+    rects: list[dict],
+    page_width: float,
+    page_height: float,
+    header_height: float = 60.0,
+    min_coverage: float = 0.9,
+    cell: float = 2.0,
+) -> bool:
+    """Is essentially all of a page's body covered by these rects?
+
+    Asks of the geometry what a caller used to ask of the text layer: a
+    page whose body is entirely redaction and margin rects has nothing left
+    on it. Extracting text and finding none said the same thing while the
+    pipeline embedded a text layer, and says nothing at all once it stops,
+    where it reports *every* page as empty.
+
+    The header band is excluded because the printed page number lives there
+    and is deliberately never redacted, so a fully covered body still has
+    ink at the top.
+
+    :param rects: Rects on this page, in PDF points, from any source:
+        margin strips count as much as headnote blackouts, since both
+        remove content.
+    :param page_width: Page width in PDF points.
+    :param page_height: Page height in PDF points.
+    :param header_height: Band at the top of the page to ignore.
+    :param min_coverage: Fraction of the body that must be covered.
+    :param cell: Resolution of the coverage grid, in PDF points.
+    :returns: True when the covered fraction reaches ``min_coverage``.
+    """
+    import numpy as np
+
+    if not rects or page_width <= 0:
+        return False
+    body_top = min(header_height, page_height)
+    if page_height - body_top <= 0:
+        return False
+
+    cols = max(1, int(page_width / cell))
+    rows = max(1, int((page_height - body_top) / cell))
+    covered = np.zeros((rows, cols), dtype=bool)
+    for r in rects:
+        x0 = max(0.0, min(float(r["x0"]), page_width))
+        x1 = max(0.0, min(float(r["x1"]), page_width))
+        y0 = max(body_top, min(float(r["y0"]), page_height))
+        y1 = max(body_top, min(float(r["y1"]), page_height))
+        if x1 <= x0 or y1 <= y0:
+            continue
+        c0 = int(x0 / page_width * cols)
+        c1 = max(c0 + 1, int(round(x1 / page_width * cols)))
+        r0 = int((y0 - body_top) / (page_height - body_top) * rows)
+        r1 = max(r0 + 1, int(round((y1 - body_top) / (page_height - body_top) * rows)))
+        covered[r0:r1, c0:c1] = True
+    return bool(covered.mean() >= min_coverage)
+
+
 def _snap_headnote_x_to_columns(page, rects: list[dict]) -> None:
     """Snap headnote rects' side edges to their own ``TEXT_COLUMN`` box.
 

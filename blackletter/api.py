@@ -869,6 +869,88 @@ def split_opinions(
     }
 
 
+def build_redactions(
+    pages: Iterable,
+    redaction_rects: list[dict],
+    margin_rects: list[dict],
+    opinions: list[dict],
+    reporter: str = "",
+    volume: str = "",
+) -> dict:
+    """Combine this library's own outputs into :func:`generate`'s input.
+
+    ``compute_rects`` returns image-pixel rects, ``compute_margin_rects``
+    returns PDF points, and ``generate`` wants one payload in points with
+    every rect labelled. Without this, each consumer converts and merges
+    them itself, and gets to rediscover that the scale factors come from
+    the page's own image dimensions rather than a global assumption.
+
+    :param pages: The detected pages, for their dimensions and scale.
+    :param redaction_rects: ``[{"page_index", "rects"}]`` in image pixels,
+        each rect carrying ``fill`` and ``type``.
+    :param margin_rects: ``[{"page_index", "rects"}]`` in PDF points.
+    :param opinions: Opinion dicts, as ``pair`` produces them. Given a
+        reporter and volume, each gains a ``filename``.
+    :param reporter: Reporter abbreviation for the output filenames.
+    :param volume: Volume number for the output filenames.
+    :returns: ``{"opinions": [...], "pages": {"<index>": [rect, ...]}}``,
+        all coordinates in PDF points.
+    """
+    by_index = {p.index: p for p in pages}
+
+    prefix = f"{reporter}.{volume}" if reporter and volume else ""
+    for op in opinions:
+        if prefix:
+            first = op.get("first_page_number", 0)
+            last = op.get("last_page_number", first)
+            op["filename"] = f"{prefix}.{first:04d}-{last:04d}.pdf"
+
+    combined: dict[int, list[dict]] = {}
+
+    for entry in margin_rects:
+        page_rects = combined.setdefault(entry["page_index"], [])
+        for r in entry.get("rects", []):
+            page_rects.append(
+                {
+                    "x0": round(r["x0"], 1),
+                    "y0": round(r["y0"], 1),
+                    "x1": round(r["x1"], 1),
+                    "y1": round(r["y1"], 1),
+                    "fill": "white",
+                    "type": "margin",
+                }
+            )
+
+    for entry in redaction_rects:
+        page_index = entry["page_index"]
+        page_rects = combined.setdefault(page_index, [])
+        page = by_index.get(page_index)
+        # A page with no detections has no image dimensions to scale by,
+        # and its rects are already in points.
+        to_x = page.scale_x if page and page.img_width > 1 else 1.0
+        to_y = page.scale_y if page and page.img_height > 1 else 1.0
+        for r in entry.get("rects", []):
+            x0, y0 = r["x0"] * to_x, r["y0"] * to_y
+            x1, y1 = r["x1"] * to_x, r["y1"] * to_y
+            if x0 >= x1 or y0 >= y1:
+                continue
+            page_rects.append(
+                {
+                    "x0": round(x0, 1),
+                    "y0": round(y0, 1),
+                    "x1": round(x1, 1),
+                    "y1": round(y1, 1),
+                    "fill": r["fill"],
+                    "type": r["type"],
+                }
+            )
+
+    return {
+        "opinions": opinions,
+        "pages": {str(k): v for k, v in sorted(combined.items())},
+    }
+
+
 def generate(
     pdf_path: str | Path,
     redactions: str | Path | dict,
