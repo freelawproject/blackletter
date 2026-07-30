@@ -74,6 +74,23 @@ class TestBuildAnalysis:
         analysis = build_analysis(results, 100, 103)
         assert analysis["missing_pages"] == [101, 102]
 
+    def test_the_expected_range_extends_beyond_what_was_detected(self):
+        """The known-range branch, which the case above cannot distinguish.
+
+        With results 100 and 103, the range branch and the fallback both
+        report [101, 102]. Here the volume is known to run past the last
+        detected page, so only the range branch reports the tail.
+        """
+        results = [result(1, "101"), result(2, "102")]
+        assert build_analysis(results, 100, 105)["missing_pages"] == [100, 103, 104, 105]
+        assert build_analysis(results)["missing_pages"] == []
+
+    def test_a_two_page_step_is_tolerated(self):
+        """The gap rule fires above 2, so one skipped leaf is not an issue."""
+        assert build_analysis([result(1, "100"), result(2, "102")])["seq_issues"] == []
+        gaps = build_analysis([result(1, "100"), result(2, "103")])["seq_issues"]
+        assert [g[0] for g in gaps] == ["GAP"]
+
     def test_undetected_pages_are_collected(self):
         results = [result(1, "100"), result(2, ""), result(3, "102")]
         analysis = build_analysis(results)
@@ -218,6 +235,11 @@ class TestBuildRedactions:
         payload = build_redactions([self._page()], [], [], opinions)
         assert "filename" not in payload["opinions"][0]
 
+    def test_a_page_with_no_rects_at_all_is_absent(self):
+        """Pinned because a consumer iterating pages needs to know."""
+        payload = build_redactions([self._page()], [], [], [])
+        assert payload["pages"] == {}
+
     def test_page_keys_are_strings_in_order(self):
         pages = [self._page()]
         rects = [
@@ -273,9 +295,23 @@ class TestPageBodyCovered:
         assert page_body_covered([], PAGE_W, PAGE_H) is False
 
     def test_the_header_band_is_ignored(self):
-        """The printed page number lives there and is never redacted."""
-        rects = [{"x0": 0, "y0": 60, "x1": PAGE_W, "y1": PAGE_H}]
-        assert page_body_covered(rects, PAGE_W, PAGE_H, header_height=60.0) is True
+        """The printed page number lives there and is never redacted.
+
+        A rect covering everything below y=60 is 92% of the page, so with a
+        small band it clears the default threshold either way. The band has
+        to be large enough that counting it would drop the fraction below
+        the threshold, or this proves nothing.
+        """
+        rects = [{"x0": 0, "y0": 100, "x1": PAGE_W, "y1": PAGE_H}]
+        assert (PAGE_H - 100) / PAGE_H < 0.9, "the band cannot affect the outcome"
+        assert page_body_covered(rects, PAGE_W, PAGE_H, header_height=100.0) is True
+        assert page_body_covered(rects, PAGE_W, PAGE_H, header_height=0.0) is False
+
+    def test_the_defaults_are_what_they_claim(self):
+        """Pin the default band and threshold, which nothing else does."""
+        rects = [{"x0": 0, "y0": 60, "x1": PAGE_W, "y1": PAGE_H * 0.85}]
+        assert page_body_covered(rects, PAGE_W, PAGE_H) is False
+        assert page_body_covered(rects, PAGE_W, PAGE_H, min_coverage=0.8) is True
 
     def test_several_rects_add_up(self):
         rects = [

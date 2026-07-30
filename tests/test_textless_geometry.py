@@ -120,15 +120,28 @@ class TestClipHeadnoteRectWithoutWords:
         # Stops at the last line rather than running onto the platen band.
         assert clipped.y1 == pytest.approx(CONTENT.y1, abs=8.0)
 
-    def test_x_bounds_are_left_alone(self, bitonal):
-        """Narrowing a headnote rect horizontally is the unsafe direction."""
-        rect = fitz.Rect(CONTENT.x0, 150, CONTENT.x1, 400)
+    def test_x_bounds_never_cut_into_the_ink(self, bitonal):
+        """Narrowing past the text is the unsafe direction.
+
+        A rect wider than its text is legitimately tightened to it, so the
+        invariant is not "the edges do not move" but "they never end up
+        inside the ink". Measured against the ink in the same region, with
+        the rect reaching 30 pt beyond the text on each side so tightening
+        has something to do.
+        """
+        from blackletter.ink import ink_bbox
+
+        rect = fitz.Rect(CONTENT.x0 - 30, 150, CONTENT.x1 + 30, 400)
         with fitz.open(str(bitonal)) as doc:
+            page = doc[0]
+            measured = ink_bbox(page, rect)
             clipped = _clip_headnote_rect(
-                doc[0], rect, header_bottom=100.0, footer_top=PAGE_H, ocr_applied=False
+                page, rect, header_bottom=100.0, footer_top=PAGE_H, ocr_applied=False
             )
-        assert clipped.x0 <= rect.x0 + 3
-        assert clipped.x1 >= rect.x1 - 3
+        assert measured is not None
+        assert clipped.x0 <= measured[0] + 0.01, "left edge cut into the text"
+        assert clipped.x1 >= measured[2] - 0.01, "right edge cut into the text"
+        assert clipped.x0 < rect.x0 + 30, "no tightening happened at all"
 
 
 class TestOcrAppliedPrefersInk:
@@ -145,13 +158,29 @@ class TestOcrAppliedPrefersInk:
             bottom = _text_bottom(doc[0], clip, ocr_applied=True)
         assert bottom == pytest.approx(INK_BOTTOM, abs=6.0)
 
+    def test_the_ink_path_pads_like_the_words_path(self, bitonal):
+        """Both paths leave the same slack, so neither clips a glyph edge."""
+        from blackletter.ink import ink_bbox
+
+        rect = fitz.Rect(CONTENT.x0, 200, CONTENT.x1, 400)
+        with fitz.open(str(bitonal)) as doc:
+            page = doc[0]
+            measured = ink_bbox(page, rect)
+            tight = _tighten_to_text(page, rect)
+        assert measured is not None
+        assert tight.y0 == pytest.approx(measured[1] - 2.0, abs=0.01)
+        assert tight.y1 == pytest.approx(measured[3] + 2.0, abs=0.01)
+
     def test_tighten_follows_the_ink_when_ocr_applied(self, mixed):
         rect = fitz.Rect(CONTENT.x0 - 20, 150, CONTENT.x1 + 20, PAGE_H - 50)
         with fitz.open(str(mixed)) as doc:
             tight = _tighten_to_text(doc[0], rect, ocr_applied=True)
         assert tight is not None
         assert tight.y1 == pytest.approx(INK_BOTTOM, abs=8.0)
-        assert tight.y0 == pytest.approx(INK_TOP - FONT_SIZE, abs=10.0)
+        # abs must stay well under FONT_SIZE: a window that reaches INK_TOP
+        # cannot tell the top of the first line's glyphs from its baseline,
+        # which is a whole line of headnote text left visible.
+        assert tight.y0 == pytest.approx(INK_TOP - FONT_SIZE, abs=3.0)
 
     def test_headnote_rect_stops_at_the_ink(self, mixed):
         """The rect no longer stretches down to a stray OCR word."""

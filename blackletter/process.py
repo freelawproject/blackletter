@@ -281,12 +281,22 @@ def compute_redaction_rects(
     approved: set[tuple[int, int, int, int]] | None = None,
     skip_doctr: bool = False,
 ) -> list[dict]:
-    """Compute redaction rects per page, with text tightening.
+    """Compute redaction rects per page, finished against the detections.
 
-    Opens the PDF to tighten rects to actual text boundaries — matches
-    what _build_full_redacted would produce. approved detections bypass
-    the confidence threshold. Returns list of
-    {page_index, rects: [{x0, y0, x1, y1, fill: "black"|"white", type: str}]}.
+    Each rect is tightened to the content inside it, and headnote rects are
+    then snapped to their column box, cut at the headnote detections inside
+    them, and grown onto adjoining ink. ``approved`` detections bypass the
+    confidence threshold.
+
+    This is the authoritative geometry: ``_build_full_redacted`` derives
+    rects from detections alone and does not run those three passes, so a
+    caller that wants both a review payload and matching deliverables
+    should build the PDFs from this output (as ``cmd_process`` and
+    ``generate_files`` do via ``_build_redacted_from_rects``) rather than
+    calling both and expecting agreement.
+
+    :returns: List of ``{page_index, rects: [{x0, y0, x1, y1, fill:
+        "black"|"white", type: str}]}``, rects in image pixel coordinates.
     """
     pages_by_index = {p.index: p for p in document.pages}
     mid = document.pages[0].midpoint
@@ -504,7 +514,7 @@ def compute_redaction_rects(
         # ── Headnote rects, finished against the detections ──
         # Both passes work on the collected rects rather than inside the
         # loop above, because each needs every headnote rect on its page.
-        for src_idx, page_rects in result.items():
+        for src_idx, page_rects in list(result.items()):
             page = pages_by_index.get(src_idx)
             if page is None:
                 continue
@@ -528,17 +538,21 @@ def _grow_headnote_rects(fitz_page, page, rects: list[dict], ocr_applied: bool) 
     they do not: an edge snapped to a column box or cut at a detection is
     just as likely to clip a line as a side edge is to clip a character.
 
+    Runs whatever the page's text situation is, deliberately. The snap that
+    precedes it replaces each rect's side edges with the column box on any
+    page, so skipping this where words exist would leave those rects
+    narrowed with nothing putting the slack back, and a column box a few
+    points inside the text clips a character on every line it covers.
+
     Rects are modified in place, in image pixel coordinates.
 
     :param fitz_page: The PDF page the rects were measured against.
     :param page: The detected page, for its pixel-to-point scale.
     :param rects: That page's rect dicts.
-    :param ocr_applied: Whether the text layer came from our own OCR.
+    :param ocr_applied: Unused, kept so the call site reads consistently
+        with the other geometry helpers.
     """
-    from blackletter.scanner import _measure_from_ink
-
-    if not _measure_from_ink(fitz_page, ocr_applied):
-        return
+    del ocr_applied
     sx, sy = page.scale_x, page.scale_y
     for r in rects:
         if r.get("type") != "headnote":
@@ -632,7 +646,9 @@ def _snap_headnote_x_to_columns(page, rects: list[dict]) -> None:
     columns = [d for d in page.detections if d.label == Label.TEXT_COLUMN]
     if not columns:
         return
-    midpoint = page.img_width / 2
+    # The page's own midpoint, which column detection sets from the actual
+    # gutter, rather than half the image width.
+    midpoint = page.midpoint or page.img_width / 2
     for r in rects:
         if r.get("type") != "headnote":
             continue
@@ -654,9 +670,16 @@ def _split_headnote_rects_at_headnotes(page, rects: list[dict]) -> list[dict]:
     """Split each headnote rect at the ``HEADNOTE`` detections inside it.
 
     A headnote block runs from a marker to the end of its column, so one
-    rect can span several numbered headnotes with body text or a divider
-    between them. Cutting the rect at each detection's top edge blacks out
-    the headnotes and leaves whatever sits between them visible.
+    rect can span several numbered headnotes. Cutting it at each
+    detection's top edge turns one tall rect into several, which is what
+    lets the growth pass measure each piece against its own ink instead of
+    against the whole column, and stops one detection's descender from
+    dragging the entire block's edge.
+
+    The pieces still tile the rect: consecutive cuts run top edge to top
+    edge, so what is left uncovered is a ``HEADNOTE_SPLIT_GAP``-wide band
+    at each detection's top edge, not the space between the headnotes. This
+    does not reduce coverage, and is not meant to.
 
     :param page: The page whose detections to read.
     :param rects: That page's rect dicts, in image pixel coordinates.
@@ -704,12 +727,57 @@ def _split_headnote_rects_at_headnotes(page, rects: list[dict]) -> list[dict]:
     return out
 
 
+def _write_opinion_footnotes(
+    document,
+    pages_by_index: dict,
+    start_idx: int,
+    end_idx: int,
+    output_dir: Path,
+    base: str,
+) -> Path | None:
+    """Write one opinion's footnote PDF, from the source document.
+
+    Read from the source rather than the redacted copy, matching
+    ``split_opinions``: footnotes are the court's own text, and cutting
+    them out of a page that has already been blacked out would carry the
+    redactions into a file that does not need them.
+
+    :param document: The scanned document, for its source PDF and flags.
+    :param pages_by_index: Detected pages keyed by index.
+    :param start_idx: First page index of the opinion.
+    :param end_idx: Last page index of the opinion.
+    :param output_dir: Where to write the footnote PDF.
+    :param base: Filename stem of the opinion this belongs to.
+    :returns: The path written, or None when the opinion has no footnotes.
+    """
+    from blackletter.scanner import _extract_opinion_footnotes
+
+    footnotes = [
+        d
+        for src_idx in range(start_idx, end_idx + 1)
+        if src_idx in pages_by_index
+        for d in pages_by_index[src_idx].detections
+        if d.label == Label.FOOTNOTES
+    ]
+    if not footnotes:
+        return None
+    with fitz.open(str(document.pdf_path)) as src:
+        return _extract_opinion_footnotes(
+            src,
+            footnotes,
+            pages_by_index,
+            output_dir / f"{base}-footnotes.pdf",
+            skip_tighten=document.ocr_applied,
+        )
+
+
 def _split_from_redacted(
     redacted_pdf_path: Path,
     document,
     opinions: list[tuple],
     output_dir: Path,
     first_page: int = 1,
+    extract_footnotes: bool = False,
 ) -> list[Path]:
     """Split individual opinion PDFs from an already-redacted full PDF.
 
@@ -722,6 +790,11 @@ def _split_from_redacted(
     Filenames use actual page numbers from OCR.  When a page shows a range
     (e.g. "677-685"): opinion starting on that page uses the end number,
     opinion ending on that page uses the first number.
+
+    :param extract_footnotes: Also write a ``-footnotes.pdf`` per opinion,
+        from the source document, matching what ``split_opinions`` does.
+        Without this, asking for footnotes and getting rect-driven output
+        silently produces none.
     """
     pages_by_index = {p.index: p for p in document.pages}
     with fitz.open(str(redacted_pdf_path)) as redacted:
@@ -771,7 +844,13 @@ def _split_from_redacted(
                     if is_first or is_last:
                         outside_rects = list(
                             _outside_opinion_rects(
-                                page, fitz_page.rect.width, caption, key, is_first, is_last
+                                page,
+                                fitz_page.rect.width,
+                                caption,
+                                key,
+                                is_first,
+                                is_last,
+                                fitz_page=fitz_page,
                             )
                         )
                         for rect in outside_rects:
@@ -804,6 +883,11 @@ def _split_from_redacted(
 
                 out_pdf.save(str(out_path), garbage=4, deflate=True)
             paths.append(out_path)
+
+            if extract_footnotes:
+                _write_opinion_footnotes(
+                    document, pages_by_index, start_idx, end_idx, output_dir, base
+                )
 
             done = idx + 1
             if done % 20 == 0 or done == total:
@@ -1381,8 +1465,14 @@ def cmd_process(args: argparse.Namespace) -> None:
     full_redacted_name = f"{scan_name}.redacted.pdf"
     full_redacted_path = base_dir / full_redacted_name
     _t0 = _time.time()
-    print("\nBuilding full redacted PDF...", flush=True)
-    _build_full_redacted(document, opinions, full_redacted_path, excluded=excluded)
+    # Built from the rects written above, not recomputed from detections.
+    # ``compute_redaction_rects`` finishes each headnote rect against the
+    # page's detections (snapped to its column box, cut at the headnotes
+    # inside it, grown onto adjoining ink) and ``_build_full_redacted``
+    # does not, so recomputing here would put different geometry in the
+    # deliverable than the review JSON from the same run describes.
+    print("\nBuilding full redacted PDF from the computed rects...", flush=True)
+    _build_redacted_from_rects(document, rects_path, full_redacted_path)
     print(f"  Full redacted done ({_time.time() - _t0:.0f}s)", flush=True)
 
     # ── Unredacted ──
@@ -1410,14 +1500,15 @@ def cmd_process(args: argparse.Namespace) -> None:
         cb(0, 0, "Splitting redacted opinions...")
     _t0 = _time.time()
     print(f"\nSplitting redacted into {redacted_dir}...", flush=True)
-    redacted_paths = split_opinions(
-        document.pdf_path,
+    # Sliced out of the full redacted PDF for the same reason, so every
+    # deliverable in a run carries identical geometry.
+    redacted_paths = _split_from_redacted(
+        full_redacted_path,
         document,
+        opinions,
         redacted_dir,
         first_page=args.first_page,
-        redact_mode="redacted",
         extract_footnotes=args.footnotes,
-        excluded=excluded,
     )
     print(f"  Wrote {len(redacted_paths)} redacted PDFs ({_time.time() - _t0:.0f}s)", flush=True)
 
@@ -1470,13 +1561,13 @@ def reprocess_section(
     redactions: list[dict] | None = None,
     progress_callback=None,
 ) -> dict:
-    """Reprocess a section of an already-OCR'd PDF.
+    """Reprocess a section of a PDF.
 
     Extracts pages page_start..page_end (logical page numbers), runs YOLO
     detection, pairs opinions (with exclusions), and splits into PDFs.
 
     Args:
-        ocr_pdf_path: Path to the OCR'd (non-redacted) PDF.
+        ocr_pdf_path: Path to the source (non-redacted) PDF.
         output_dir: Directory to write new opinion PDFs.
         page_start: First logical page number of the section.
         page_end: Last logical page number (inclusive).
@@ -1910,7 +2001,14 @@ def generate_files(
     print(f"\nSplitting redacted into {redacted_dir}...", flush=True)
     if rects_path.exists():
         # Split from the already-redacted PDF so manual adjustments are preserved
-        _split_from_redacted(full_redacted_path, document, opinions, redacted_dir, first_page)
+        _split_from_redacted(
+            full_redacted_path,
+            document,
+            opinions,
+            redacted_dir,
+            first_page,
+            extract_footnotes=footnotes,
+        )
     else:
         split_opinions(
             document.pdf_path,

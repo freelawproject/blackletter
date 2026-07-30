@@ -52,6 +52,9 @@ _CACHE_ATTR = "_blackletter_ink_cache"
 def page_mask(fitz_page: fitz.Page, dpi: int = DPI) -> tuple[np.ndarray, float, float]:
     """Return a page's ink mask and its pixel-to-point scale factors.
 
+    Cached per page and resolution on the parent document; see
+    :func:`invalidate` if the page's pixels change.
+
     :param fitz_page: The PyMuPDF page to render.
     :param dpi: Render resolution.
     :return: ``(mask, sx, sy)`` where ``mask[y, x]`` is True for dark
@@ -125,7 +128,27 @@ BBOX_MAX_FRACTION = 0.9
 _CONTENT_BOX_ATTR = "_blackletter_content_box_cache"
 
 
-def content_box(fitz_page: fitz.Page) -> tuple[float, float, float, float] | None:
+def invalidate(page_or_doc) -> None:
+    """Drop the cached ink measurements for a document.
+
+    Both caches key on a page number and resolution, and a page's pixels
+    can change under them: ``apply_redactions`` blanks image data, and
+    anything drawn on a page changes what a fresh render would report.
+    Nothing in this library re-measures a page it has modified, but a
+    caller that redacts and then measures has to say so.
+
+    :param page_or_doc: A ``fitz.Page`` or ``fitz.Document``. A page
+        invalidates its whole document, since the cache holds one page.
+    """
+    doc = getattr(page_or_doc, "parent", page_or_doc)
+    for attr in (_CACHE_ATTR, _CONTENT_BOX_ATTR):
+        try:
+            delattr(doc, attr)
+        except AttributeError:
+            pass
+
+
+def content_box(fitz_page: fitz.Page, dpi: int = DPI) -> tuple[float, float, float, float] | None:
     """Return the page's printed-content box, measured from ink.
 
     Scanner artifacts along the page edges are the thing this has to
@@ -140,7 +163,11 @@ def content_box(fitz_page: fitz.Page) -> tuple[float, float, float, float] | Non
     stretch the box across the whole page even though the vertical span
     already excluded the bar.
 
-    Cached per page on the parent document.
+    Cached per page and resolution on the parent document; see
+    :func:`invalidate` if the page's pixels change.
+
+    :param dpi: Render resolution, which must match what the caller passes
+        to :func:`page_mask` or the two disagree about the page.
 
     :param fitz_page: The page to measure.
     :return: ``(left, top, right, bottom)`` in PDF points, or None when
@@ -148,19 +175,19 @@ def content_box(fitz_page: fitz.Page) -> tuple[float, float, float, float] | Non
     """
     doc = fitz_page.parent
     cached = getattr(doc, _CONTENT_BOX_ATTR, None)
-    if cached is not None and cached[0] == fitz_page.number:
+    if cached is not None and cached[0] == (fitz_page.number, dpi):
         return cached[1]
 
-    box = _measure_content_box(fitz_page)
-    setattr(doc, _CONTENT_BOX_ATTR, (fitz_page.number, box))
+    box = _measure_content_box(fitz_page, dpi)
+    setattr(doc, _CONTENT_BOX_ATTR, ((fitz_page.number, dpi), box))
     return box
 
 
 def _measure_content_box(
-    fitz_page: fitz.Page,
+    fitz_page: fitz.Page, dpi: int = DPI
 ) -> tuple[float, float, float, float] | None:
     """Uncached body of :func:`content_box`."""
-    ink, sx, sy = page_mask(fitz_page)
+    ink, sx, sy = page_mask(fitz_page, dpi)
     if not ink.size:
         return None
     img_height, img_width = ink.shape
@@ -345,6 +372,16 @@ def _grow_edge(
     return grown
 
 
+def _refuse_at_limit(grown: int, budget: int) -> int:
+    """Discard growth that consumed its whole margin.
+
+    :param grown: Lines the walk moved by.
+    :param budget: Lines the margin allowed.
+    :return: ``grown``, or 0 when the walk never found the end of the ink.
+    """
+    return 0 if budget and grown >= budget else grown
+
+
 def grow_to_ink(
     fitz_page: fitz.Page,
     rect: fitz.Rect,
@@ -361,10 +398,25 @@ def grow_to_ink(
     the resulting bounds could fall outside it. Ink measured strictly
     inside a rect has no such slack, so it is added back here.
 
-    Growth stops at the first blank row/column, so it takes in the rest of
-    a clipped character or line and nothing more, and never leaves the
-    page's content box (which keeps it out of the platen bands along the
-    page edges).
+    Growth stops at the first blank row or column, so it takes in the rest
+    of a clipped character or line and nothing more, and it stops at the
+    page's content box, which keeps it out of the platen bands along the
+    page edges (on a page with no measurable content box there is nothing
+    to stop it, so it can reach an artifact).
+
+    An edge that runs the whole way to its margin without finding blank
+    space is refused rather than moved: the walk never found the end of the
+    ink, so it has learned nothing about where this rect should stop, and
+    moving it by exactly the margin would be arbitrary. That case is real
+    rather than theoretical. Where a rect's edge falls inside the pixel
+    column that holds a sub-point gutter, the walk starts past that column
+    (see :func:`_outside_after`) and the neighbouring column's text is the
+    next ink it meets, so without this an edge would swallow up to
+    ``margin_x`` of the facing column.
+
+    An edge that does not grow keeps its exact coordinate, so a rect with
+    nothing to grow onto is returned unchanged rather than snapped outward
+    to the pixel grid.
 
     :param fitz_page: The page to measure.
     :param rect: Rect to grow, in PDF points.
@@ -396,19 +448,29 @@ def grow_to_ink(
     # will do.
     out_left = _outside_before(region.x0, sx)
     out_right = _outside_after(region.x1, sx)
-    left = _grow_edge(
-        col_counts,
-        out_left,
-        -1,
-        min(int(margin_x / sx), max(0, out_left - int(lim_x0 / sx) + 1)),
-        min_cols,
+    # Budget and room are kept apart on purpose: an edge that stops because
+    # it reached the content box has found a real boundary, while one that
+    # stops because it ran out of margin has not (see the docstring).
+    budget_x = int(margin_x / sx)
+    left = _refuse_at_limit(
+        _grow_edge(
+            col_counts,
+            out_left,
+            -1,
+            min(budget_x, max(0, out_left - int(lim_x0 / sx) + 1)),
+            min_cols,
+        ),
+        budget_x,
     )
-    right = _grow_edge(
-        col_counts,
-        out_right,
-        1,
-        min(int(margin_x / sx), max(0, int(lim_x1 / sx) - out_right + 1)),
-        min_cols,
+    right = _refuse_at_limit(
+        _grow_edge(
+            col_counts,
+            out_right,
+            1,
+            min(budget_x, max(0, int(lim_x1 / sx) - out_right + 1)),
+            min_cols,
+        ),
+        budget_x,
     )
     c0 = min(c0, out_left - left + 1)
     c1 = max(c1, out_right + right)
@@ -417,26 +479,33 @@ def grow_to_ink(
     min_rows = max(1, int((c1 - c0) * 0.01))
     out_top = _outside_before(region.y0, sy)
     out_bottom = _outside_after(region.y1, sy)
-    top = _grow_edge(
-        row_counts,
-        out_top,
-        -1,
-        min(int(margin_y / sy), max(0, out_top - int(lim_y0 / sy) + 1)),
-        min_rows,
+    budget_y = int(margin_y / sy)
+    top = _refuse_at_limit(
+        _grow_edge(
+            row_counts,
+            out_top,
+            -1,
+            min(budget_y, max(0, out_top - int(lim_y0 / sy) + 1)),
+            min_rows,
+        ),
+        budget_y,
     )
-    bottom = _grow_edge(
-        row_counts,
-        out_bottom,
-        1,
-        min(int(margin_y / sy), max(0, int(lim_y1 / sy) - out_bottom + 1)),
-        min_rows,
+    bottom = _refuse_at_limit(
+        _grow_edge(
+            row_counts,
+            out_bottom,
+            1,
+            min(budget_y, max(0, int(lim_y1 / sy) - out_bottom + 1)),
+            min_rows,
+        ),
+        budget_y,
     )
 
     return fitz.Rect(
-        min(rect.x0, (out_left - left + 1) * sx),
-        min(rect.y0, (out_top - top + 1) * sy),
-        max(rect.x1, (out_right + right) * sx),
-        max(rect.y1, (out_bottom + bottom) * sy),
+        min(rect.x0, (out_left - left + 1) * sx) if left else rect.x0,
+        min(rect.y0, (out_top - top + 1) * sy) if top else rect.y0,
+        max(rect.x1, (out_right + right) * sx) if right else rect.x1,
+        max(rect.y1, (out_bottom + bottom) * sy) if bottom else rect.y1,
     )
 
 
@@ -447,6 +516,10 @@ def has_text_layer(pdf_path: str | Path, sample_pages: int = 5) -> bool:
     either went through :func:`blackletter.api.ocr` and has a text layer
     on every page, or it is a bitonal scan and has one on none of them.
 
+    A PDF that cannot be opened or read reports False: a caller asking
+    this wants to know whether to expect words, and an unreadable file has
+    none. It is therefore not a way to check that a file is a valid PDF.
+
     :param pdf_path: PDF to inspect.
     :param sample_pages: How many leading pages to sample.
     :return: True if any sampled page yields text.
@@ -456,6 +529,6 @@ def has_text_layer(pdf_path: str | Path, sample_pages: int = 5) -> bool:
             for page_idx in range(min(sample_pages, doc.page_count)):
                 if doc[page_idx].get_text("text").strip():
                     return True
-    except Exception:
+    except (RuntimeError, OSError, ValueError, fitz.FileDataError):
         return False
     return False

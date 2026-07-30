@@ -63,6 +63,20 @@ CORNER_NUMBER_X = 40.0
 # text (the case that stretched ink measurements to the page edge).
 BOTTOM_BAR = fitz.Rect(120, PAGE_H - 10, 500, PAGE_H - 4)
 
+# A solid band that overlaps the top of the first line of text, like a
+# gutter shadow reaching into the type. The overlap is the point: a band
+# merely adjacent to the text still leaves a row or two of white before the
+# glyph tops, and growth stops there whether or not anything clamps it. The content
+# box excludes it (a mostly-dark row is not text) while the ink runs
+# continuously across that boundary, so growth can only be stopped by the
+# clamp rather than by white space.
+TOUCHING_BAR = fitz.Rect(0, CONTENT.y0 - 8, PAGE_W, CONTENT.y0 + 6)
+
+# An image inside the text column but below the last line, like a key icon
+# at the foot of a page. margins._text_bounds extends the content box
+# vertically to take these in.
+IMAGE_BLOCK = fitz.Rect(200, CONTENT.y1 + 12, 240, CONTENT.y1 + 52)
+
 
 def _line_for_width(width: float) -> str:
     """Return a body-text line that just fits ``width`` at FONT_SIZE.
@@ -86,6 +100,8 @@ def write_text_page(
     bleed_mark: bool = False,
     stray_mark: bool = False,
     corner_number: bool = False,
+    image_block: bool = False,
+    touching_bar: bool = False,
 ) -> None:
     """Write a one-page PDF with real text filling :data:`CONTENT`.
 
@@ -98,6 +114,10 @@ def write_text_page(
     :param stray_mark: Paint :data:`STRAY_MARK`.
     :param corner_number: Print a page number at :data:`CORNER_NUMBER_X`,
         outside the text columns.
+    :param image_block: Place an image below the text block, inside the
+        text column, like a key icon at the foot of a page. Only the text
+        layer sees it as an image block.
+    :param touching_bar: Paint :data:`TOUCHING_BAR`.
     """
     line = _line_for_width(CONTENT.width)
     with fitz.open() as doc:
@@ -110,11 +130,17 @@ def write_text_page(
         while y <= CONTENT.y1:
             page.insert_text((CONTENT.x0, y), line, fontsize=FONT_SIZE)
             y += LINE_LEADING
+        if image_block:
+            img = Image.new("L", (40, 40), color=0)
+            buf = io.BytesIO()
+            img.save(buf, format="PNG")
+            page.insert_image(IMAGE_BLOCK, stream=buf.getvalue())
         for draw, rect in (
             (top_bar, TOP_BAR),
             (bottom_bar, BOTTOM_BAR),
             (bleed_mark, BLEED_MARK),
             (stray_mark, STRAY_MARK),
+            (touching_bar, TOUCHING_BAR),
         ):
             if draw:
                 page.draw_rect(rect, fill=(0, 0, 0), width=0)
@@ -150,6 +176,7 @@ def write_bitonal_page(
     bleed_mark: bool = False,
     stray_mark: bool = False,
     corner_number: bool = False,
+    touching_bar: bool = False,
     tmp_dir: Path | None = None,
 ) -> None:
     """Write a text-less, 1-bit version of :func:`write_text_page`.
@@ -161,6 +188,7 @@ def write_bitonal_page(
     :param bleed_mark: Paint :data:`BLEED_MARK` before rasterizing.
     :param stray_mark: Paint :data:`STRAY_MARK` before rasterizing.
     :param corner_number: Print a page number outside the text columns.
+    :param touching_bar: Paint :data:`TOUCHING_BAR` before rasterizing.
     :param tmp_dir: Directory for the intermediate text PDF. Defaults to
         ``path``'s parent.
     """
@@ -174,7 +202,46 @@ def write_bitonal_page(
         bleed_mark=bleed_mark,
         stray_mark=stray_mark,
         corner_number=corner_number,
+        touching_bar=touching_bar,
     )
+    rasterize(src, path)
+
+
+def write_multi_page(
+    path: Path,
+    kinds: list[str],
+    tmp_dir: Path | None = None,
+) -> None:
+    """Write a text-less PDF whose pages differ from one another.
+
+    Single-page fixtures cannot catch a per-page cache that returns the
+    wrong page's measurement, so this builds pages that disagree: a
+    ``"body"`` page has a full text block, ``"narrow"`` has only a couple
+    of characters (so its content box is unmeasurable), and ``"blank"`` has
+    nothing at all.
+
+    :param path: Where to write the PDF.
+    :param kinds: One entry per page: ``"body"``, ``"narrow"`` or
+        ``"blank"``.
+    :param tmp_dir: Directory for the intermediate text PDF. Defaults to
+        ``path``'s parent.
+    """
+    tmp_dir = tmp_dir or path.parent
+    src = tmp_dir / f"{path.stem}.text.pdf"
+    line = _line_for_width(CONTENT.width)
+    with fitz.open() as doc:
+        for kind in kinds:
+            page = doc.new_page(width=PAGE_W, height=PAGE_H)
+            if kind == "body":
+                y = CONTENT.y0 + FONT_SIZE
+                while y <= CONTENT.y1:
+                    page.insert_text((CONTENT.x0, y), line, fontsize=FONT_SIZE)
+                    y += LINE_LEADING
+            elif kind == "narrow":
+                page.insert_text((280, 400), "12", fontsize=FONT_SIZE)
+            elif kind != "blank":
+                raise ValueError(f"unknown page kind: {kind}")
+        doc.save(str(src))
     rasterize(src, path)
 
 
@@ -235,6 +302,42 @@ def detected_page(detections: list[Detection], page_index: int = 0) -> Page:
 COLUMN_GAP = 1.5
 COLUMN_LEFT = fitz.Rect(72, 100, 300, 700)
 COLUMN_RIGHT = fitz.Rect(COLUMN_LEFT.x1 + COLUMN_GAP, 100, 540, 700)
+
+
+def write_two_column_text_page(path: Path, tmp_dir: Path | None = None) -> None:
+    """Write a text-less, 1-bit page with two columns of *typeset* lines.
+
+    The companion to :func:`write_two_column_page`, which draws each row as
+    a solid filled rect. Solid rows are 76% dark, above
+    ``ink.CONTENT_MAX_FRACTION``, so every content row there reads as a
+    solid bar and the page's content box comes out artifact-driven. Real
+    text is sparse enough to measure, and each row here carries a different
+    slice of the sentence so inter-character gaps do not line up into
+    full-height white channels the way they do in :func:`write_text_page`.
+
+    :param path: Where to write the PDF.
+    :param tmp_dir: Directory for the intermediate PDF. Defaults to
+        ``path``'s parent.
+    """
+    tmp_dir = tmp_dir or path.parent
+    src = tmp_dir / f"{path.stem}.text.pdf"
+    sentence = BODY_SENTENCE * 4
+    with fitz.open() as doc:
+        page = doc.new_page(width=PAGE_W, height=PAGE_H)
+        for band in (COLUMN_LEFT, COLUMN_RIGHT):
+            y = band.y0 + FONT_SIZE
+            row = 0
+            while y <= band.y1:
+                # A different starting offset per row de-aligns the gaps.
+                start = (row * 7) % (len(sentence) // 2)
+                text = sentence[start:]
+                while fitz.get_text_length(text, fontsize=FONT_SIZE) > band.width:
+                    text = text[:-1]
+                page.insert_text((band.x0, y), text, fontsize=FONT_SIZE)
+                y += LINE_LEADING
+                row += 1
+        doc.save(str(src))
+    rasterize(src, path)
 
 
 def write_two_column_page(path: Path, tmp_dir: Path | None = None) -> None:

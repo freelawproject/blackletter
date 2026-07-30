@@ -367,8 +367,10 @@ def add_text_layer(
         calling process, which is also what happens for a single file.
     :param progress_callback: Optional callable invoked with
         ``(files_done, total_files, message)``.
-    :returns: The files that were given a text layer. Files skipped as
-        already searchable are not included.
+    :returns: The files a text layer was run over, sorted by path. Files
+        skipped as already searchable are not included; with
+        ``skip_existing`` False a file whose every page already had text is
+        still listed, since the pass ran even though it added nothing.
     """
     from blackletter.ocr import needs_ocr
 
@@ -416,7 +418,9 @@ def add_text_layer(
         f"  Text layer added to {len(written)}/{total} PDFs ({time.time() - t0:.0f}s)",
         flush=True,
     )
-    return written
+    # Workers finish out of order, so sort rather than return whichever
+    # order the pool happened to complete in.
+    return sorted(written)
 
 
 def _collect_pdfs(paths: str | Path | Iterable[str | Path]) -> list[Path]:
@@ -437,7 +441,10 @@ def _collect_pdfs(paths: str | Path | Iterable[str | Path]) -> list[Path]:
             out.append(path)
         else:
             raise FileNotFoundError(path)
-    return out
+    # A caller naming both a file and its directory should not have it
+    # processed twice, which with a worker pool means two workers OCRing
+    # the same file at once.
+    return list(dict.fromkeys(p.resolve() for p in out))
 
 
 def detect(
@@ -613,7 +620,7 @@ def pair(
     """Pair opinions from detections.
 
     :param detections: Detection list or path to detections.json.
-    :param pdf_path: Path to the OCR'd PDF.
+    :param pdf_path: Path to the PDF to work from.
     :param reporter: Reporter abbreviation (e.g. ``"a3d"``).
     :param volume: Volume number (e.g. ``"333"``).
     :param first_page: First page number of the volume.
@@ -714,7 +721,7 @@ def compute_rects(
     Reads detections.json from *output_dir*, pairs opinions, and writes
     redaction_rects.json back into *output_dir*.
 
-    :param pdf_path: Path to the OCR'd PDF.
+    :param pdf_path: Path to the PDF to work from.
     :param output_dir: Directory containing detections.json.
     :param excluded: Set of page indices to exclude from pairing.
     :param approved: Set of page indices pre-approved for redaction.
@@ -753,7 +760,7 @@ def build_redacted(
 ) -> Path:
     """Build the full redacted PDF from precomputed rects.
 
-    :param pdf_path: Path to the OCR'd PDF.
+    :param pdf_path: Path to the PDF to work from.
     :param output_dir: Directory containing detections.json and where the
         redacted PDF will be written.
     :param rects: Path to a redaction_rects.json file. If ``None``, uses
@@ -890,20 +897,35 @@ def build_redactions(
         each rect carrying ``fill`` and ``type``.
     :param margin_rects: ``[{"page_index", "rects"}]`` in PDF points.
     :param opinions: Opinion dicts, as ``pair`` produces them. Given a
-        reporter and volume, each gains a ``filename``.
+        reporter and volume, each gains a ``filename``. Modified in place
+        and returned inside the payload, rather than copied.
     :param reporter: Reporter abbreviation for the output filenames.
     :param volume: Volume number for the output filenames.
     :returns: ``{"opinions": [...], "pages": {"<index>": [rect, ...]}}``,
-        all coordinates in PDF points.
+        all coordinates in PDF points. Pages absent from both rect lists
+        are absent from ``pages``.
     """
     by_index = {p.index: p for p in pages}
 
     prefix = f"{reporter}.{volume}" if reporter and volume else ""
-    for op in opinions:
-        if prefix:
-            first = op.get("first_page_number", 0)
-            last = op.get("last_page_number", first)
-            op["filename"] = f"{prefix}.{first:04d}-{last:04d}.pdf"
+    if prefix:
+        # Two opinions can share a page range, and ``generate`` suffixes the
+        # duplicates -1, -2. Doing the same here means the names in this
+        # payload are the names that end up on disk, which is the only
+        # reason to carry them.
+        stems = [
+            f"{prefix}.{op.get('first_page_number', 0):04d}-"
+            f"{op.get('last_page_number', op.get('first_page_number', 0)):04d}"
+            for op in opinions
+        ]
+        counts = Counter(stems)
+        seen: dict[str, int] = {}
+        for op, stem in zip(opinions, stems, strict=True):
+            if counts[stem] > 1:
+                seen[stem] = seen.get(stem, 0) + 1
+                op["filename"] = f"{stem}-{seen[stem]}.pdf"
+            else:
+                op["filename"] = f"{stem}.pdf"
 
     combined: dict[int, list[dict]] = {}
 
@@ -972,7 +994,7 @@ def generate(
 
     Builds in one pass per page (no layering).
 
-    :param pdf_path: Path to the source (OCR'd) PDF.
+    :param pdf_path: Path to the source PDF.
     :param redactions: Path to redactions.json, or the parsed dict.
     :param output_dir: Base output directory.
     :param reporter: Reporter abbreviation for filenames (e.g.
@@ -1069,11 +1091,13 @@ def generate(
 
             fitz_page.apply_redactions()
 
-            # apply_redactions paints each rect with a fill *and* a 1pt
-            # stroke straddling its edge, and it strokes after filling, so
-            # where a black rect meets a white one the outer half of the
-            # black stroke survives as a hairline in the output. Repainting
-            # fill-only, in the same order, covers it.
+            # PyMuPDF has painted each redaction as a fill *and* a 1pt
+            # stroke straddling its edge, strokes last, which left a hairline
+            # wherever a black rect met a white one; that was visible in real
+            # deliverables. It does not reproduce on 1.26.7, so treat this as
+            # insurance rather than a fix: repainting fill-only in the same
+            # order costs one op per rect and covers the case if a future
+            # version strokes again. The CLI path has always done it.
             for rect, fill in applied:
                 fitz_page.draw_rect(rect, fill=fill, color=None, width=0)
 

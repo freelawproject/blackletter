@@ -13,6 +13,7 @@ the worker pool; the pool's own arithmetic is covered separately.
 
 from __future__ import annotations
 
+import inspect
 import sys
 from types import SimpleNamespace
 
@@ -43,7 +44,16 @@ def fake_ocrmypdf(monkeypatch):
     """Stand in for ocrmypdf, recording calls and writing a marked file."""
     calls = []
 
+    # Captured before the stub replaces the module: real ocrmypdf takes
+    # **kwargs and silently ignores names it does not know, so a misspelled
+    # option would pass unnoticed, and its own signature is the only guard.
+    import ocrmypdf
+
+    allowed = set(inspect.signature(ocrmypdf.ocr).parameters) - {"kwargs"}
+
     def _ocr(src, dst, **kwargs):
+        unknown = set(kwargs) - allowed
+        assert not unknown, f"ocrmypdf does not take {sorted(unknown)}"
         calls.append({"src": src, "dst": dst, **kwargs})
         with fitz.open(src) as doc:
             doc.save(dst)
@@ -150,6 +160,19 @@ class TestAddTextLayer:
         # to be cleaned up or it ships alongside the deliverable.
         assert sorted(p.name for p in tmp_path.iterdir()) == ["op.pdf", "scratch"]
 
+    def test_the_returned_list_is_sorted(self, tmp_path, scratch, fake_ocrmypdf):
+        """Order must not depend on which worker finished first.
+
+        With a pool the completion order is arbitrary, so the serial and
+        parallel paths would otherwise return different lists for the same
+        input.
+        """
+        names = ["c.pdf", "a.pdf", "b.pdf"]
+        for name in names:
+            write_bitonal_page(tmp_path / name, tmp_dir=scratch)
+        written = add_text_layer([tmp_path / n for n in names], jobs=1)
+        assert [p.name for p in written] == ["a.pdf", "b.pdf", "c.pdf"]
+
     def test_walks_a_directory_of_opinions(self, tmp_path, scratch, fake_ocrmypdf):
         opinions = tmp_path / "redacted"
         opinions.mkdir()
@@ -195,6 +218,39 @@ class TestAddTextLayer:
         add_text_layer(pdf, language="deu", optimize=3, jobs=1)
         assert fake_ocrmypdf[0]["language"] == ["deu"]
         assert fake_ocrmypdf[0]["optimize"] == 3
+
+    def test_every_argument_is_pinned(self, tmp_path, scratch, fake_ocrmypdf):
+        """The whole call, so a changed default cannot slip through.
+
+        Values are checked against ocrmypdf's own options model, which does
+        validate them, unlike the stub.
+        """
+        pdf = tmp_path / "op.pdf"
+        write_bitonal_page(pdf, tmp_dir=scratch)
+        add_text_layer(pdf, jobs=1)
+        call = dict(fake_ocrmypdf[0])
+        assert call.pop("src") == str(pdf)
+        assert call.pop("dst").startswith(str(tmp_path))
+        assert call == {
+            "pdf_renderer": "auto",
+            "optimize": 1,
+            "output_type": "pdf",
+            "language": ["eng"],
+            "skip_text": True,
+            "tesseract_timeout": 120,
+            "progress_bar": False,
+        }
+
+    def test_a_misnamed_option_would_be_caught(self, tmp_path, scratch, fake_ocrmypdf):
+        """Proof that the stub's signature check does something.
+
+        ``skiptext`` is a plausible typo for ``skip_text``, and the real
+        library accepts it silently, so nothing but this catches it.
+        """
+        pdf = tmp_path / "op.pdf"
+        write_bitonal_page(pdf, tmp_dir=scratch)
+        with pytest.raises(AssertionError, match="does not take"):
+            sys.modules["ocrmypdf"].ocr(str(pdf), str(pdf), skiptext=True)
 
 
 class TestWorkerCount:

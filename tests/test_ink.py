@@ -11,7 +11,14 @@ from __future__ import annotations
 import fitz
 import pytest
 
-from blackletter.ink import content_box, grow_to_ink, has_text_layer, ink_bbox, page_mask
+from blackletter.ink import (
+    content_box,
+    grow_to_ink,
+    has_text_layer,
+    ink_bbox,
+    invalidate,
+    page_mask,
+)
 from tests.pdf_fixtures import (
     BOTTOM_BAR,
     COLUMN_LEFT,
@@ -20,7 +27,10 @@ from tests.pdf_fixtures import (
     HEADER_LINE_Y,
     PAGE_H,
     PAGE_W,
+    TOUCHING_BAR,
+    rasterize,
     write_bitonal_page,
+    write_multi_page,
     write_text_page,
     write_two_column_page,
 )
@@ -53,6 +63,31 @@ class TestContentBox:
         assert top > 12, "top bar counted as content"
         assert bottom < BOTTOM_BAR.y0, "bottom bar counted as content"
 
+    def test_a_solid_bar_next_to_the_text_is_still_excluded(self, tmp_path):
+        """Isolates the mostly-dark rule from the gap rule.
+
+        A band far from the text is excluded by either rule, so neither is
+        pinned. This one sits inside bridging distance, close enough that
+        the gap rule takes it for part of the text block, leaving only
+        ``CONTENT_MAX_FRACTION`` to keep it out.
+        """
+        pdf = tmp_path / "near_bar.pdf"
+        src = tmp_path / "near_bar.text.pdf"
+        write_text_page(src)
+        with fitz.open(str(src)) as doc:
+            page = doc[0]
+            page.draw_rect(
+                fitz.Rect(0, CONTENT.y0 - 20, PAGE_W, CONTENT.y0 - 12),
+                fill=(0, 0, 0),
+                width=0,
+            )
+            doc.save(str(tmp_path / "near_bar.src.pdf"))
+        rasterize(tmp_path / "near_bar.src.pdf", pdf)
+        _left, top, _right, _bottom = self._box(pdf)
+        # The box may start at the bar's lower edge, since the white gap
+        # below it is bridged, but must not take in the bar's own rows.
+        assert top >= CONTENT.y0 - 12 - 1, "a full-width bar was taken for text"
+
     def test_none_for_blank_page(self, tmp_path):
         pdf = tmp_path / "blank.pdf"
         with fitz.open() as doc:
@@ -75,6 +110,52 @@ class TestContentBox:
             first = content_box(doc[0])
             with_cache = content_box(doc[0])
         assert first is with_cache
+
+    def test_each_page_gets_its_own_measurement(self, tmp_path):
+        """The cache holds one page, so it must check which page it holds.
+
+        Every other fixture here is a single page, which cannot tell a
+        working key from a missing one. These three pages disagree: only the
+        first has a measurable content box.
+        """
+        pdf = tmp_path / "multi.pdf"
+        write_multi_page(pdf, ["body", "narrow", "blank"], tmp_dir=tmp_path)
+        with fitz.open(str(pdf)) as doc:
+            assert content_box(doc[0]) is not None
+            assert content_box(doc[1]) is None
+            assert content_box(doc[2]) is None
+
+    def test_the_answer_does_not_depend_on_visit_order(self, tmp_path):
+        pdf = tmp_path / "multi.pdf"
+        write_multi_page(pdf, ["narrow", "body"], tmp_dir=tmp_path)
+        with fitz.open(str(pdf)) as doc:
+            forward = [content_box(doc[i]) for i in (0, 1)]
+        with fitz.open(str(pdf)) as doc:
+            backward = [content_box(doc[i]) for i in (1, 0)][::-1]
+        assert forward == backward
+        assert forward[0] is None and forward[1] is not None
+
+    def test_the_mask_is_per_page_too(self, tmp_path):
+        pdf = tmp_path / "multi.pdf"
+        write_multi_page(pdf, ["body", "blank"], tmp_dir=tmp_path)
+        with fitz.open(str(pdf)) as doc:
+            body, _sx, _sy = page_mask(doc[0])
+            blank, _sx, _sy = page_mask(doc[1])
+            assert body.any(), "the body page measured as blank"
+            assert not blank.any(), "the blank page got the body page's mask"
+
+    def test_invalidate_drops_a_stale_measurement(self, tmp_path):
+        """A page whose pixels change must be re-measurable."""
+        pdf = tmp_path / "clean.pdf"
+        write_bitonal_page(pdf)
+        with fitz.open(str(pdf)) as doc:
+            page = doc[0]
+            assert content_box(page) is not None
+            page.add_redact_annot(page.rect, fill=(1, 1, 1))
+            page.apply_redactions()
+            assert content_box(page) is not None, "expected the stale answer"
+            invalidate(page)
+            assert content_box(page) is None, "re-measured a blank page as content"
 
 
 class TestInkBbox:
@@ -139,6 +220,19 @@ class TestHasTextLayer:
     def test_false_for_unreadable_path(self, tmp_path):
         assert has_text_layer(tmp_path / "nope.pdf") is False
 
+    def test_pages_beyond_the_first_are_sampled(self, tmp_path):
+        """A volume whose front matter is blank still has a text layer."""
+        pdf = tmp_path / "late_text.pdf"
+        src = tmp_path / "late_text.src.pdf"
+        with fitz.open() as doc:
+            doc.new_page(width=PAGE_W, height=PAGE_H)
+            doc.new_page(width=PAGE_W, height=PAGE_H)
+            doc[1].insert_text((72, 200), "words on the second page", fontsize=9)
+            doc.save(str(src))
+        src.replace(pdf)
+        assert has_text_layer(pdf) is True
+        assert has_text_layer(pdf, sample_pages=1) is False
+
 
 class TestGrowToInk:
     """Tests for ``grow_to_ink``.
@@ -182,11 +276,74 @@ class TestGrowToInk:
         grown = self._grow(pdf, block)
         assert grown.y0 > HEADER_LINE_Y + 4, "swallowed the header"
 
-    def test_stays_off_the_platen_band(self, pdf):
-        """A rect at the foot of the page does not grow onto the edge band."""
-        tail = fitz.Rect(CONTENT.x0, 600, CONTENT.x1, CONTENT.y1)
-        grown = self._grow(pdf, tail)
-        assert grown.y1 < BOTTOM_BAR.y0
+    def test_stays_inside_the_content_box_where_ink_crosses_it(self, tmp_path):
+        """Growth stops at the content box, not merely at its own margin.
+
+        The band here touches the first line of text, so the ink runs
+        continuously from inside the content box into an artifact the box
+        excludes. Nothing else can stop the walk: there is no white space to
+        break on, and the margin is set well past the band.
+        """
+        pdf = tmp_path / "touching.pdf"
+        write_bitonal_page(pdf, touching_bar=True, tmp_dir=tmp_path)
+        with fitz.open(str(pdf)) as doc:
+            page = doc[0]
+            box = content_box(page)
+            assert box is not None
+            assert box[1] > TOUCHING_BAR.y1, "the band was taken for content"
+            rect = fitz.Rect(CONTENT.x0, box[1] + 2, CONTENT.x1, 300)
+            grown = grow_to_ink(page, rect, margin_y=60.0)
+        assert grown.y0 == pytest.approx(box[1], abs=1.0), "did not stop at the box"
+        assert grown.y0 > TOUCHING_BAR.y1, "grew onto the band"
+
+    def test_growth_never_pushes_an_edge_outside_the_content_box(self, pdf):
+        """Each edge is either untouched or inside the box, for any rect."""
+        with fitz.open(str(pdf)) as doc:
+            page = doc[0]
+            box = content_box(page)
+            assert box is not None
+            for rect in (
+                fitz.Rect(CONTENT.x0, 600, CONTENT.x1, BOTTOM_BAR.y0 - 1),
+                fitz.Rect(CONTENT.x0, CONTENT.y0 + 4, CONTENT.x1, 300),
+                fitz.Rect(CONTENT.x0 + 5, 200, CONTENT.x1 - 5, 400),
+                fitz.Rect(0, 0, PAGE_W, PAGE_H),
+            ):
+                grown = grow_to_ink(page, rect)
+                for edge, low, limit in (
+                    (grown.x0, rect.x0, box[0]),
+                    (grown.y0, rect.y0, box[1]),
+                ):
+                    assert edge == low or edge >= limit - 1e-6, rect
+                for edge, high, limit in (
+                    (grown.x1, rect.x1, box[2]),
+                    (grown.y1, rect.y1, box[3]),
+                ):
+                    assert edge == high or edge <= limit + 1e-6, rect
+
+    def test_an_edge_that_never_finds_blank_space_is_refused(self, tmp_path):
+        """Growth that consumes its whole margin has learned nothing.
+
+        A rect floating inside a solid band has ink for the full margin in
+        both directions, so each walk runs to its limit. Moving the edge by
+        exactly the margin would be arbitrary, and on a page whose gutter is
+        thinner than a measuring pixel it is how a mask reaches the facing
+        column. Vertically the band does have gaps between its lines, so
+        that axis is disabled here to isolate the rule.
+        """
+        pdf = tmp_path / "band.pdf"
+        write_two_column_page(pdf, tmp_dir=tmp_path)
+        inside = fitz.Rect(COLUMN_LEFT.x0 + 60, 200, COLUMN_LEFT.x1 - 60, 400)
+        with fitz.open(str(pdf)) as doc:
+            grown = grow_to_ink(doc[0], inside, margin_y=0.0)
+        assert (grown.x0, grown.x1) == (inside.x0, inside.x1), (
+            "moved by the margin instead of refusing"
+        )
+
+    def test_a_rect_with_nothing_to_grow_onto_is_returned_exactly(self, pdf):
+        """No growth means no movement, not a snap to the pixel grid."""
+        blank = fitz.Rect(200.0, 70.3, 300.0, 90.7)
+        grown = self._grow(pdf, blank)
+        assert tuple(grown) == tuple(blank)
 
     def test_never_shrinks(self, pdf):
         """Growth only ever adds coverage."""

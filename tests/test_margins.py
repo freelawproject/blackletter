@@ -24,6 +24,7 @@ from tests.pdf_fixtures import (
     CONTENT,
     CORNER_NUMBER_X,
     HEADER_LINE_Y,
+    IMAGE_BLOCK,
     PAGE_H,
     PAGE_W,
     STRAY_MARK,
@@ -204,6 +205,17 @@ class TestComputeMarginRects:
         rasterize(src, raster)
         assert _rects_for(compute_margin_rects(raster)) == []
 
+    def test_an_image_below_the_text_extends_the_content_box(self, tmp_path):
+        """A key icon at the foot of a page is content, not an artifact."""
+        plain = tmp_path / "plain.pdf"
+        with_icon = tmp_path / "icon.pdf"
+        write_text_page(plain)
+        write_text_page(with_icon, image_block=True)
+        plain_box = _uncovered_box(_rects_for(compute_margin_rects(plain)))
+        icon_box = _uncovered_box(_rects_for(compute_margin_rects(with_icon)))
+        assert icon_box[3] > plain_box[3] + 10, "the image did not move the bottom"
+        assert icon_box[3] >= IMAGE_BLOCK.y1, "the bottom strip covers the image"
+
 
 class TestDetectionTightenedMargins:
     """Margins tightened with detection geometry.
@@ -279,17 +291,27 @@ class TestDetectionTightenedMargins:
         assert [r for r in rects if r["x0"] <= 1 and r["x1"] > 1]
 
     def test_footer_page_number_does_not_define_the_top(self, tmp_path):
-        """A page number at the foot of the page is not the header row.
+        """A page number below the header row is not the header row.
 
-        Some reporters print it there. Letting it set the top bound would
-        put a full-width strip over the whole body of the page.
+        Some reporters print it at the foot. Letting one set the top bound
+        would put a full-width strip over the body of the page.
+
+        The detection sits a third of the way down rather than at the very
+        foot, deliberately: a bound below the measured ink bottom makes the
+        tightened box degenerate, and ``_tighten_bounds`` then discards it
+        wholesale, so the guard under test is never consulted and the test
+        passes either way.
         """
         pdf = tmp_path / "footer.pdf"
         write_bitonal_page(pdf, header_line=True)
-        footer = detection(Label.PAGE_NUMBER, 300, PAGE_H - 60, 320, PAGE_H - 48)
-        rects = _rects_for(compute_margin_rects(pdf, pages=[detected_page([*_columns(), footer])]))
+        below_header = detection(Label.PAGE_NUMBER, 300, 240, 320, 256)
+        assert below_header.bbox.y1 > PAGE_H * 0.25, "not below the header limit"
+        assert below_header.bbox.y2 < CONTENT.y1, "must stay above the ink bottom"
+        rects = _rects_for(
+            compute_margin_rects(pdf, pages=[detected_page([*_columns(), below_header])])
+        )
         _left, top, _right, _bottom = _uncovered_box(rects)
-        assert top < CONTENT.y0, "footer page number pulled the top strip over the body"
+        assert top < CONTENT.y0, "a page number below the header defined the top"
 
     def test_degenerate_band_is_ignored(self, tmp_path):
         """A bogus TEXT_COLUMN box cannot collapse the content box."""

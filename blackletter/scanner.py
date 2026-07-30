@@ -800,9 +800,6 @@ def scan(
                             page_index=page_idx,
                         )
                     )
-                # Correct the column boxes once, here, so every consumer of
-                # them downstream reads edges that sit on the text.
-                snap_text_columns_to_ink(fitz_page, page)
                 pn_dets = [d for d in page.detections if d.label == Label.PAGE_NUMBER]
                 pn_dets = [
                     d
@@ -836,6 +833,18 @@ def scan(
                     progress_callback(
                         batch_end, total_pages, f"Scanning page {batch_end}/{total_pages}"
                     )
+
+    # Correct the column boxes once every page has its detections, so that
+    # all three consumers of them (headnote rect x-bounds, the margin text
+    # band, the outside-opinion masks) read edges that sit on the text.
+    # Deliberately outside the two detection paths above: they assemble
+    # their pages differently, and doing this per path meant the parallel
+    # one silently skipped it, which is every document of 40 pages or more.
+    snapped = 0
+    for page in doc.pages:
+        snapped += snap_text_columns_to_ink(pdf[page.index], page)
+    if snapped:
+        print(f"  Snapped {snapped} column boxes to the page ink", flush=True)
 
     # Sequential correction pass: fix misreads using neighbor context
     _correct_page_numbers(doc.pages)
@@ -1134,16 +1143,10 @@ def snap_text_columns_to_ink(fitz_page, page: Page) -> int:
     changed = 0
     for (position, det), (low, high) in zip(indexed, limits, strict=True):
         rect = det.bbox.to_fitz_pdf_rect(sx, sy)
+        # grow_to_ink refuses an edge that ran the whole way to its margin,
+        # which is what a full-width table under a one-column detection
+        # does, so only the gutter cap is applied here.
         box = ink.grow_to_ink(fitz_page, rect, margin_y=0.0)
-        # An edge that ran the whole way to the growth limit never found the
-        # end of the ink, so the measurement says nothing about where this
-        # column really stops: a full-width table under a one-column
-        # detection does this. Leave such an edge where the detector put it
-        # rather than sliding it out by the limit on every run.
-        if rect.x0 - box.x0 >= ink.GROW_MARGIN_X - 1:
-            box.x0 = rect.x0
-        if box.x1 - rect.x1 >= ink.GROW_MARGIN_X - 1:
-            box.x1 = rect.x1
         new_x1 = round(max(box.x0, low) / sx, 1)
         new_x2 = round(min(box.x1, high) / sx, 1)
         if abs(new_x1 - det.bbox.x1) < 1 and abs(new_x2 - det.bbox.x2) < 1:
@@ -1421,6 +1424,7 @@ def _outside_opinion_rects(
     key: Detection,
     is_first: bool,
     is_last: bool,
+    fitz_page=None,
 ) -> list[fitz.Rect]:
     """Return rects for content outside the opinion span on this page.
 
@@ -1431,6 +1435,14 @@ def _outside_opinion_rects(
 
     First page masks everything before the caption in reading order.
     Last page masks everything after the key in reading order.
+
+    :param fitz_page: The PDF page, when available. Given one, each mask is
+        widened over ink that continues past its side edges: these come
+        from the column boxes, so a box sitting a little inside the printed
+        text leaves the first or last character of every masked line
+        behind. Horizontal only, since the vertical edges are the caption
+        and key positions, which mean something. Callers that cannot supply
+        the page get unwidened masks, which is the older behaviour.
     """
     sx, sy = page.scale_x, page.scale_y
     header_bottom, footer_top = _margin_bounds(page)
@@ -1462,7 +1474,10 @@ def _outside_opinion_rects(
             rects.append(fitz.Rect(left_x0, key_box.y2, left_x1, footer_top))
             rects.append(fitz.Rect(right_x0, header_bottom, right_x1, footer_top))
 
-    return [r for r in rects if r.y0 < r.y1 and r.x0 < r.x1]
+    rects = [r for r in rects if r.y0 < r.y1 and r.x0 < r.x1]
+    if fitz_page is not None:
+        rects = [ink.grow_to_ink(fitz_page, r, margin_y=0.0) for r in rects]
+    return rects
 
 
 def _build_opinions_data(
@@ -1492,13 +1507,9 @@ def _build_opinions_data(
             is_first = pi == caption.page_index
             is_last = pi == key.page_index
             pw = src_pdf[pi].rect.width
-            for rect in _outside_opinion_rects(page, pw, caption, key, is_first, is_last):
-                # These masks come from the column boxes, so their side
-                # edges can sit inside the printed text and leave the first
-                # or last character of every masked line in the gutter.
-                # Horizontal only: the vertical edges are the caption and
-                # key positions, which mean something.
-                rect = ink.grow_to_ink(src_pdf[pi], rect, margin_y=0.0)
+            for rect in _outside_opinion_rects(
+                page, pw, caption, key, is_first, is_last, fitz_page=src_pdf[pi]
+            ):
                 outside_rects.append(
                     {
                         "page_index": pi,
@@ -1856,6 +1867,7 @@ def _mask_outside_opinion(
         key,
         is_first,
         is_last,
+        fitz_page=fitz_page,
     ):
         _mask_rect(shape, rect)
 
@@ -2394,6 +2406,7 @@ def split_opinions(
                         key,
                         is_first,
                         is_last,
+                        fitz_page=fitz_page,
                     ):
                         add_safe(rect, (1, 1, 1))
 

@@ -86,7 +86,10 @@ def _text_bounds(
         if the text doesn't span enough of the page to justify margin
         cleanup.
     """
-    blocks = fitz_page.get_text("blocks")
+    # Images are opt-in: get_text("blocks") omits them under its default
+    # flags, so the extension below never saw one and a key icon at the foot
+    # of a page fell outside the content box it is supposed to widen.
+    blocks = fitz_page.get_text("blocks", flags=fitz.TEXTFLAGS_BLOCKS | fitz.TEXT_PRESERVE_IMAGES)
     text_blocks = [b for b in blocks if b[6] == 0 and b[4].strip()]
     if not text_blocks:
         return None
@@ -116,6 +119,12 @@ def _content_bounds(
     fitz_page: fitz.Page, page_width: float
 ) -> tuple[float, float, float, float] | None:
     """Find the page's content box from text if it has any, else from ink.
+
+    Text wins where a page has any, including a text layer this library's
+    own OCR produced. Its block bounds run large, so the strips come out
+    shyer than the ink would place them, which is the safe direction; the
+    redaction geometry distrusts those same word positions because there
+    the error runs the other way.
 
     :param fitz_page: A PyMuPDF page object.
     :param page_width: Width of the page in PDF points.
@@ -309,10 +318,12 @@ def compute_margin_rects(
 
     :param pdf_path: Path to the input PDF file.
     :param buffer: Safety buffer in PDF points around the content area.
-    :param pages: Optional detected pages, used to tighten the bounds.
-        Without them the bounds come from the page's text or marks alone,
-        which is also what happens on a page carrying no ``TEXT_COLUMN``
-        detection.
+    :param pages: Optional detected pages, used to tighten the bounds and
+        to pull a strip back off anything real it would cover. Without them
+        the bounds come from the page's text or marks alone, which is also
+        what happens on a page carrying no ``TEXT_COLUMN`` detection. The
+        caller owns which detections are in each page: pass the ones a
+        reviewer has kept, not everything the model proposed.
     :returns: List of dicts with ``page_index``, ``rects``, ``page_width``
         and ``page_height`` keys, where each rect is a dict with ``x0``,
         ``y0``, ``x1``, ``y1`` in PDF points.
@@ -345,6 +356,11 @@ def compute_margin_rects(
             entry["rects"] = _rects_for_bounds(bounds, pw, ph, buffer)
             if detected is not None:
                 _shrink_rects_for_detections(detected, entry["rects"])
+                # The shrink can collapse a strip it pulled back, and a
+                # zero-width rect is no use to a consumer drawing overlays.
+                entry["rects"] = [
+                    r for r in entry["rects"] if r["x1"] - r["x0"] > 1 and r["y1"] - r["y0"] > 1
+                ]
             result.append(entry)
 
     return result
@@ -422,7 +438,13 @@ def clean_margins(
                 suffix=".pdf", delete=False, dir=pdf_path.parent
             ) as tmp:
                 tmp_path = Path(tmp.name)
-            doc.save(str(tmp_path), garbage=4, deflate=True)
+            try:
+                doc.save(str(tmp_path), garbage=4, deflate=True)
+            except Exception:
+                # Otherwise a failed save leaves the temp beside the file it
+                # was meant to replace.
+                tmp_path.unlink(missing_ok=True)
+                raise
         else:
             doc.save(str(output_path), garbage=4, deflate=True)
             tmp_path = None

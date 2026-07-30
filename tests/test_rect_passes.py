@@ -119,7 +119,7 @@ class TestSplitHeadnoteRects:
             ]
         )
         out = _split_headnote_rects_at_headnotes(page, [headnote(80, 150, 290, 700)])
-        assert len(out) == 2
+        assert [(r["y0"], r["y1"]) for r in out] == [(150, 297.0), (303.0, 700)]
 
     def test_other_rect_types_pass_through_in_order(self):
         page = detected_page([detection(Label.HEADNOTE, 80, 300, 290, 340)])
