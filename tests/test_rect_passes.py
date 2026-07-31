@@ -339,3 +339,40 @@ class TestGrowHeadnoteRects:
         with fitz.open(str(pdf)) as doc:
             _grow_headnote_rects(doc[0], page, rects, ocr_applied=True)
         assert rects[0] == before
+
+
+class TestClipHeadnoteRectGutter:
+    """``_clip_headnote_rect`` grows too, and must respect the same bound.
+
+    Its growth was the one site the gutter cap missed. The path is live
+    through ``rebuild_full_redacted_from_detections`` and ``split_opinions``,
+    both of which set ``ocr_applied``, which is what turns the growth on.
+    """
+
+    def test_growth_stays_out_of_the_facing_column(self, hairline_pdf):
+        from blackletter.scanner import _clip_headnote_rect
+
+        pdf, left, right = hairline_pdf
+        page = detected_page(
+            [
+                detection(Label.TEXT_COLUMN, left.x0, left.y0, left.x1, left.y1),
+                detection(Label.TEXT_COLUMN, right.x0, right.y0, right.x1, right.y1),
+            ]
+        )
+        rect = fitz.Rect(left.x0, 200, left.x1, 206)
+        with fitz.open(str(pdf)) as doc:
+            clipped = _clip_headnote_rect(
+                doc[0], rect, 50.0, PAGE_H, ocr_applied=True, page=page
+            )
+        assert clipped is not None
+        assert clipped.x1 <= right.x0, f"grew into the facing column, to {clipped.x1}"
+
+    def test_without_a_page_it_still_returns_a_rect(self, hairline_pdf):
+        """Callers that have no detected page keep the older behaviour."""
+        from blackletter.scanner import _clip_headnote_rect
+
+        pdf, left, _right = hairline_pdf
+        rect = fitz.Rect(left.x0, 200, left.x1, 260)
+        with fitz.open(str(pdf)) as doc:
+            clipped = _clip_headnote_rect(doc[0], rect, 50.0, PAGE_H, ocr_applied=True)
+        assert clipped is not None

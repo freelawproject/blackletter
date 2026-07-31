@@ -165,3 +165,63 @@ class TestGenerateSeamsAreClean:
             filled = dark_fraction(page, fitz.Rect(CONTENT.x0 + 5, 220, seam_x - 5, 380))
         assert leaked < 0.02, f"a hairline survived at the seam ({leaked:.3f} dark)"
         assert filled > 0.95, "the black rect was not painted"
+
+
+class TestFootnoteFilenames:
+    """Two opinions can print the same page range.
+
+    The opinion PDFs are suffixed -1 and -2 for exactly that case, and the
+    footnote files have to follow, or the second overwrites the first and an
+    opinion's footnotes are gone with no error.
+    """
+
+    @staticmethod
+    def _document(pdf_path, pages):
+        from blackletter.models import Document
+
+        return Document(
+            pdf_path=pdf_path, pages=pages, reporter="a3d", volume="222", ocr_applied=True
+        )
+
+    def test_a_shared_page_range_gives_each_opinion_its_own_footnotes(self, tmp_path):
+        from blackletter.models import BBox, Detection
+        from blackletter.process import _split_from_redacted
+
+        pdf = tmp_path / "vol.pdf"
+        write_bitonal_page(pdf, tmp_dir=tmp_path)
+        with fitz.open(str(pdf)) as src, fitz.open() as grown:
+            grown.insert_pdf(src)
+            grown.insert_pdf(src)
+            grown.save(str(tmp_path / "two.pdf"))
+        pdf = tmp_path / "two.pdf"
+
+        def page(index):
+            p = detected_page(
+                [detection(Label.FOOTNOTES, 100, 600, 500, 680, page_index=index)],
+                page_index=index,
+            )
+            p.page_number = 50  # both opinions print the same range
+            return p
+
+        pages = [page(0), page(1)]
+        document = self._document(pdf, pages)
+
+        def marker(label, index):
+            return Detection(
+                bbox=BBox(x1=100, y1=100, x2=200, y2=140),
+                label=label,
+                confidence=0.9,
+                page_index=index,
+            )
+
+        opinions = [
+            (marker(Label.CASE_CAPTION, 0), marker(Label.KEY_ICON, 0)),
+            (marker(Label.CASE_CAPTION, 1), marker(Label.KEY_ICON, 1)),
+        ]
+        out = tmp_path / "redacted"
+        _split_from_redacted(pdf, document, opinions, out, first_page=50, extract_footnotes=True)
+
+        opinion_pdfs = sorted(p.name for p in out.glob("*.pdf") if "footnotes" not in p.name)
+        footnotes = sorted(p.name for p in out.glob("*-footnotes.pdf"))
+        assert len(opinion_pdfs) == 2, opinion_pdfs
+        assert len(footnotes) == 2, f"one opinion's footnotes were overwritten: {footnotes}"

@@ -1781,6 +1781,7 @@ def _clip_headnote_rect(
     header_bottom: float,
     footer_top: float,
     ocr_applied: bool,
+    page: Page | None = None,
 ) -> fitz.Rect | None:
     """Tighten a headnote rect to page content and clamp it to margin bounds.
 
@@ -1796,6 +1797,10 @@ def _clip_headnote_rect(
     :param header_bottom: Upper Y cut-off (from :func:`_margin_bounds`).
     :param footer_top: Lower Y cut-off (from :func:`_margin_bounds`).
     :param ocr_applied: Whether the text layer came from our own OCR.
+    :param page: The detected page, when the caller has one. Given it,
+        growth is held inside the rect's own column: stopping at blank space
+        is not enough where a gutter is thinner than a measuring pixel, and
+        a rect grown across one blacks out the facing column's text.
     :returns: The clipped rect, or ``None`` if degenerate.
     """
     tight = _tighten_to_text(fitz_page, rect, ocr_applied=ocr_applied)
@@ -1810,6 +1815,8 @@ def _clip_headnote_rect(
         min(rect.y1, footer_top, text_bot),
     )
     rect = _grow_rect_to_ink(fitz_page, rect, ocr_applied)
+    if page is not None:
+        rect = clamp_to_gutters(page, rect)
     if rect.y0 < rect.y1 and rect.x0 < rect.x1:
         return rect
     return None
@@ -2474,7 +2481,12 @@ def split_opinions(
                     if rect_page_idx != src_idx:
                         continue
                     clipped = _clip_headnote_rect(
-                        fitz_page, rect, header_bottom, footer_top, document.ocr_applied
+                        fitz_page,
+                        rect,
+                        header_bottom,
+                        footer_top,
+                        document.ocr_applied,
+                        page=page,
                     )
                     if clipped is not None:
                         add_safe(clipped, (0, 0, 0))

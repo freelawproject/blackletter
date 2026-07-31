@@ -932,8 +932,19 @@ def _split_from_redacted(
             paths.append(out_path)
 
             if extract_footnotes:
+                # The deduped name, not the shared stem: two opinions can
+                # print the same page range, which is what the suffix above
+                # exists for, and their footnote files would otherwise be
+                # the same path with the second silently overwriting the
+                # first. ``split_opinions`` derives its footnote name the
+                # same way.
                 _write_opinion_footnotes(
-                    document, pages_by_index, start_idx, end_idx, output_dir, base
+                    document,
+                    pages_by_index,
+                    start_idx,
+                    end_idx,
+                    output_dir,
+                    name.removesuffix(".pdf"),
                 )
 
             done = idx + 1
@@ -1088,7 +1099,12 @@ def _build_full_redacted(
                 if rect_page_idx != src_idx:
                     continue
                 clipped = _clip_headnote_rect(
-                    fitz_page, rect, header_bottom, footer_top, ocr_applied=_ocr_applied
+                    fitz_page,
+                    rect,
+                    header_bottom,
+                    footer_top,
+                    ocr_applied=_ocr_applied,
+                    page=page,
                 )
                 if clipped is not None:
                     add_safe(clipped, (0, 0, 0))
