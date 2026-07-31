@@ -313,6 +313,45 @@ class TestDetectionTightenedMargins:
         _left, top, _right, _bottom = _uncovered_box(rects)
         assert top < CONTENT.y0, "a page number below the header defined the top"
 
+    def test_a_band_narrower_than_the_text_does_not_win(self, tmp_path):
+        """Found on real pages whose second column went undetected.
+
+        The band is then narrower than the page's own text, and tightening
+        to it puts a side strip through the type. Ink that reads as text is
+        not the band's to give away, however confident the detections look.
+        """
+        pdf = tmp_path / "one_column_detected.pdf"
+        write_bitonal_page(pdf)
+        # Only the left half of the text is claimed by a column box.
+        mid = (CONTENT.x0 + CONTENT.x1) / 2
+        partial = [detection(Label.TEXT_COLUMN, CONTENT.x0, CONTENT.y0, mid, CONTENT.y1)]
+        rects = _rects_for(compute_margin_rects(pdf, pages=[detected_page(partial)]))
+        _left, _top, right, _bottom = _uncovered_box(rects)
+        assert right >= CONTENT.x1 - 2, "a strip was placed inside the text"
+
+    def test_an_artifact_outside_the_band_is_still_covered(self, tmp_path):
+        """The other direction: tightening must still do its job.
+
+        A speck out in the margin widened the ink box, and the strip on that
+        side should reach past it rather than stopping short.
+        """
+        pdf = tmp_path / "stray.pdf"
+        write_bitonal_page(pdf, stray_mark=True)
+        tight = _uncovered_box(
+            _rects_for(compute_margin_rects(pdf, pages=[detected_page(_columns())]))
+        )
+        assert tight[0] > STRAY_MARK.x1, "the speck was left uncovered"
+
+    def test_detections_from_a_different_page_size_are_ignored(self, tmp_path):
+        """A caller's frame that is not this page's would place strips anywhere."""
+        pdf = tmp_path / "mismatch.pdf"
+        write_bitonal_page(pdf, stray_mark=True)
+        page = detected_page(_columns())
+        page.pdf_width, page.pdf_height = PAGE_W / 2, PAGE_H / 2
+        with_bad = _rects_for(compute_margin_rects(pdf, pages=[page]))
+        without = _rects_for(compute_margin_rects(pdf))
+        assert with_bad == without, "trusted detections in the wrong frame"
+
     def test_degenerate_band_is_ignored(self, tmp_path):
         """A bogus TEXT_COLUMN box cannot collapse the content box."""
         pdf = tmp_path / "narrow_band.pdf"

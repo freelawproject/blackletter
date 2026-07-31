@@ -144,6 +144,26 @@ class TestClipHeadnoteRectWithoutWords:
         assert clipped.x0 < rect.x0 + 30, "no tightening happened at all"
 
 
+class TestClipHeadnoteGrowthIsHorizontal:
+    """``_grow_rect_to_ink`` widens a rect, it does not lengthen it.
+
+    The vertical edges of a headnote rect carry meaning: the marker
+    position above, and the ink bottom below, which already sits on the last
+    line. Growing them would undo the clamp ``_clip_headnote_rect`` just
+    applied.
+    """
+
+    def test_vertical_edges_are_untouched(self, bitonal):
+        from blackletter.scanner import _grow_rect_to_ink
+
+        # Mid-block, so there is ink immediately above and below.
+        rect = fitz.Rect(CONTENT.x0 + 10, 300, CONTENT.x1 - 10, 400)
+        with fitz.open(str(bitonal)) as doc:
+            grown = _grow_rect_to_ink(doc[0], rect, ocr_applied=True)
+        assert (grown.y0, grown.y1) == (rect.y0, rect.y1), "grew vertically"
+        assert grown.x0 < rect.x0 or grown.x1 > rect.x1, "did not grow at all"
+
+
 class TestOcrAppliedPrefersInk:
     """``ocr_applied`` selects ink over the word boxes it distrusts."""
 

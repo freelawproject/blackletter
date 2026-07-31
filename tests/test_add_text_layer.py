@@ -100,6 +100,16 @@ class TestCollectPdfs:
         assert loose in found
         assert opinions / "op.pdf" in found
 
+    def test_a_file_and_its_own_directory_yield_it_once(self, tmp_path, scratch):
+        """The case dedup exists for: two workers would OCR it at once."""
+        write_bitonal_page(tmp_path / "a.pdf", tmp_dir=scratch)
+        found = _collect_pdfs([tmp_path / "a.pdf", tmp_path])
+        assert [p.name for p in found] == ["a.pdf"]
+
+    def test_an_uppercase_suffix_is_a_pdf_too(self, tmp_path, scratch):
+        write_bitonal_page(tmp_path / "b.PDF", tmp_dir=scratch)
+        assert [p.name for p in _collect_pdfs(tmp_path)] == ["b.PDF"]
+
     def test_missing_path_raises(self, tmp_path):
         with pytest.raises(FileNotFoundError):
             _collect_pdfs(tmp_path / "nope.pdf")

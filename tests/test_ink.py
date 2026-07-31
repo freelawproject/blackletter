@@ -21,6 +21,8 @@ from blackletter.ink import (
 )
 from tests.pdf_fixtures import (
     BOTTOM_BAR,
+    FONT_SIZE,
+    LINE_LEADING,
     COLUMN_LEFT,
     COLUMN_RIGHT,
     CONTENT,
@@ -34,6 +36,7 @@ from tests.pdf_fixtures import (
     write_text_page,
     write_two_column_page,
 )
+from tests.pdf_fixtures import _line_for_width
 
 # The measured box lands within a few points of CONTENT: glyphs start
 # below the box top, and the last line ends above its bottom.
@@ -94,6 +97,31 @@ class TestContentBox:
             doc.new_page(width=PAGE_W, height=PAGE_H)
             doc.save(str(pdf))
         assert self._box(pdf) is None
+
+    def test_the_widest_run_wins_when_a_page_has_two(self, tmp_path):
+        """Content is the largest block of inked rows, not the first.
+
+        A page whose front matter or an artifact band sits above the body
+        has two candidate runs; taking the first would put the content box
+        around the wrong one.
+        """
+        pdf = tmp_path / "two_runs.pdf"
+        src = tmp_path / "two_runs.src.pdf"
+        line = _line_for_width(CONTENT.width)
+        with fitz.open() as doc:
+            page = doc.new_page(width=PAGE_W, height=PAGE_H)
+            # A short block near the top, well clear of the body below.
+            for y in (60.0, 72.0):
+                page.insert_text((CONTENT.x0, y), line, fontsize=FONT_SIZE)
+            y = 300.0
+            while y <= 700:
+                page.insert_text((CONTENT.x0, y), line, fontsize=FONT_SIZE)
+                y += LINE_LEADING
+            doc.save(str(src))
+        rasterize(src, pdf)
+        box = self._box(pdf)
+        assert box is not None
+        assert box[1] > 200, f"the box began at the short upper block ({box[1]})"
 
     def test_none_for_narrow_content(self, tmp_path):
         pdf = tmp_path / "narrow.pdf"
@@ -367,6 +395,12 @@ class TestGrowAcrossGutter:
     columns. A rect then grew across the gutter and swallowed its
     neighbour's text, which on a real page meant a ``TEXT_COLUMN`` box
     widening by 20 pt into the other column.
+
+    The assertions here are tight to the column edge on purpose. With a
+    tolerance of a point, reverting the off-by-one still passes: the
+    fixture's 1.5 pt gutter spans two measuring pixels, so a walk that
+    starts one column too far out overshoots by less than the tolerance and
+    the regression goes unnoticed.
     """
 
     @pytest.fixture
@@ -378,12 +412,25 @@ class TestGrowAcrossGutter:
     def test_right_column_does_not_grow_into_the_left(self, pdf):
         with fitz.open(str(pdf)) as doc:
             grown = grow_to_ink(doc[0], fitz.Rect(COLUMN_RIGHT), margin_y=0.0)
-        assert grown.x0 >= COLUMN_LEFT.x1 - 1, f"grew back over the gutter to {grown.x0}"
+        assert grown.x0 >= COLUMN_RIGHT.x0 - 0.01, f"grew back over the gutter to {grown.x0}"
 
     def test_left_column_does_not_grow_into_the_right(self, pdf):
         with fitz.open(str(pdf)) as doc:
             grown = grow_to_ink(doc[0], fitz.Rect(COLUMN_LEFT), margin_y=0.0)
-        assert grown.x1 <= COLUMN_RIGHT.x0 + 1, f"grew forward over the gutter to {grown.x1}"
+        assert grown.x1 <= COLUMN_LEFT.x1 + 0.01, f"grew forward over the gutter to {grown.x1}"
+
+    def test_repeated_growth_does_not_creep(self, pdf):
+        """The off-by-one showed up as drift, a fraction of a point per call.
+
+        A single application can look harmless; the rect is regrown on every
+        recompute, so an edge that moves each time eventually arrives in the
+        next column.
+        """
+        rect = fitz.Rect(COLUMN_LEFT)
+        with fitz.open(str(pdf)) as doc:
+            for _ in range(5):
+                rect = grow_to_ink(doc[0], rect, margin_y=0.0)
+        assert rect.x1 <= COLUMN_LEFT.x1 + 0.01, f"crept to {rect.x1} over five calls"
 
     def test_a_narrow_box_still_reaches_its_own_text(self, pdf):
         """The fix must not stop legitimate growth."""

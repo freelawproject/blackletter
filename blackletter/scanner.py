@@ -1093,6 +1093,51 @@ def _grow_rect_to_ink(fitz_page, rect: fitz.Rect, ocr_applied: bool) -> fitz.Rec
     return ink.grow_to_ink(fitz_page, rect, margin_y=0.0)
 
 
+def _gutter_limits(page: Page, x_center: float) -> tuple[float, float]:
+    """How far either side of ``x_center`` may reach before the next column.
+
+    A column, or a rect inside one, may claim up to the middle of the gutter
+    it shares with its neighbour. Growth normally stops in that gutter's
+    white space well short of the midpoint, but on a tightly set page the
+    gutter can be thinner than a rendered pixel: the walk then starts past
+    the one blank pixel column that separates the two (see
+    :func:`~blackletter.ink._outside_after`) and the neighbour's text is the
+    next ink it meets. This bound does not care how the ink falls.
+
+    :param page: The detected page, for its column boxes.
+    :param x_center: Centre of the column or rect, in PDF points.
+    :returns: ``(low, high)`` in PDF points, infinite where there is no
+        neighbour on that side.
+    """
+    sx = page.scale_x
+    columns = sorted(
+        (d.bbox for d in page.detections if d.label == Label.TEXT_COLUMN),
+        key=lambda b: b.x1,
+    )
+    holding = next((b for b in columns if b.x1 * sx <= x_center <= b.x2 * sx), None)
+    if holding is None:
+        # Nothing says which column this is, so nothing bounds it. The
+        # refusal rule and the blank-space stop still apply.
+        return float("-inf"), float("inf")
+    before = [b for b in columns if b.x2 * sx < holding.x1 * sx]
+    after = [b for b in columns if b.x1 * sx > holding.x2 * sx]
+    low = (before[-1].x2 * sx + holding.x1 * sx) / 2 if before else float("-inf")
+    high = (holding.x2 * sx + after[0].x1 * sx) / 2 if after else float("inf")
+    return low, high
+
+
+def clamp_to_gutters(page: Page, rect: fitz.Rect) -> fitz.Rect:
+    """Hold a rect inside the column it belongs to.
+
+    :param page: The detected page, for its column boxes.
+    :param rect: The rect to bound, in PDF points.
+    :returns: The rect, with its side edges pulled back to the gutter
+        midpoints on either side of it.
+    """
+    low, high = _gutter_limits(page, (rect.x0 + rect.x1) / 2)
+    return fitz.Rect(max(rect.x0, low), rect.y0, min(rect.x1, high), rect.y1)
+
+
 def snap_text_columns_to_ink(fitz_page, page: Page) -> int:
     """Widen a page's ``TEXT_COLUMN`` detections onto the text they clip.
 
@@ -1125,20 +1170,7 @@ def snap_text_columns_to_ink(fitz_page, page: Page) -> int:
     columns = [d for _i, d in indexed]
 
     sx, sy = page.scale_x, page.scale_y
-    # Each column may claim up to the middle of the gutter it shares with
-    # its neighbour, measured before anything moves. Growth normally stops
-    # in the gutter's white space well short of that, but on a tightly set
-    # page the gutter can be thinner than a rendered pixel, and without this
-    # the two columns take turns claiming it on every run.
-    limits = [
-        (
-            (columns[i - 1].bbox.x2 + det.bbox.x1) / 2 * sx if i else float("-inf"),
-            (det.bbox.x2 + columns[i + 1].bbox.x1) / 2 * sx
-            if i + 1 < len(columns)
-            else float("inf"),
-        )
-        for i, det in enumerate(columns)
-    ]
+    limits = [_gutter_limits(page, det.bbox.center_x * sx) for det in columns]
 
     changed = 0
     for (position, det), (low, high) in zip(indexed, limits, strict=True):
@@ -1153,6 +1185,32 @@ def snap_text_columns_to_ink(fitz_page, page: Page) -> int:
             continue
         page.detections[position] = replace(det, bbox=replace(det.bbox, x1=new_x1, x2=new_x2))
         changed += 1
+    return changed
+
+
+def snap_document_columns(document: Document) -> int:
+    """Correct every page's ``TEXT_COLUMN`` boxes against its ink.
+
+    :func:`scan` does this as it detects, but a caller that detects
+    elsewhere, or reloads detections from a sidecar, holds boxes that were
+    never corrected. Three consumers read them (headnote rect x-bounds, the
+    margin text band, the outside-opinion masks), and only the first two
+    recover on their own, so the margin strips of a volume would otherwise
+    depend on which entry point produced it.
+
+    Safe to call more than once: the correction converges, and a box already
+    on its text does not move.
+
+    :param document: The document to correct, mutated in place.
+    :returns: Number of column boxes widened.
+    """
+    if not document.pages:
+        return 0
+    changed = 0
+    with fitz.open(str(document.pdf_path)) as pdf:
+        for page in document.pages:
+            if page.index < pdf.page_count:
+                changed += snap_text_columns_to_ink(pdf[page.index], page)
     return changed
 
 
@@ -1476,7 +1534,7 @@ def _outside_opinion_rects(
 
     rects = [r for r in rects if r.y0 < r.y1 and r.x0 < r.x1]
     if fitz_page is not None:
-        rects = [ink.grow_to_ink(fitz_page, r, margin_y=0.0) for r in rects]
+        rects = [clamp_to_gutters(page, ink.grow_to_ink(fitz_page, r, margin_y=0.0)) for r in rects]
     return rects
 
 

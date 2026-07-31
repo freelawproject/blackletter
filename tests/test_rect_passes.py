@@ -12,11 +12,20 @@ import pytest
 
 from blackletter.margins import _shrink_rects_for_detections
 from blackletter.models import Label
+import fitz
+
 from blackletter.process import (
+    _drop_degenerate,
+    _grow_headnote_rects,
     _snap_headnote_x_to_columns,
     _split_headnote_rects_at_headnotes,
 )
-from tests.pdf_fixtures import PAGE_H, PAGE_W, detected_page, detection
+from tests.pdf_fixtures import (
+    PAGE_H,
+    PAGE_W,
+    detected_page,
+    detection,
+)
 
 # Image pixel geometry for a two-column page, at 1 px per point so the
 # fixtures read as points (see ``detected_page``).
@@ -67,6 +76,56 @@ class TestSnapHeadnoteXToColumns:
         rects = [{**headnote(80, 150, 290, 400), "type": "KEY_ICON"}]
         _snap_headnote_x_to_columns(page, rects)
         assert (rects[0]["x0"], rects[0]["x1"]) == (80, 290)
+
+    def test_a_box_spanning_both_columns_is_refused(self):
+        """The worst case found: it blacks out the facing column's text.
+
+        A merged column detection, or one a reviewer widened by hand, is
+        about twice a headnote rect's width. Snapping to it stretches every
+        headnote blackout across the court's own opinion text.
+        """
+        # Centre kept on the rect's own side of the midpoint, so the
+        # same-side rule cannot reject it first and the width rule is what
+        # is under test.
+        merged = detection(Label.TEXT_COLUMN, LEFT_COL[0], 100, 400.0, 700)
+        page = detected_page([merged])
+        rect = headnote(80, 150, 290, 400)
+        assert merged.bbox.center_x < page.img_width / 2, "not on the rect's side"
+        assert merged.bbox.width > (rect["x1"] - rect["x0"]) * 1.5, "not wide enough to reject"
+        rects = [rect]
+        _snap_headnote_x_to_columns(page, rects)
+        assert (rects[0]["x0"], rects[0]["x1"]) == (80, 290), "stretched over the neighbour"
+
+    def test_a_degenerate_box_is_refused(self):
+        """The mirror image: it collapses the rect and leaves headnotes visible."""
+        for x1 in (186.0, 188.0):  # zero width, then two points
+            page = detected_page([detection(Label.TEXT_COLUMN, 186.0, 100, x1, 700)])
+            rects = [headnote(80, 150, 290, 400)]
+            _snap_headnote_x_to_columns(page, rects)
+            assert (rects[0]["x0"], rects[0]["x1"]) == (80, 290), f"collapsed to {x1}"
+
+    def test_a_degenerate_rect_is_dropped_before_returning(self):
+        """Defence in depth for the passes above.
+
+        ``_add_px`` rejects a zero-area rect on the way into
+        ``compute_redaction_rects``, and these passes run after it, so the
+        same check runs on the way out. Tested directly: with the guards in
+        place nothing here can produce such a rect any more, which is the
+        point, and the filter stays because a future pass might.
+        """
+        rects = [
+            headnote(80, 150, 290, 400),
+            headnote(186, 150, 186, 400),
+            headnote(80, 150, 290, 150),
+        ]
+        assert _drop_degenerate(rects) == [rects[0]]
+
+    def test_a_column_a_little_out_is_still_used(self):
+        """The guard must not block the correction it exists to allow."""
+        page = detected_page([detection(Label.TEXT_COLUMN, 72.0, 100, 300.0, 700)])
+        rects = [headnote(80, 150, 290, 400)]
+        _snap_headnote_x_to_columns(page, rects)
+        assert (rects[0]["x0"], rects[0]["x1"]) == (72.0, 300.0)
 
     def test_no_columns_is_a_no_op(self):
         page = detected_page([detection(Label.PAGE_HEADER, 72, 40, 540, 52)])
@@ -208,3 +267,75 @@ class TestShrinkMarginsForDetections:
         strips = self._strips()
         _shrink_rects_for_detections(page, strips)
         assert strips[0]["x1"] == pytest.approx(20)
+
+
+class TestGrowHeadnoteRects:
+    """The pass that puts back what the snap takes away.
+
+    The snap replaces a headnote rect's side edges with its column box, on
+    any page. If growth then fails to run, or converts coordinates wrongly,
+    every headnote rect is left as narrow as the detector drew it, and a
+    column box a few points inside the text clips a character on every line.
+    """
+
+    @pytest.fixture
+    def columns_page(self, hairline_pdf):
+        """A hairline-gutter page and a Page describing its two columns."""
+        pdf, left, right = hairline_pdf
+        page = detected_page(
+            [
+                detection(Label.TEXT_COLUMN, left.x0, left.y0, left.x1, left.y1),
+                detection(Label.TEXT_COLUMN, right.x0, right.y0, right.x1, right.y1),
+            ]
+        )
+        return pdf, page, left, right
+
+    def test_a_narrowed_rect_is_grown_back_onto_its_text(self, columns_page):
+        pdf, page, left, _right = columns_page
+        rects = [headnote(left.x0 + 6, 200, left.x1 - 6, 400)]
+        with fitz.open(str(pdf)) as doc:
+            _grow_headnote_rects(doc[0], page, rects, ocr_applied=True)
+        assert rects[0]["x0"] < left.x0 + 6, "the left edge was not grown"
+        assert rects[0]["x1"] > left.x1 - 6, "the right edge was not grown"
+
+    def test_growth_stays_out_of_the_facing_column(self, columns_page):
+        """A gutter thinner than a measuring pixel is not a barrier by itself.
+
+        The walk starts past the single pixel column holding the gutter, so
+        without the cap a short rect meets the facing column's type and
+        keeps going.
+        """
+        pdf, page, left, right = columns_page
+        for height in (6, 12, 24, 60):
+            rects = [headnote(left.x0, 200, left.x1, 200 + height)]
+            with fitz.open(str(pdf)) as doc:
+                _grow_headnote_rects(doc[0], page, rects, ocr_applied=True)
+            assert rects[0]["x1"] <= right.x0, f"crossed the gutter at height {height}"
+
+    def test_the_scale_factors_are_not_swapped(self, hairline_pdf):
+        """Rects are in image pixels and growth measures points.
+
+        The two axes are given different scales on purpose: with the same
+        factor on both, swapping them is a no-op and the test proves
+        nothing. A swap then moves an edge by a factor rather than a hair,
+        so the grown rect lands nowhere near its own text.
+        """
+        pdf, left, _right = hairline_pdf
+        page = detected_page([detection(Label.TEXT_COLUMN, left.x0, left.y0, left.x1, left.y1)])
+        page.img_width, page.img_height = int(PAGE_W * 2), int(PAGE_H * 3)
+        assert page.scale_x != page.scale_y, "a swap would be undetectable"
+        # The same rect, expressed in that page's pixels.
+        rects = [headnote((left.x0 + 6) * 2, 200 * 3, (left.x1 - 6) * 2, 400 * 3)]
+        with fitz.open(str(pdf)) as doc:
+            _grow_headnote_rects(doc[0], page, rects, ocr_applied=True)
+        assert rects[0]["x0"] == pytest.approx(left.x0 * 2, abs=6.0)
+        assert rects[0]["x1"] == pytest.approx(left.x1 * 2, abs=6.0)
+
+    def test_other_rect_types_are_left_alone(self, columns_page):
+        pdf, page, left, _right = columns_page
+        other = {**headnote(left.x0 + 6, 200, left.x1 - 6, 400), "type": "KEY_ICON"}
+        rects = [other]
+        before = dict(other)
+        with fitz.open(str(pdf)) as doc:
+            _grow_headnote_rects(doc[0], page, rects, ocr_applied=True)
+        assert rects[0] == before

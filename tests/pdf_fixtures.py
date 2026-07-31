@@ -340,6 +340,44 @@ def write_two_column_text_page(path: Path, tmp_dir: Path | None = None) -> None:
     rasterize(src, path)
 
 
+def write_hairline_column_page(
+    path: Path, gutter: float = 0.3, tmp_dir: Path | None = None
+) -> tuple[fitz.Rect, fitz.Rect]:
+    """Two columns of real type separated by a sub-pixel gutter.
+
+    At 100 dpi a pixel spans 0.72 pt, so a gutter narrower than that falls
+    inside a single pixel column. A growth walk starts past that column (see
+    ``ink._outside_after``) and the next ink it meets belongs to the facing
+    column. Type rather than solid bars, because with solid bars the walk
+    runs to its margin and is refused, which hides the case.
+
+    :param path: Where to write the PDF.
+    :param gutter: Width of the gutter, in points.
+    :param tmp_dir: Directory for the intermediate PDF. Defaults to
+        ``path``'s parent.
+    :returns: The two column bands, in PDF points.
+    """
+    tmp_dir = tmp_dir or path.parent
+    left = fitz.Rect(110.6, 100, 311.8, 700)
+    right = fitz.Rect(311.8 + gutter, 100, 527.3, 700)
+    src = tmp_dir / f"{path.stem}.text.pdf"
+    sentence = BODY_SENTENCE * 4
+    with fitz.open() as doc:
+        page = doc.new_page(width=PAGE_W, height=PAGE_H)
+        for band in (left, right):
+            y, row = band.y0 + FONT_SIZE, 0
+            while y <= band.y1:
+                text = sentence[(row * 11) % 80 :]
+                while fitz.get_text_length(text, fontsize=FONT_SIZE) > band.width:
+                    text = text[:-1]
+                page.insert_text((band.x0, y), text, fontsize=FONT_SIZE)
+                y += LINE_LEADING
+                row += 1
+        doc.save(str(src))
+    rasterize(src, path)
+    return left, right
+
+
 def write_two_column_page(path: Path, tmp_dir: Path | None = None) -> None:
     """Write a text-less, 1-bit page holding two columns of text lines.
 

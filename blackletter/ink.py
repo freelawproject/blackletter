@@ -372,6 +372,32 @@ def _grow_edge(
     return grown
 
 
+# What it takes for a pixel line to count as a continuation of the ink a
+# rect already holds: a fraction of the rect's own extent, since a tall
+# rect's line carries more ink than a short one's.
+#
+# The floor stays at one pixel. Raising it looks like a way to stop a short
+# rect walking through a hairline gutter, and measurement says otherwise: at
+# a 0.7 pt gutter a floor of 2 removes the crossing but 3 and 4 bring it
+# back at other rect heights, because a higher floor turns a walk that ran
+# to its margin and was refused into one that stops early and is believed.
+# It also costs coverage, taking uncovered ink around headnote rects on a
+# real volume from 24 px to 43 px. Crossing is bounded by the gutter cap in
+# ``scanner._gutter_limits`` instead, which does not depend on how the ink
+# happens to fall.
+INK_LINE_FRACTION = 0.01
+MIN_INK_LINES = 1
+
+
+def _min_ink_lines(extent: int) -> int:
+    """Ink a pixel line needs to continue a growth walk.
+
+    :param extent: The rect's extent across the walk, in pixel lines.
+    :returns: Minimum dark pixels for a line to count as inked.
+    """
+    return max(MIN_INK_LINES, int(extent * INK_LINE_FRACTION))
+
+
 def _refuse_at_limit(grown: int, budget: int) -> int:
     """Discard growth that consumed its whole margin.
 
@@ -442,7 +468,7 @@ def grow_to_ink(
     # Columns first, over the rect's own rows, then rows over the widened
     # span, so a clipped character contributes to both.
     col_counts = mask[r0:r1, :].sum(axis=0)
-    min_cols = max(1, int((r1 - r0) * 0.01))
+    min_cols = _min_ink_lines(r1 - r0)
     # Each walk starts at the first pixel column lying wholly outside the
     # rect: see _outside_before for why neither neighbour of that column
     # will do.
@@ -476,7 +502,7 @@ def grow_to_ink(
     c1 = max(c1, out_right + right)
 
     row_counts = mask[:, c0:c1].sum(axis=1)
-    min_rows = max(1, int((c1 - c0) * 0.01))
+    min_rows = _min_ink_lines(c1 - c0)
     out_top = _outside_before(region.y0, sy)
     out_bottom = _outside_after(region.y1, sy)
     budget_y = int(margin_y / sy)

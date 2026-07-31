@@ -436,7 +436,9 @@ def _collect_pdfs(paths: str | Path | Iterable[str | Path]) -> list[Path]:
     for raw in paths:
         path = Path(raw)
         if path.is_dir():
-            out.extend(sorted(p for p in path.glob("*.pdf") if p.is_file()))
+            out.extend(
+                sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
+            )
         elif path.is_file():
             out.append(path)
         else:
@@ -629,7 +631,7 @@ def pair(
         outside_rects.
     """
     from blackletter.models import Detection as BLDetection, Document, Page
-    from blackletter.scanner import _pair_opinions
+    from blackletter.scanner import _pair_opinions, snap_document_columns
 
     pdf_path = Path(pdf_path)
 
@@ -675,6 +677,7 @@ def pair(
             first_page=first_page,
             ocr_applied=True,
         )
+        snap_document_columns(document)
 
         # Pair
         t0 = time.time()
@@ -806,7 +809,10 @@ def build_redacted(
                 )
             )
 
+    from blackletter.scanner import snap_document_columns
+
     document = Document(pdf_path=pdf_path, pages=pages, ocr_applied=True)
+    snap_document_columns(document)
 
     # Build scan name
     stem = pdf_path.stem
@@ -904,6 +910,8 @@ def build_redactions(
     :returns: ``{"opinions": [...], "pages": {"<index>": [rect, ...]}}``,
         all coordinates in PDF points. Pages absent from both rect lists
         are absent from ``pages``.
+    :raises KeyError: If ``redaction_rects`` names a page that ``pages``
+        does not, since its pixel rects could then only be guessed at.
     """
     by_index = {p.index: p for p in pages}
 
@@ -947,10 +955,15 @@ def build_redactions(
         page_index = entry["page_index"]
         page_rects = combined.setdefault(page_index, [])
         page = by_index.get(page_index)
-        # A page with no detections has no image dimensions to scale by,
-        # and its rects are already in points.
-        to_x = page.scale_x if page and page.img_width > 1 else 1.0
-        to_y = page.scale_y if page and page.img_height > 1 else 1.0
+        if page is None:
+            raise KeyError(
+                f"redaction_rects names page {page_index}, which is not in `pages`. "
+                "Its rects are in image pixels and there is nothing to scale them by."
+            )
+        # A page with no detections has no image dimensions to scale by, and
+        # its rects are already in points.
+        to_x = page.scale_x if page.img_width > 1 else 1.0
+        to_y = page.scale_y if page.img_height > 1 else 1.0
         for r in entry.get("rects", []):
             x0, y0 = r["x0"] * to_x, r["y0"] * to_y
             x1, y1 = r["x1"] * to_x, r["y1"] * to_y

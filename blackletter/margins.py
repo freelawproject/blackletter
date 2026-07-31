@@ -42,7 +42,7 @@ from pathlib import Path
 
 import fitz
 
-from blackletter.ink import content_box
+from blackletter.ink import content_box, page_mask
 from blackletter.models import Label, Page
 
 logger = logging.getLogger(__name__)
@@ -165,9 +165,61 @@ def _detection_bounds(page: Page) -> tuple[float | None, float | None, float | N
     return band_left, band_right, header_top
 
 
+# What the ink outside the detection band has to look like before a side
+# bound may be tightened past it. A scanner artifact is either near-solid in
+# its own columns (a platen line, a fold, a gutter shadow) or barely there (a
+# speck of dust, a smudge). Printed text is neither: its columns carry a
+# middling fraction of dark rows. These two thresholds bracket that gap.
+ARTIFACT_MIN_ROW_FRACTION = 0.60
+SPECK_MAX_ROW_FRACTION = 0.03
+
+
+def _ink_is_artifact_like(
+    fitz_page: fitz.Page,
+    x0: float,
+    x1: float,
+    top: float,
+    bottom: float,
+) -> bool:
+    """Is the ink in a vertical slice safe to white out?
+
+    Asked of the ink a detection band would give up. Density per pixel
+    column is what separates the cases, and extent is not: a platen line
+    down the edge of a page runs the full height and must be covered, while
+    the tail of a table row runs a dozen rows and must not be.
+
+    :param fitz_page: The page to measure.
+    :param x0: Left edge of the slice, in PDF points.
+    :param x1: Right edge of the slice, in PDF points.
+    :param top: Top of the region of interest, in PDF points.
+    :param bottom: Bottom of the region of interest, in PDF points.
+    :returns: True when every inked column in the slice is either near-solid
+        or negligible, and so when the slice holds nothing that reads as
+        text. True for an empty slice, which gives up nothing.
+    """
+    if x1 - x0 <= 0 or bottom - top <= 0:
+        return True
+    mask, sx, sy = page_mask(fitz_page)
+    height, width = mask.shape
+    c0 = max(0, min(int(x0 / sx), width))
+    c1 = max(c0, min(int(round(x1 / sx)), width))
+    r0 = max(0, min(int(top / sy), height))
+    r1 = max(r0, min(int(round(bottom / sy)), height))
+    window = mask[r0:r1, c0:c1]
+    if not window.size or window.shape[0] == 0:
+        return True
+    per_column = window.sum(axis=0) / window.shape[0]
+    inked = per_column[per_column > 0]
+    if not inked.size:
+        return True
+    text_like = (inked > SPECK_MAX_ROW_FRACTION) & (inked < ARTIFACT_MIN_ROW_FRACTION)
+    return not bool(text_like.any())
+
+
 def _tighten_bounds(
     bounds: tuple[float, float, float, float],
     page: Page,
+    fitz_page: fitz.Page | None = None,
 ) -> tuple[float, float, float, float]:
     """Intersect measured content bounds with what detections support.
 
@@ -176,19 +228,38 @@ def _tighten_bounds(
     the tighter of the two per side means a bound moves in only when both
     signals agree there is nothing there.
 
+    "Both signals agree" has to be checked rather than assumed. A page whose
+    second column went undetected has a band narrower than its own text, and
+    tightening to it puts a strip through the type: seen on real pages, where
+    the running head was then the widest horizontal detection. So a side is
+    tightened only when the ink it would give up reads as an artifact rather
+    than as text (see :func:`_ink_is_artifact_like`).
+
     Falls back to ``bounds`` if the result would be degenerate (a bogus
     ``TEXT_COLUMN`` box should not be able to collapse the content box).
 
     :param bounds: ``(left, top, right, bottom)`` from text or ink.
     :param page: The page whose detections to read.
+    :param fitz_page: The PDF page, for the ink check. Without it the side
+        bounds are left alone, since the check cannot be made.
     :returns: The tightened ``(left, top, right, bottom)``.
     """
     left, top, right, bottom = bounds
     band_left, band_right, header_top = _detection_bounds(page)
-    if band_left is not None:
-        left = max(left, band_left)
-    if band_right is not None:
-        right = min(right, band_right)
+
+    def givable(x0: float, x1: float) -> bool:
+        """Is the ink between two x positions safe to hand to a strip?"""
+        if fitz_page is None:
+            return False
+        return _ink_is_artifact_like(fitz_page, x0, x1, top, bottom)
+
+    if band_left is not None and band_left > left and givable(left, band_left):
+        left = band_left
+    if band_right is not None and band_right < right and givable(band_right, right):
+        right = band_right
+    # The top bound is not gated the same way: the ink above a header row is
+    # bleed-through by construction (see EDGE_BLEED_PT, HEADER_MAX_FRACTION),
+    # which is exactly what a top strip is for.
     if header_top is not None:
         top = max(top, header_top)
     if right - left < page.pdf_width * MIN_TEXT_WIDTH_FRACTION or bottom <= top:
@@ -306,6 +377,17 @@ def _shrink_rects_for_detections(page: Page, rects: list[dict]) -> None:
                 rect["x0"] = max(rect["x0"], box.x2)
 
 
+def _page_size_agrees(page: Page, width: float, height: float) -> bool:
+    """Does a detected page describe the PDF page it is paired with?
+
+    :param page: The detected page, carrying the size detection ran against.
+    :param width: The PDF page's width in points.
+    :param height: The PDF page's height in points.
+    :returns: True when the two agree to within a point.
+    """
+    return abs(page.pdf_width - width) <= 1.0 and abs(page.pdf_height - height) <= 1.0
+
+
 def compute_margin_rects(
     pdf_path: Path,
     buffer: float = DEFAULT_BUFFER,
@@ -351,8 +433,22 @@ def compute_margin_rects(
                 continue
 
             detected = by_index.get(page_idx)
+            if detected is not None and not _page_size_agrees(detected, pw, ph):
+                # Every detection-derived bound is in the caller's frame. If
+                # that frame is not this page's, a strip computed from it
+                # lands somewhere arbitrary, so use the marks alone.
+                logger.warning(
+                    "Page %d: detections describe a %.0fx%.0f page but the PDF "
+                    "page is %.0fx%.0f; ignoring them for margins",
+                    page_idx,
+                    detected.pdf_width,
+                    detected.pdf_height,
+                    pw,
+                    ph,
+                )
+                detected = None
             if detected is not None:
-                bounds = _tighten_bounds(bounds, detected)
+                bounds = _tighten_bounds(bounds, detected, page)
             entry["rects"] = _rects_for_bounds(bounds, pw, ph, buffer)
             if detected is not None:
                 _shrink_rects_for_detections(detected, entry["rects"])

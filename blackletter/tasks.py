@@ -364,6 +364,7 @@ def pair_and_compute_rects(
     """
     from blackletter.models import Detection, Document, Page
     from blackletter.scanner import (
+        snap_document_columns,
         _pair_opinions,
         _build_opinions_data,
         _group_detections_by_page,
@@ -421,6 +422,7 @@ def pair_and_compute_rects(
         first_page=first_page,
         ocr_applied=True,
     )
+    snap_document_columns(document)
 
     # Pair
     opinions = _pair_opinions(document, excluded=excluded)

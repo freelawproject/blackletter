@@ -121,10 +121,10 @@ class TestBuildAnalysis:
 
 class TestBuildRedactions:
     @staticmethod
-    def _page():
+    def _page(index: int = 0):
         # img dims twice the page size, so scale is 0.5 and the conversion
         # is visible in the output.
-        page = detected_page([detection(Label.TEXT_COLUMN, 72, 100, 540, 700)])
+        page = detected_page([detection(Label.TEXT_COLUMN, 72, 100, 540, 700)], page_index=index)
         page.img_width = int(PAGE_W * 2)
         page.img_height = int(PAGE_H * 2)
         return page
@@ -241,7 +241,7 @@ class TestBuildRedactions:
         assert payload["pages"] == {}
 
     def test_page_keys_are_strings_in_order(self):
-        pages = [self._page()]
+        pages = [self._page(index) for index in (0, 1, 2)]
         rects = [
             {"page_index": 2, "rects": []},
             {"page_index": 0, "rects": []},
@@ -249,6 +249,24 @@ class TestBuildRedactions:
         ]
         payload = build_redactions(pages, rects, [], [])
         assert list(payload["pages"]) == ["0", "1", "2"]
+
+    def test_rects_for_an_unknown_page_are_an_error(self):
+        """Silence here would mean pixel coordinates read as points.
+
+        The scale factors come from the page's own image dimensions, so a
+        page the caller did not pass has nothing to convert its rects by,
+        and guessing would be wrong by whatever the render resolution was.
+        """
+        rects = [
+            {
+                "page_index": 7,
+                "rects": [
+                    {"x0": 10, "y0": 20, "x1": 30, "y1": 40, "fill": "black", "type": "headnote"}
+                ],
+            }
+        ]
+        with pytest.raises(KeyError, match="page 7"):
+            build_redactions([self._page()], rects, [], [])
 
     def test_page_without_image_dimensions_is_left_in_points(self):
         """A page with no detections has no pixel geometry to scale by."""
@@ -360,3 +378,42 @@ def test_parse_expected_range_is_public(tmp_path, name, expected):
     pdf = tmp_path / name
     pdf.write_bytes(b"%PDF-1.4\n")
     assert parse_expected_range(pdf) == expected
+
+
+class TestProcessExposesTheFlags:
+    """``process()`` is the documented Python entry point.
+
+    The README tells a Python caller to pass ``--text-layer`` for searchable
+    output, and CHANGES tells one who wants the old pre-pass back to pass
+    ``ocr=True``. Both go through ``cmd_process``, which reads them off an
+    ``argparse.Namespace`` that ``process()`` builds by hand, so a flag left
+    out of that namespace silently does nothing.
+    """
+
+    def test_both_flags_reach_the_namespace(self, monkeypatch):
+        import argparse
+
+        import blackletter.process as bl
+
+        seen: dict[str, argparse.Namespace] = {}
+        monkeypatch.setattr(bl, "cmd_process", lambda args: seen.setdefault("args", args))
+        monkeypatch.setattr(bl, "_build_output_dir", lambda args: args.output)
+
+        bl.process("in.pdf", "out", text_layer=True, ocr=True)
+
+        assert seen["args"].text_layer is True
+        assert seen["args"].ocr is True
+
+    def test_they_default_to_off(self, monkeypatch):
+        import argparse
+
+        import blackletter.process as bl
+
+        seen: dict[str, argparse.Namespace] = {}
+        monkeypatch.setattr(bl, "cmd_process", lambda args: seen.setdefault("args", args))
+        monkeypatch.setattr(bl, "_build_output_dir", lambda args: args.output)
+
+        bl.process("in.pdf", "out")
+
+        assert seen["args"].text_layer is False
+        assert seen["args"].ocr is False

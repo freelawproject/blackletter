@@ -14,6 +14,8 @@ from blackletter import ink
 from blackletter.models import BBox, Detection, Label
 from blackletter.refine import refine_headnote_rects
 from blackletter.scanner import (
+    clamp_to_gutters,
+    snap_document_columns,
     scan,
     split_opinions,
     recompress_images,
@@ -524,9 +526,22 @@ def compute_redaction_rects(
             # that has just been snapped to a column box or cut at a
             # detection is exactly the kind that clips a character.
             _grow_headnote_rects(src_pdf[src_idx], page, page_rects, _ocr_applied)
-            result[src_idx] = page_rects
+            result[src_idx] = _drop_degenerate(page_rects)
 
     return [{"page_index": pi, "rects": rects} for pi, rects in sorted(result.items())]
+
+
+def _drop_degenerate(rects: list[dict]) -> list[dict]:
+    """Remove rects with no area.
+
+    ``_add_px`` rejects these on the way in, and the passes that finish a
+    headnote rect run after it, so the same check belongs on the way out: a
+    zero-width black rect covers nothing while looking like coverage.
+
+    :param rects: Rect dicts in any coordinate space.
+    :returns: Those with positive width and height, in order.
+    """
+    return [r for r in rects if r["x1"] > r["x0"] and r["y1"] > r["y0"]]
 
 
 def _grow_headnote_rects(fitz_page, page, rects: list[dict], ocr_applied: bool) -> None:
@@ -537,6 +552,13 @@ def _grow_headnote_rects(fitz_page, page, rects: list[dict], ocr_applied: bool) 
     position, or the ink bottom, which already sits on the last line. Here
     they do not: an edge snapped to a column box or cut at a detection is
     just as likely to clip a line as a side edge is to clip a character.
+
+    Growth is held inside the rect's own column (see
+    :func:`~blackletter.scanner.clamp_to_gutters`). Stopping at blank space
+    is not enough on its own: where a gutter is thinner than a measuring
+    pixel the walk starts past it, and a short rect then meets the facing
+    column's text before it has spent the margin that would have had the
+    growth refused.
 
     Runs whatever the page's text situation is, deliberately. The snap that
     precedes it replaces each rect's side edges with the column box on any
@@ -557,9 +579,12 @@ def _grow_headnote_rects(fitz_page, page, rects: list[dict], ocr_applied: bool) 
     for r in rects:
         if r.get("type") != "headnote":
             continue
-        grown = ink.grow_to_ink(
-            fitz_page,
-            fitz.Rect(r["x0"] * sx, r["y0"] * sy, r["x1"] * sx, r["y1"] * sy),
+        grown = clamp_to_gutters(
+            page,
+            ink.grow_to_ink(
+                fitz_page,
+                fitz.Rect(r["x0"] * sx, r["y0"] * sy, r["x1"] * sx, r["y1"] * sy),
+            ),
         )
         r["x0"] = round(grown.x0 / sx, 1)
         r["y0"] = round(grown.y0 / sy, 1)
@@ -637,6 +662,14 @@ def _snap_headnote_x_to_columns(page, rects: list[dict]) -> None:
     left-hand rect is the *right* one, and snapping to it would move the
     rect across the page.
 
+    A box is used only if it is plausibly this rect's column, meaning its
+    width is within :data:`COLUMN_WIDTH_TOLERANCE` of the rect's. Both ways
+    of failing that have been seen and both are damaging: a box spanning two
+    columns, from a merged detection or a hand edit, stretches every headnote
+    blackout across the court's own text in the facing column, and a
+    degenerate box collapses the rect to nothing, leaving the headnotes it
+    should have covered in the deliverable.
+
     Rects are modified in place, in image pixel coordinates.
 
     :param page: The page whose detections to read.
@@ -652,11 +685,19 @@ def _snap_headnote_x_to_columns(page, rects: list[dict]) -> None:
     for r in rects:
         if r.get("type") != "headnote":
             continue
-        center = (r["x0"] + r["x1"]) / 2
-        same_side = [c for c in columns if (c.bbox.center_x < midpoint) == (center < midpoint)]
-        if not same_side:
+        width = r["x1"] - r["x0"]
+        if width <= 0:
             continue
-        best = min(same_side, key=lambda c: abs(c.bbox.center_x - center))
+        center = (r["x0"] + r["x1"]) / 2
+        candidates = [
+            c
+            for c in columns
+            if (c.bbox.center_x < midpoint) == (center < midpoint)
+            and width / COLUMN_WIDTH_TOLERANCE <= c.bbox.width <= width * COLUMN_WIDTH_TOLERANCE
+        ]
+        if not candidates:
+            continue
+        best = min(candidates, key=lambda c: abs(c.bbox.center_x - center))
         r["x0"] = round(best.bbox.x1, 1)
         r["x1"] = round(best.bbox.x2, 1)
 
@@ -664,6 +705,12 @@ def _snap_headnote_x_to_columns(page, rects: list[dict]) -> None:
 # Blank band left between the pieces of a split headnote rect, in image
 # pixels, so the two do not share an edge.
 HEADNOTE_SPLIT_GAP = 6.0
+
+# How far a column box's width may differ from a headnote rect's before it is
+# not taken for that rect's column. Generous, because the two are derived
+# differently and a real column box is only a few points out; the point is to
+# reject a box spanning two columns, or one with no width at all.
+COLUMN_WIDTH_TOLERANCE = 1.5
 
 
 def _split_headnote_rects_at_headnotes(page, rects: list[dict]) -> list[dict]:
@@ -1768,6 +1815,14 @@ def rebuild_full_redacted_from_detections(
 
     Reconstructs the Document object from detections.json, re-pairs opinions
     (with optional exclusions), and calls _build_full_redacted.
+
+    Note that ``_build_full_redacted`` derives headnote rects from the
+    detections alone. It does not run the passes that
+    :func:`compute_redaction_rects` applies afterwards (snapping each rect to
+    its column box, cutting it at the headnotes inside it, growing it onto
+    adjoining ink), so this output is not identical to a redaction built from
+    a saved ``redaction_rects.json``. Use ``_build_redacted_from_rects`` when
+    that file exists.
     """
     import json as _json
     from blackletter.models import Detection, Document, Page
@@ -1812,6 +1867,7 @@ def rebuild_full_redacted_from_detections(
         first_page=first_page,
         ocr_applied=True,
     )
+    snap_document_columns(document)
 
     opinions = _pair_opinions(document, excluded=excluded)
     print(f"  Rebuilt {len(opinions)} opinions from detections")
@@ -1916,6 +1972,7 @@ def generate_files(
         first_page=first_page,
         ocr_applied=True,
     )
+    snap_document_columns(document)
 
     # Pair opinions
     _t0 = _time.time()
@@ -2056,6 +2113,8 @@ def process(
     bitonal: bool = False,
     detect_only: bool = False,
     has_state_abbrev: bool | None = None,
+    text_layer: bool = False,
+    ocr: bool = False,
 ) -> Path:
     """Process a legal PDF: scan, verify, split, and redact.
 
@@ -2073,6 +2132,11 @@ def process(
         optimize: ocrmypdf optimization level (0-3).
         progress_callback: Optional callable(current, total, message) for progress.
         detect_only: If True, stop after detection + pairing (Phase 1).
+        text_layer: Add a searchable text layer to the generated PDFs,
+            after redaction. Off by default; see ``api.add_text_layer``.
+        ocr: Run the ocrmypdf pre-pass over the source before detection.
+            Off by default and rarely wanted, since the geometry measures
+            the page ink; prefer ``text_layer``.
 
     Returns:
         Path to the output directory containing all results.
@@ -2101,6 +2165,8 @@ def process(
         bitonal=bitonal,
         detect_only=detect_only,
         has_state_abbrev=has_state_abbrev,
+        text_layer=text_layer,
+        ocr=ocr,
     )
     cmd_process(args)
     return _build_output_dir(args)
