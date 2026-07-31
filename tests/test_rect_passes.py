@@ -361,9 +361,7 @@ class TestClipHeadnoteRectGutter:
         )
         rect = fitz.Rect(left.x0, 200, left.x1, 206)
         with fitz.open(str(pdf)) as doc:
-            clipped = _clip_headnote_rect(
-                doc[0], rect, 50.0, PAGE_H, ocr_applied=True, page=page
-            )
+            clipped = _clip_headnote_rect(doc[0], rect, 50.0, PAGE_H, ocr_applied=True, page=page)
         assert clipped is not None
         assert clipped.x1 <= right.x0, f"grew into the facing column, to {clipped.x1}"
 
