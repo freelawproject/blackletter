@@ -16,6 +16,7 @@ import fitz
 
 from blackletter.process import (
     _drop_degenerate,
+    _drop_rects_off_the_columns,
     _grow_headnote_rects,
     _snap_headnote_x_to_columns,
     _split_headnote_rects_at_headnotes,
@@ -374,3 +375,58 @@ class TestClipHeadnoteRectGutter:
         with fitz.open(str(pdf)) as doc:
             clipped = _clip_headnote_rect(doc[0], rect, 50.0, PAGE_H, ocr_applied=True)
         assert clipped is not None
+
+
+class TestDropRectsOffTheColumns:
+    """A headnote rect that touches no column is not covering headnote text.
+
+    Real case, from a reporter volume: on a band whose columns are blank,
+    the tightening finds the only ink there is, a speck out in the margin,
+    and the rect collapses onto it. The column snap will not rescue it,
+    because by then the rect is a few points wide and the column box is not
+    a plausible width for it. What ships is a small black mark printed over
+    a speck, in a band that needed no covering at all.
+    """
+
+    def test_a_rect_collapsed_onto_a_margin_speck_is_dropped(self):
+        page = detected_page(columns())
+        speck = headnote(40, 150, 52, 160)
+        assert _drop_rects_off_the_columns(page, [speck]) == []
+
+    def test_a_rect_on_a_column_is_kept(self):
+        page = detected_page(columns())
+        rects = [headnote(*LEFT_COL[:1], 150, LEFT_COL[1], 400)]
+        assert _drop_rects_off_the_columns(page, rects) == rects
+
+    def test_a_rect_overlapping_a_column_at_all_is_kept(self):
+        """Partial overlap still covers column text, so it stays."""
+        page = detected_page(columns())
+        rects = [headnote(40, 150, LEFT_COL[0] + 5, 400)]
+        assert _drop_rects_off_the_columns(page, rects) == rects
+
+    def test_a_rect_in_the_gutter_is_dropped(self):
+        page = detected_page(columns())
+        gutter = headnote(LEFT_COL[1] + 2, 150, RIGHT_COL[0] - 2, 400)
+        assert _drop_rects_off_the_columns(page, [gutter]) == []
+
+    def test_a_rect_above_the_columns_is_dropped(self):
+        """Vertical position counts too: the header band is not a column."""
+        page = detected_page(columns())
+        header = headnote(LEFT_COL[0], 20, LEFT_COL[1], 60)
+        assert _drop_rects_off_the_columns(page, [header]) == []
+
+    def test_other_rect_types_are_untouched(self):
+        """Only headnote rects are judged this way.
+
+        A page number or a key icon whiteout sits outside the columns by
+        definition, and covering it is the whole point.
+        """
+        page = detected_page(columns())
+        icon = {**headnote(40, 150, 52, 160), "type": "KEY_ICON"}
+        assert _drop_rects_off_the_columns(page, [icon]) == [icon]
+
+    def test_a_page_with_no_columns_keeps_everything(self):
+        """With nothing to be outside of, there is nothing to judge."""
+        page = detected_page([])
+        rects = [headnote(40, 150, 52, 160)]
+        assert _drop_rects_off_the_columns(page, rects) == rects

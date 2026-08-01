@@ -526,9 +526,47 @@ def compute_redaction_rects(
             # that has just been snapped to a column box or cut at a
             # detection is exactly the kind that clips a character.
             _grow_headnote_rects(src_pdf[src_idx], page, page_rects, _ocr_applied)
+            page_rects = _drop_rects_off_the_columns(page, page_rects)
             result[src_idx] = _drop_degenerate(page_rects)
 
     return [{"page_index": pi, "rects": rects} for pi, rects in sorted(result.items())]
+
+
+def _drop_rects_off_the_columns(page, rects: list[dict]) -> list[dict]:
+    """Remove headnote rects that touch none of the page's text columns.
+
+    A headnote rect exists to cover headnote text, and headnote text is set
+    in a text column, so a finished rect that overlaps no column is covering
+    something that is not headnote text.
+
+    That happens on a band with no column text in it at all: the tightening
+    finds the only ink there is, which on a real page can be a speck in the
+    margin or a fold shadow, and the rect collapses onto it. The column snap
+    would normally pull such a rect back to its column, but it refuses a box
+    whose width is implausible for the rect (see
+    :func:`_snap_headnote_x_to_columns`), and by then the rect is a few
+    points wide. The result is a small black mark printed over a speck, in a
+    band whose columns are blank -- so dropping it removes a blemish and
+    covers nothing that needed covering.
+
+    Only rects on a page that has at least one ``TEXT_COLUMN`` are judged:
+    with no columns detected there is nothing to be outside of, and every
+    headnote rect on the page would be dropped.
+
+    :param page: The page whose detections to read.
+    :param rects: That page's rect dicts, in image pixel coordinates.
+    :returns: The rects to keep, in order.
+    """
+    columns = [d.bbox for d in page.detections if d.label == Label.TEXT_COLUMN]
+    if not columns:
+        return rects
+
+    def on_a_column(r: dict) -> bool:
+        return any(
+            r["x0"] < c.x2 and r["x1"] > c.x1 and r["y0"] < c.y2 and r["y1"] > c.y1 for c in columns
+        )
+
+    return [r for r in rects if r.get("type") != "headnote" or on_a_column(r)]
 
 
 def _drop_degenerate(rects: list[dict]) -> list[dict]:
