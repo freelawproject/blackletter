@@ -56,20 +56,21 @@ process(
 )
 ```
 
-This runs the full pipeline: OCR (if needed), YOLO detection, page number extraction, opinion splitting, and redaction — all in one pass.
+This runs the full pipeline: YOLO detection, page number extraction, opinion splitting, and redaction, all in one pass. No text layer is added: the geometry measures the page's ink directly. Pass `--text-layer` if you want the delivered PDFs to be searchable.
 
 ## How It Works
 
 The `process` command runs a single-pass pipeline:
 
-1. **OCR** (if needed): Detects image-only PDFs, downsamples pages, and adds a text layer via ocrmypdf/tesseract
-2. **Detection**: Runs a YOLO model to identify proprietary elements (headnotes, captions, key cites, brackets, etc.) and structural elements (page numbers, dividers, footnotes)
-3. **Page Numbers**: Extracts and validates page numbers using OCR on detected regions
-4. **Opinion Pairing**: Matches case captions to key icons to identify opinion boundaries
-5. **Splitting & Redaction**: Produces per-opinion variants and an optional per-page LLM split:
+1. **Detection**: Runs a YOLO model to identify proprietary elements (headnotes, captions, key cites, brackets, etc.) and structural elements (page numbers, dividers, footnotes)
+2. **Page Numbers**: Extracts and validates page numbers using OCR on detected regions
+3. **Opinion Pairing**: Matches case captions to key icons to identify opinion boundaries
+4. **Splitting & Redaction**: Produces per-opinion variants and an optional per-page LLM split:
    - **Unredacted** (opt-in, via `--unredacted`): Raw opinion pages extracted from the source
    - **Redacted**: Per-opinion PDFs with potentially copyrighted content (headnotes, brackets, key icons) blacked out
    - **LLM** (opt-in, via `--llm`): One PDF per source page, sliced from the fully redacted document, with an invisible `<--CASEEND-->` marker stamped on every redacted Key-icon location so downstream LLM passes can detect opinion boundaries
+
+A searchable text layer is optional and comes last, over the files that have already been redacted and masked (`--text-layer` on the CLI, or `api.add_text_layer` from Python). Doing it this way avoids spending OCR time on content that is about to be blacked out. To OCR the source *before* detection instead, pass `--ocr`.
 
 Additionally produces:
 - A full redacted copy of the entire document
@@ -113,6 +114,8 @@ Options:
   --optimize {0,1,2,3}      ocrmypdf optimization level (default: 1)
   --bitonal                 Convert to 1-bit B&W before processing (for already-bitonal scans)
   --detect-only             Stop after detection and pairing — no PDFs written (Phase 1 only)
+  --text-layer              Add a searchable text layer to the generated PDFs, after redaction
+  --ocr                     OCR the source before detection (rarely needed; prefer --text-layer)
 ```
 
 ### Validate Command

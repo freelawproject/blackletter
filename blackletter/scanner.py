@@ -8,6 +8,7 @@ import re
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ import fitz
 import numpy as np
 from PIL import Image
 
+from blackletter import ink
 from blackletter.models import BBox, Detection, Document, Label, Page
 
 if TYPE_CHECKING:
@@ -540,7 +542,7 @@ def scan(
     first_page: int = 1,
     output_dir: Path | None = None,
     shrink: bool = False,
-    skip_ocr: bool = False,
+    ocr: bool = False,
     optimize: int = 1,
     output_name: str | None = None,
     device: str | None = None,
@@ -548,9 +550,13 @@ def scan(
 ) -> Document:
     """Scan a PDF and return a Document with all detections.
 
-    If the PDF has no text layer, automatically runs OCR first to add
-    one (required for accurate page number extraction and redaction
-    tightening).
+    No text layer is added. The geometry measures the page's ink instead
+    (see :func:`_measure_from_ink`), and page numbers are read from their
+    own crops, so nothing here needs one. Pass ``ocr=True`` to run the
+    ocrmypdf pre-pass anyway on a PDF that has no text layer, or use
+    :func:`blackletter.api.add_text_layer` afterwards on the files you
+    actually want searchable, which is cheaper and does not OCR content
+    that is about to be redacted.
 
     :param pdf_path: Path to the source PDF.
     :param model: Loaded YOLO model instance.
@@ -559,7 +565,8 @@ def scan(
     :param output_dir: Directory for intermediate and output files.
     :param shrink: Downsample images to ~148 KB/page even if the PDF
         already has a text layer.
-    :param skip_ocr: Never run OCR regardless of text layer presence.
+    :param ocr: Run the ocrmypdf pre-pass when the PDF has no text layer.
+        Off by default: the pipeline no longer needs it.
     :param optimize: OCR optimization level (passed to ocrmypdf).
     :param output_name: Custom stem for output filenames.
     :param device: YOLO inference device (e.g. ``"cpu"``, ``"cuda:0"``).
@@ -576,7 +583,7 @@ def scan(
     # Fix rotated pages first so all downstream coordinates are consistent.
     actual_path = _fix_rotated_pages(pdf_path, dest_dir, out_stem)
 
-    if not skip_ocr and needs_ocr(actual_path):
+    if ocr and needs_ocr(actual_path):
         print("  PDF has no text layer, running OCR...")
         ocr_out = dest_dir / f"{out_stem}.pdf"
         ocr_pdf(actual_path, ocr_out, optimize=optimize)
@@ -827,6 +834,18 @@ def scan(
                         batch_end, total_pages, f"Scanning page {batch_end}/{total_pages}"
                     )
 
+    # Correct the column boxes once every page has its detections, so that
+    # all three consumers of them (headnote rect x-bounds, the margin text
+    # band, the outside-opinion masks) read edges that sit on the text.
+    # Deliberately outside the two detection paths above: they assemble
+    # their pages differently, and doing this per path meant the parallel
+    # one silently skipped it, which is every document of 40 pages or more.
+    snapped = 0
+    for page in doc.pages:
+        snapped += snap_text_columns_to_ink(pdf[page.index], page)
+    if snapped:
+        print(f"  Snapped {snapped} column boxes to the page ink", flush=True)
+
     # Sequential correction pass: fix misreads using neighbor context
     _correct_page_numbers(doc.pages)
 
@@ -1030,22 +1049,205 @@ def _words_in_rect(fitz_page, rect: fitz.Rect) -> list[tuple]:
     return [w for w in all_words if w[0] < rx1 and w[2] > rx0 and w[1] < ry1 and w[3] > ry0]
 
 
+def _measure_from_ink(fitz_page, ocr_applied: bool) -> bool:
+    """Whether to measure this page's geometry from ink instead of words.
+
+    Two cases call for it. A page with no words at all has no text layer
+    (:func:`blackletter.api.ocr` never ran), and the word-based helpers
+    below degrade badly there rather than gracefully: ``_text_bottom``
+    reports the top of its clip, which collapses every headnote rect to
+    zero height. And when the text layer came from our own OCR
+    (``ocr_applied``) the word positions are imprecise, which is why
+    :func:`_clip_headnote_rect` used to skip text tightening altogether;
+    ink is measured from the same pixels the OCR read, so it is the better
+    of the two rather than a reason to give up.
+
+    :param fitz_page: The page about to be measured.
+    :param ocr_applied: Whether the text layer came from our own OCR.
+    :returns: True to measure from ink.
+    """
+    return ocr_applied or not _get_page_words(fitz_page)
+
+
+def _grow_rect_to_ink(fitz_page, rect: fitz.Rect, ocr_applied: bool) -> fitz.Rect:
+    """Widen a rect over ink that continues past its side edges.
+
+    Word boxes gave rects this slack for free, since ``_words_in_rect``
+    returns every word *overlapping* a rect and the bounds derived from them
+    could therefore fall outside it: an edge that clipped a character
+    absorbed the whole character. Ink measured strictly inside a rect has no
+    such slack, so it is added back here for the pages measured that way.
+
+    Horizontal only. The vertical edges of a headnote rect mean something
+    (a marker position, or the ink bottom, which already sits on the last
+    line), while the side edges are column geometry and can land a few
+    points inside the printed text.
+
+    :param fitz_page: The page to measure.
+    :param rect: Rect to widen, in PDF points.
+    :param ocr_applied: Whether the text layer came from our own OCR.
+    :returns: The widened rect, unchanged where words are trustworthy.
+    """
+    if not _measure_from_ink(fitz_page, ocr_applied):
+        return rect
+    return ink.grow_to_ink(fitz_page, rect, margin_y=0.0)
+
+
+def _gutter_limits(page: Page, x_center: float) -> tuple[float, float]:
+    """How far either side of ``x_center`` may reach before the next column.
+
+    A column, or a rect inside one, may claim up to the middle of the gutter
+    it shares with its neighbour. Growth normally stops in that gutter's
+    white space well short of the midpoint, but on a tightly set page the
+    gutter can be thinner than a rendered pixel: the walk then starts past
+    the one blank pixel column that separates the two (see
+    :func:`~blackletter.ink._outside_after`) and the neighbour's text is the
+    next ink it meets. This bound does not care how the ink falls.
+
+    :param page: The detected page, for its column boxes.
+    :param x_center: Centre of the column or rect, in PDF points.
+    :returns: ``(low, high)`` in PDF points, infinite where there is no
+        neighbour on that side.
+    """
+    sx = page.scale_x
+    columns = sorted(
+        (d.bbox for d in page.detections if d.label == Label.TEXT_COLUMN),
+        key=lambda b: b.x1,
+    )
+    holding = next((b for b in columns if b.x1 * sx <= x_center <= b.x2 * sx), None)
+    if holding is None:
+        # Nothing says which column this is, so nothing bounds it. The
+        # refusal rule and the blank-space stop still apply.
+        return float("-inf"), float("inf")
+    before = [b for b in columns if b.x2 * sx < holding.x1 * sx]
+    after = [b for b in columns if b.x1 * sx > holding.x2 * sx]
+    low = (before[-1].x2 * sx + holding.x1 * sx) / 2 if before else float("-inf")
+    high = (holding.x2 * sx + after[0].x1 * sx) / 2 if after else float("inf")
+    return low, high
+
+
+def clamp_to_gutters(page: Page, rect: fitz.Rect) -> fitz.Rect:
+    """Hold a rect inside the column it belongs to.
+
+    :param page: The detected page, for its column boxes.
+    :param rect: The rect to bound, in PDF points.
+    :returns: The rect, with its side edges pulled back to the gutter
+        midpoints on either side of it.
+    """
+    low, high = _gutter_limits(page, (rect.x0 + rect.x1) / 2)
+    return fitz.Rect(max(rect.x0, low), rect.y0, min(rect.x1, high), rect.y1)
+
+
+def snap_text_columns_to_ink(fitz_page, page: Page) -> int:
+    """Widen a page's ``TEXT_COLUMN`` detections onto the text they clip.
+
+    YOLO's column boxes land a little inside the printed text: median 0.4 pt
+    on a real reporter volume, but up to ~7 pt, which is more than a
+    character. Three consumers depend on them and each would otherwise pay
+    for it separately: headnote rects snap their x-bounds to these boxes,
+    the margin strips take them as the text band, and
+    :func:`_outside_opinion_rects` masks whole columns with them, so a box a
+    few points narrow leaves the first or last character of every masked
+    line behind. Correcting the boxes once, here, fixes all three.
+
+    Only the x-bounds move. :func:`_column_bounds_pdf` reads nothing else off
+    these detections and :func:`_margin_bounds` does not read them at all,
+    so leaving y alone keeps header and footer geometry untouched.
+
+    :param fitz_page: The page the detections were measured against.
+    :param page: The detected page, mutated in place.
+    :returns: Number of detections widened.
+    """
+    # Positions are kept so each widened box can replace the exact entry it
+    # came from: Detection compares by value, so two identical boxes on one
+    # page would otherwise be indistinguishable.
+    indexed = sorted(
+        ((i, d) for i, d in enumerate(page.detections) if d.label == Label.TEXT_COLUMN),
+        key=lambda pair: pair[1].bbox.x1,
+    )
+    if not indexed:
+        return 0
+    columns = [d for _i, d in indexed]
+
+    sx, sy = page.scale_x, page.scale_y
+    limits = [_gutter_limits(page, det.bbox.center_x * sx) for det in columns]
+
+    changed = 0
+    for (position, det), (low, high) in zip(indexed, limits, strict=True):
+        rect = det.bbox.to_fitz_pdf_rect(sx, sy)
+        # grow_to_ink refuses an edge that ran the whole way to its margin,
+        # which is what a full-width table under a one-column detection
+        # does, so only the gutter cap is applied here.
+        box = ink.grow_to_ink(fitz_page, rect, margin_y=0.0)
+        new_x1 = round(max(box.x0, low) / sx, 1)
+        new_x2 = round(min(box.x1, high) / sx, 1)
+        if abs(new_x1 - det.bbox.x1) < 1 and abs(new_x2 - det.bbox.x2) < 1:
+            continue
+        page.detections[position] = replace(det, bbox=replace(det.bbox, x1=new_x1, x2=new_x2))
+        changed += 1
+    return changed
+
+
+def snap_document_columns(document: Document) -> int:
+    """Correct every page's ``TEXT_COLUMN`` boxes against its ink.
+
+    :func:`scan` does this as it detects, but a caller that detects
+    elsewhere, or reloads detections from a sidecar, holds boxes that were
+    never corrected. Three consumers read them (headnote rect x-bounds, the
+    margin text band, the outside-opinion masks), and only the first two
+    recover on their own, so the margin strips of a volume would otherwise
+    depend on which entry point produced it.
+
+    Safe to call more than once: the correction converges, and a box already
+    on its text does not move.
+
+    :param document: The document to correct, mutated in place.
+    :returns: Number of column boxes widened.
+    """
+    if not document.pages:
+        return 0
+    changed = 0
+    with fitz.open(str(document.pdf_path)) as pdf:
+        for page in document.pages:
+            if page.index < pdf.page_count:
+                changed += snap_text_columns_to_ink(pdf[page.index], page)
+    return changed
+
+
 def _tighten_to_text(
     fitz_page,
     rect: fitz.Rect,
     padding: float = 2.0,
     skip: bool = False,
+    ocr_applied: bool = False,
 ) -> fitz.Rect | None:
-    """Shrink a rect to tightly fit the PDF text within it.
+    """Shrink a rect to tightly fit the content within it.
 
     Uses word-level extraction for precise bounds (important for small
-    elements like brackets, page numbers, state abbreviations).
+    elements like brackets, page numbers, state abbreviations), or the
+    page's ink where words are unavailable or imprecise (see
+    :func:`_measure_from_ink`).
 
-    Returns None if no text is found inside the rect, or if skip=True
-    (used when text layer is from our own OCR and positions are imprecise).
+    Returns None if no content is found inside the rect, or if skip=True.
+
+    :param fitz_page: PyMuPDF page used to measure bounds.
+    :param rect: Input rect in PDF points.
+    :param padding: Points of slack left around the content.
+    :param skip: When True, decline to tighten.
+    :param ocr_applied: Whether the text layer came from our own OCR.
+    :returns: The tightened rect, or None.
     """
     if skip:
         return None
+    if _measure_from_ink(fitz_page, ocr_applied):
+        # Without this a headnote block starts at the top of its column
+        # rather than at its first line, and a later split at HEADNOTE
+        # boundaries carves the white gap above that line into a rect of
+        # its own: a small black box with nothing in it.
+        box = ink.ink_bbox(fitz_page, rect)
+        if box is None:
+            return None
+        return fitz.Rect(box[0] - padding, box[1] - padding, box[2] + padding, box[3] + padding)
     # words = [(x0, y0, x1, y1, word, block_no, line_no, word_no), ...]
     words = _words_in_rect(fitz_page, rect)
     if not words:
@@ -1190,16 +1392,57 @@ def _margin_bounds(page: Page) -> tuple[float, float]:
     return top_bottom, bot_top
 
 
-def _text_bottom(fitz_page, clip: fitz.Rect) -> float:
-    """Return the y-coordinate of the bottom of the last text in clip."""
+def _text_bottom(fitz_page, clip: fitz.Rect, ocr_applied: bool = False) -> float:
+    """Return the y-coordinate of the bottom of the last content in clip.
+
+    Measured from ink where words are unavailable or imprecise (see
+    :func:`_measure_from_ink`). The ink path has three outcomes, and the
+    distinction between the last two is what keeps it safe: ink inside the
+    region gives the bottom of the last line; no ink means the region really
+    is blank, so ``clip.y0`` is returned and the caller drops the rect,
+    which is right, since an empty rect paints a black box over white space;
+    but when the region lies outside the page's content box the ink cannot
+    say anything about it, so nothing is clamped rather than guessing it is
+    empty.
+
+    :param fitz_page: PyMuPDF page used to measure bounds.
+    :param clip: Region of interest, in PDF points.
+    :param ocr_applied: Whether the text layer came from our own OCR.
+    :returns: Bottom of the content, ``clip.y0`` for a blank region, or
+        ``clip.y1`` when the region cannot be measured.
+    """
+    if _measure_from_ink(fitz_page, ocr_applied):
+        if ink.content_clip(fitz_page, clip) is None:
+            return clip.y1
+        box = ink.ink_bbox(fitz_page, clip)
+        return clip.y0 if box is None else box[3]
     words = _words_in_rect(fitz_page, clip)
     if not words:
         return clip.y0
     return max(w[3] for w in words)
 
 
-def _text_x_bounds(fitz_page, clip: fitz.Rect, padding: float = 2.0) -> tuple[float, float]:
-    """Return (left, right) x-coordinates of the text extent within clip."""
+def _text_x_bounds(
+    fitz_page, clip: fitz.Rect, padding: float = 2.0, ocr_applied: bool = False
+) -> tuple[float, float]:
+    """Return (left, right) x-coordinates of the content extent within clip.
+
+    Where words are unavailable or imprecise (see :func:`_measure_from_ink`)
+    the clip keeps its own x-bounds rather than being narrowed to the ink.
+    Shrinking horizontally is the unsafe direction for a headnote rect: too
+    narrow leaves headnote text in the deliverable, while too wide only
+    blacks out margin that the cleanup pass whites out anyway. The x-bounds
+    of a headnote rect come from ``TEXT_COLUMN`` detections, which are a
+    firmer source than either words or ink.
+
+    :param fitz_page: PyMuPDF page used to measure bounds.
+    :param clip: Region of interest, in PDF points.
+    :param padding: Points of slack left around the words.
+    :param ocr_applied: Whether the text layer came from our own OCR.
+    :returns: ``(left, right)`` in PDF points.
+    """
+    if _measure_from_ink(fitz_page, ocr_applied):
+        return clip.x0, clip.x1
     words = _words_in_rect(fitz_page, clip)
     if not words:
         return clip.x0, clip.x1
@@ -1239,6 +1482,7 @@ def _outside_opinion_rects(
     key: Detection,
     is_first: bool,
     is_last: bool,
+    fitz_page=None,
 ) -> list[fitz.Rect]:
     """Return rects for content outside the opinion span on this page.
 
@@ -1249,6 +1493,14 @@ def _outside_opinion_rects(
 
     First page masks everything before the caption in reading order.
     Last page masks everything after the key in reading order.
+
+    :param fitz_page: The PDF page, when available. Given one, each mask is
+        widened over ink that continues past its side edges: these come
+        from the column boxes, so a box sitting a little inside the printed
+        text leaves the first or last character of every masked line
+        behind. Horizontal only, since the vertical edges are the caption
+        and key positions, which mean something. Callers that cannot supply
+        the page get unwidened masks, which is the older behaviour.
     """
     sx, sy = page.scale_x, page.scale_y
     header_bottom, footer_top = _margin_bounds(page)
@@ -1280,7 +1532,10 @@ def _outside_opinion_rects(
             rects.append(fitz.Rect(left_x0, key_box.y2, left_x1, footer_top))
             rects.append(fitz.Rect(right_x0, header_bottom, right_x1, footer_top))
 
-    return [r for r in rects if r.y0 < r.y1 and r.x0 < r.x1]
+    rects = [r for r in rects if r.y0 < r.y1 and r.x0 < r.x1]
+    if fitz_page is not None:
+        rects = [clamp_to_gutters(page, ink.grow_to_ink(fitz_page, r, margin_y=0.0)) for r in rects]
+    return rects
 
 
 def _build_opinions_data(
@@ -1310,7 +1565,9 @@ def _build_opinions_data(
             is_first = pi == caption.page_index
             is_last = pi == key.page_index
             pw = src_pdf[pi].rect.width
-            for rect in _outside_opinion_rects(page, pw, caption, key, is_first, is_last):
+            for rect in _outside_opinion_rects(
+                page, pw, caption, key, is_first, is_last, fitz_page=src_pdf[pi]
+            ):
                 outside_rects.append(
                     {
                         "page_index": pi,
@@ -1524,40 +1781,42 @@ def _clip_headnote_rect(
     header_bottom: float,
     footer_top: float,
     ocr_applied: bool,
+    page: Page | None = None,
 ) -> fitz.Rect | None:
-    """Tighten a headnote rect to page text and clamp it to margin bounds.
+    """Tighten a headnote rect to page content and clamp it to margin bounds.
 
-    When ``ocr_applied`` is True the rect is only clamped to
-    ``(header_bottom, footer_top)``; when False it is further
-    ``_tighten_to_text``-adjusted and clipped to text bounds on all four
-    sides. Returns ``None`` when the resulting rect has no area.
+    The rect is tightened to the content inside it, clipped to that
+    content's bounds, and clamped to ``(header_bottom, footer_top)``. When
+    ``ocr_applied`` is True the measurements come from the page's ink rather
+    than from our own OCR's word boxes, which are imprecise; the x-bounds
+    are then left alone (see :func:`_text_x_bounds`). Returns ``None`` when
+    the resulting rect has no area.
 
-    :param fitz_page: PyMuPDF page used to measure text bounds.
+    :param fitz_page: PyMuPDF page used to measure content bounds.
     :param rect: Input rect in PDF points.
     :param header_bottom: Upper Y cut-off (from :func:`_margin_bounds`).
     :param footer_top: Lower Y cut-off (from :func:`_margin_bounds`).
-    :param ocr_applied: Whether the PDF has a reliable text layer.
+    :param ocr_applied: Whether the text layer came from our own OCR.
+    :param page: The detected page, when the caller has one. Given it,
+        growth is held inside the rect's own column: stopping at blank space
+        is not enough where a gutter is thinner than a measuring pixel, and
+        a rect grown across one blacks out the facing column's text.
     :returns: The clipped rect, or ``None`` if degenerate.
     """
-    if not ocr_applied:
-        tight = _tighten_to_text(fitz_page, rect)
-        if tight is not None:
-            rect = tight
-        text_bot = _text_bottom(fitz_page, rect)
-        text_left, text_right = _text_x_bounds(fitz_page, rect)
-        rect = fitz.Rect(
-            max(rect.x0, text_left),
-            max(rect.y0, header_bottom),
-            min(rect.x1, text_right),
-            min(rect.y1, footer_top, text_bot),
-        )
-    else:
-        rect = fitz.Rect(
-            rect.x0,
-            max(rect.y0, header_bottom),
-            rect.x1,
-            min(rect.y1, footer_top),
-        )
+    tight = _tighten_to_text(fitz_page, rect, ocr_applied=ocr_applied)
+    if tight is not None:
+        rect = tight
+    text_bot = _text_bottom(fitz_page, rect, ocr_applied=ocr_applied)
+    text_left, text_right = _text_x_bounds(fitz_page, rect, ocr_applied=ocr_applied)
+    rect = fitz.Rect(
+        max(rect.x0, text_left),
+        max(rect.y0, header_bottom),
+        min(rect.x1, text_right),
+        min(rect.y1, footer_top, text_bot),
+    )
+    rect = _grow_rect_to_ink(fitz_page, rect, ocr_applied)
+    if page is not None:
+        rect = clamp_to_gutters(page, rect)
     if rect.y0 < rect.y1 and rect.x0 < rect.x1:
         return rect
     return None
@@ -1673,6 +1932,7 @@ def _mask_outside_opinion(
         key,
         is_first,
         is_last,
+        fitz_page=fitz_page,
     ):
         _mask_rect(shape, rect)
 
@@ -2211,6 +2471,7 @@ def split_opinions(
                         key,
                         is_first,
                         is_last,
+                        fitz_page=fitz_page,
                     ):
                         add_safe(rect, (1, 1, 1))
 
@@ -2220,7 +2481,12 @@ def split_opinions(
                     if rect_page_idx != src_idx:
                         continue
                     clipped = _clip_headnote_rect(
-                        fitz_page, rect, header_bottom, footer_top, document.ocr_applied
+                        fitz_page,
+                        rect,
+                        header_bottom,
+                        footer_top,
+                        document.ocr_applied,
+                        page=page,
                     )
                     if clipped is not None:
                         add_safe(clipped, (0, 0, 0))

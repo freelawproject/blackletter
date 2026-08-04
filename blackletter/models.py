@@ -285,7 +285,15 @@ class Page:
 
 @dataclass
 class Document:
-    """A PDF document with pages and detections."""
+    """A PDF document with pages and detections.
+
+    ``ocr_applied`` records that the PDF's text layer came from our own OCR
+    rather than being born digital. Its word positions are then only roughly
+    right, so the redaction geometry measures the page's ink instead (see
+    :func:`blackletter.scanner._measure_from_ink`). A PDF with no text layer
+    at all is measured from ink either way, so the flag only matters when
+    there is a text layer worth distrusting.
+    """
 
     pdf_path: Path
     pages: list[Page] = field(default_factory=list)

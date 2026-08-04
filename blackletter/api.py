@@ -4,24 +4,31 @@ Each function is one discrete step. Call only what you need.
 All functions work with file paths and return file paths or data.
 
 Usage:
-    from blackletter.api import ensure_weights, bitonal, ocr, detect, pair, compute_rects, build_redacted, split_opinions
+    from blackletter.api import ensure_weights, bitonal, detect, pair, compute_rects, build_redacted, split_opinions, add_text_layer
 
     ensure_weights(["large"])  # download large.pt from HF if absent
     bitonal_pdf = bitonal(source_pdf, output_dir)
-    ocr_pdf = ocr(bitonal_pdf, output_dir)
     detections = detect(bitonal_pdf, output_dir, models=["medium", "large"])
-    opinions = pair(detections, ocr_pdf, reporter="a3d", volume="333", first_page=1)
-    rects = compute_rects(ocr_pdf, output_dir)
-    redacted_pdf = build_redacted(ocr_pdf, output_dir)
-    opinion_files = split_opinions(ocr_pdf, output_dir, opinions=opinions)
+    opinions = pair(detections, bitonal_pdf, reporter="a3d", volume="333", first_page=1)
+    rects = compute_rects(bitonal_pdf, output_dir)
+    redacted_pdf = build_redacted(bitonal_pdf, output_dir)
+    opinion_files = split_opinions(bitonal_pdf, output_dir, opinions=opinions)
+    add_text_layer(opinion_files)  # optional, and only worth doing last
+
+No step needs a text layer: the geometry measures the page's ink. ``ocr``
+remains available as a pre-pass over a whole source document, but if what
+you want is searchable *output*, use ``add_text_layer`` on the files you
+are delivering instead. It runs after redaction, so no time is spent
+OCRing content that is about to be blacked out.
 """
 
 from __future__ import annotations
 
 import json
+import tempfile
 import time
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import fitz
@@ -242,6 +249,206 @@ def ocr(
     return output_path
 
 
+def _text_layer_jobs(total: int, jobs: int | None) -> int:
+    """How many files :func:`add_text_layer` should process at once.
+
+    :param total: Number of files that need a text layer.
+    :param jobs: Caller's request, or None to decide from the CPU count.
+    :returns: A worker count of at least 1 and never more than ``total``.
+    """
+    import multiprocessing
+
+    if jobs is None:
+        jobs = multiprocessing.cpu_count() // 2
+    return max(1, min(jobs, total))
+
+
+def _inner_jobs(workers: int) -> int | None:
+    """Cores to give each ocrmypdf run when ``workers`` run side by side.
+
+    Splitting the machine between the workers keeps it busy in both
+    regimes without oversubscribing it. A volume of short opinions is
+    dominated by ocrmypdf's fixed startup cost, so the win comes from
+    running many at once; a handful of long PDFs has little startup cost to
+    amortise and wants ocrmypdf's own page-level parallelism instead.
+
+    :param workers: How many files are being processed at once.
+    :returns: ocrmypdf's ``jobs`` value, or None to leave its default
+        (which is every core) alone for a single worker.
+    """
+    import multiprocessing
+
+    if workers <= 1:
+        return None
+    return max(1, multiprocessing.cpu_count() // workers)
+
+
+def _ocr_in_place(pdf: Path, language: str, optimize: int, jobs: int | None) -> None:
+    """OCR one PDF, replacing it only once ocrmypdf has succeeded.
+
+    The temporary file is created in the target's own directory so the
+    move is atomic, and removed on failure so a crashed run never leaves
+    a stray file beside a deliverable.
+
+    :param pdf: The PDF to give a text layer, modified in place.
+    :param language: Tesseract language code.
+    :param optimize: ocrmypdf optimization level (0-3).
+    :param jobs: ocrmypdf's internal worker count, or None for its default.
+    """
+    from blackletter.ocr import _silence_ocr_loggers
+
+    _silence_ocr_loggers()
+
+    import ocrmypdf
+
+    with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False, dir=pdf.parent) as tmp:
+        tmp_path = Path(tmp.name)
+    extra = {} if jobs is None else {"jobs": jobs}
+    try:
+        ocrmypdf.ocr(
+            str(pdf),
+            str(tmp_path),
+            pdf_renderer="auto",
+            optimize=optimize,
+            output_type="pdf",
+            language=[language],
+            # Leave pages that already have text alone rather than
+            # failing on them or rasterising them away.
+            skip_text=True,
+            tesseract_timeout=120,
+            progress_bar=False,
+            **extra,
+        )
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+    tmp_path.replace(pdf)
+
+
+def add_text_layer(
+    paths: str | Path | Iterable[str | Path],
+    language: str = "eng",
+    optimize: int = 1,
+    skip_existing: bool = True,
+    jobs: int | None = None,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> list[Path]:
+    """Add a searchable text layer to PDFs that already exist, in place.
+
+    This is the step to reach for when what you want is searchable
+    *output*. :func:`ocr` is a pre-pass over a whole source document,
+    named from reporter, volume and page numbers, and run before anything
+    is redacted; this runs over files that are already finished, so no CPU
+    is spent OCRing content that is about to be blacked out and no text
+    layer is left for ``apply_redactions`` to scrub.
+
+    Nothing calls this implicitly. A caller that wants searchable
+    deliverables asks for them, typically over the full redacted PDF and
+    the per-opinion PDFs in ``redacted/``, and typically not over
+    ``unredacted/`` (a searchable copy of the copyrighted text is the
+    opposite of the point).
+
+    Work is spread across files rather than within them, because that is
+    where the time goes: each ocrmypdf run carries several seconds of fixed
+    cost, which dominates for the short PDFs a volume splits into, and
+    ocrmypdf parallelises poorly over a handful of pages. Each file is
+    OCR'd to a temporary file beside it and moved into place only on
+    success, so a failure leaves the original untouched, and pages that
+    already carry text are left alone, so running this twice is safe.
+
+    :param paths: A PDF, a directory of PDFs (non-recursive), or an
+        iterable of either.
+    :param language: Tesseract language code.
+    :param optimize: ocrmypdf optimization level (0-3).
+    :param skip_existing: Skip files that already have a text layer
+        throughout. Pass False to OCR every file's text-less pages anyway.
+    :param jobs: How many files to process at once. Defaults to half the
+        CPU count, capped at the number of files. Pass 1 to run in the
+        calling process, which is also what happens for a single file.
+    :param progress_callback: Optional callable invoked with
+        ``(files_done, total_files, message)``.
+    :returns: The files a text layer was run over, sorted by path. Files
+        skipped as already searchable are not included; with
+        ``skip_existing`` False a file whose every page already had text is
+        still listed, since the pass ran even though it added nothing.
+    """
+    from blackletter.ocr import needs_ocr
+
+    pdfs = _collect_pdfs(paths)
+    if skip_existing:
+        pdfs = [p for p in pdfs if needs_ocr(p)]
+    total = len(pdfs)
+    if not total:
+        print("  Text layer: nothing to do", flush=True)
+        return []
+
+    jobs = _text_layer_jobs(total, jobs)
+    inner_jobs = _inner_jobs(jobs)
+
+    written: list[Path] = []
+    done = 0
+    t0 = time.time()
+
+    def _report(pdf: Path) -> None:
+        nonlocal done
+        done += 1
+        written.append(pdf)
+        if progress_callback:
+            progress_callback(done, total, f"Text layer: {pdf.name}")
+        if done % 10 == 0 or done == total:
+            print(f"  Text layer {done}/{total}", flush=True)
+
+    if jobs == 1:
+        for pdf in pdfs:
+            _ocr_in_place(pdf, language, optimize, inner_jobs)
+            _report(pdf)
+    else:
+        from concurrent.futures import ProcessPoolExecutor, as_completed
+
+        print(f"  Text layer: {total} PDFs across {jobs} workers", flush=True)
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            futures = {
+                pool.submit(_ocr_in_place, pdf, language, optimize, inner_jobs): pdf for pdf in pdfs
+            }
+            for future in as_completed(futures):
+                future.result()
+                _report(futures[future])
+
+    print(
+        f"  Text layer added to {len(written)}/{total} PDFs ({time.time() - t0:.0f}s)",
+        flush=True,
+    )
+    # Workers finish out of order, so sort rather than return whichever
+    # order the pool happened to complete in.
+    return sorted(written)
+
+
+def _collect_pdfs(paths: str | Path | Iterable[str | Path]) -> list[Path]:
+    """Expand a path, a directory, or an iterable of them into PDF files.
+
+    :param paths: A PDF, a directory of PDFs, or an iterable of either.
+    :returns: Existing ``.pdf`` files, directories expanded and sorted.
+    :raises FileNotFoundError: If a named path does not exist.
+    """
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    out: list[Path] = []
+    for raw in paths:
+        path = Path(raw)
+        if path.is_dir():
+            out.extend(
+                sorted(p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".pdf")
+            )
+        elif path.is_file():
+            out.append(path)
+        else:
+            raise FileNotFoundError(path)
+    # A caller naming both a file and its directory should not have it
+    # processed twice, which with a worker pool means two workers OCRing
+    # the same file at once.
+    return list(dict.fromkeys(p.resolve() for p in out))
+
+
 def detect(
     pdf_path: str | Path,
     output_dir: str | Path,
@@ -415,7 +622,7 @@ def pair(
     """Pair opinions from detections.
 
     :param detections: Detection list or path to detections.json.
-    :param pdf_path: Path to the OCR'd PDF.
+    :param pdf_path: Path to the PDF to work from.
     :param reporter: Reporter abbreviation (e.g. ``"a3d"``).
     :param volume: Volume number (e.g. ``"333"``).
     :param first_page: First page number of the volume.
@@ -424,7 +631,7 @@ def pair(
         outside_rects.
     """
     from blackletter.models import Detection as BLDetection, Document, Page
-    from blackletter.scanner import _pair_opinions
+    from blackletter.scanner import _pair_opinions, snap_document_columns
 
     pdf_path = Path(pdf_path)
 
@@ -470,6 +677,7 @@ def pair(
             first_page=first_page,
             ocr_applied=True,
         )
+        snap_document_columns(document)
 
         # Pair
         t0 = time.time()
@@ -516,7 +724,7 @@ def compute_rects(
     Reads detections.json from *output_dir*, pairs opinions, and writes
     redaction_rects.json back into *output_dir*.
 
-    :param pdf_path: Path to the OCR'd PDF.
+    :param pdf_path: Path to the PDF to work from.
     :param output_dir: Directory containing detections.json.
     :param excluded: Set of page indices to exclude from pairing.
     :param approved: Set of page indices pre-approved for redaction.
@@ -555,7 +763,7 @@ def build_redacted(
 ) -> Path:
     """Build the full redacted PDF from precomputed rects.
 
-    :param pdf_path: Path to the OCR'd PDF.
+    :param pdf_path: Path to the PDF to work from.
     :param output_dir: Directory containing detections.json and where the
         redacted PDF will be written.
     :param rects: Path to a redaction_rects.json file. If ``None``, uses
@@ -601,7 +809,10 @@ def build_redacted(
                 )
             )
 
+    from blackletter.scanner import snap_document_columns
+
     document = Document(pdf_path=pdf_path, pages=pages, ocr_applied=True)
+    snap_document_columns(document)
 
     # Build scan name
     stem = pdf_path.stem
@@ -671,6 +882,110 @@ def split_opinions(
     }
 
 
+def build_redactions(
+    pages: Iterable,
+    redaction_rects: list[dict],
+    margin_rects: list[dict],
+    opinions: list[dict],
+    reporter: str = "",
+    volume: str = "",
+) -> dict:
+    """Combine this library's own outputs into :func:`generate`'s input.
+
+    ``compute_rects`` returns image-pixel rects, ``compute_margin_rects``
+    returns PDF points, and ``generate`` wants one payload in points with
+    every rect labelled. Without this, each consumer converts and merges
+    them itself, and gets to rediscover that the scale factors come from
+    the page's own image dimensions rather than a global assumption.
+
+    :param pages: The detected pages, for their dimensions and scale.
+    :param redaction_rects: ``[{"page_index", "rects"}]`` in image pixels,
+        each rect carrying ``fill`` and ``type``.
+    :param margin_rects: ``[{"page_index", "rects"}]`` in PDF points.
+    :param opinions: Opinion dicts, as ``pair`` produces them. Given a
+        reporter and volume, each gains a ``filename``. Modified in place
+        and returned inside the payload, rather than copied.
+    :param reporter: Reporter abbreviation for the output filenames.
+    :param volume: Volume number for the output filenames.
+    :returns: ``{"opinions": [...], "pages": {"<index>": [rect, ...]}}``,
+        all coordinates in PDF points. Pages absent from both rect lists
+        are absent from ``pages``.
+    :raises KeyError: If ``redaction_rects`` names a page that ``pages``
+        does not, since its pixel rects could then only be guessed at.
+    """
+    by_index = {p.index: p for p in pages}
+
+    prefix = f"{reporter}.{volume}" if reporter and volume else ""
+    if prefix:
+        # Two opinions can share a page range, and ``generate`` suffixes the
+        # duplicates -1, -2. Doing the same here means the names in this
+        # payload are the names that end up on disk, which is the only
+        # reason to carry them.
+        stems = [
+            f"{prefix}.{op.get('first_page_number', 0):04d}-"
+            f"{op.get('last_page_number', op.get('first_page_number', 0)):04d}"
+            for op in opinions
+        ]
+        counts = Counter(stems)
+        seen: dict[str, int] = {}
+        for op, stem in zip(opinions, stems, strict=True):
+            if counts[stem] > 1:
+                seen[stem] = seen.get(stem, 0) + 1
+                op["filename"] = f"{stem}-{seen[stem]}.pdf"
+            else:
+                op["filename"] = f"{stem}.pdf"
+
+    combined: dict[int, list[dict]] = {}
+
+    for entry in margin_rects:
+        page_rects = combined.setdefault(entry["page_index"], [])
+        for r in entry.get("rects", []):
+            page_rects.append(
+                {
+                    "x0": round(r["x0"], 1),
+                    "y0": round(r["y0"], 1),
+                    "x1": round(r["x1"], 1),
+                    "y1": round(r["y1"], 1),
+                    "fill": "white",
+                    "type": "margin",
+                }
+            )
+
+    for entry in redaction_rects:
+        page_index = entry["page_index"]
+        page_rects = combined.setdefault(page_index, [])
+        page = by_index.get(page_index)
+        if page is None:
+            raise KeyError(
+                f"redaction_rects names page {page_index}, which is not in `pages`. "
+                "Its rects are in image pixels and there is nothing to scale them by."
+            )
+        # A page with no detections has no image dimensions to scale by, and
+        # its rects are already in points.
+        to_x = page.scale_x if page.img_width > 1 else 1.0
+        to_y = page.scale_y if page.img_height > 1 else 1.0
+        for r in entry.get("rects", []):
+            x0, y0 = r["x0"] * to_x, r["y0"] * to_y
+            x1, y1 = r["x1"] * to_x, r["y1"] * to_y
+            if x0 >= x1 or y0 >= y1:
+                continue
+            page_rects.append(
+                {
+                    "x0": round(x0, 1),
+                    "y0": round(y0, 1),
+                    "x1": round(x1, 1),
+                    "y1": round(y1, 1),
+                    "fill": r["fill"],
+                    "type": r["type"],
+                }
+            )
+
+    return {
+        "opinions": opinions,
+        "pages": {str(k): v for k, v in sorted(combined.items())},
+    }
+
+
 def generate(
     pdf_path: str | Path,
     redactions: str | Path | dict,
@@ -692,7 +1007,7 @@ def generate(
 
     Builds in one pass per page (no layering).
 
-    :param pdf_path: Path to the source (OCR'd) PDF.
+    :param pdf_path: Path to the source PDF.
     :param redactions: Path to redactions.json, or the parsed dict.
     :param output_dir: Base output directory.
     :param reporter: Reporter abbreviation for filenames (e.g.
@@ -765,6 +1080,7 @@ def generate(
                 whiteout).
             """
             # Page rects (margins + redactions), all PDF points
+            applied: list[tuple[fitz.Rect, tuple]] = []
             for r in pages_rects.get(str(src_idx), []):
                 rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
                 if rect.is_empty or rect.y0 >= rect.y1 or rect.x0 >= rect.x1:
@@ -774,6 +1090,7 @@ def generate(
                 else:
                     fill = (0, 0, 0) if r["fill"] == "black" else (1, 1, 1)
                 fitz_page.add_redact_annot(rect, fill=fill)
+                applied.append((rect, fill))
 
             # Outside-opinion whiteout (skip for full redacted)
             if opinion is not None and mode != "full":
@@ -783,8 +1100,19 @@ def generate(
                     rect = fitz.Rect(orect["x0"], orect["y0"] + 3, orect["x1"], orect["y1"])
                     if not rect.is_empty:
                         fitz_page.add_redact_annot(rect, fill=(1, 1, 1))
+                        applied.append((rect, (1, 1, 1)))
 
             fitz_page.apply_redactions()
+
+            # PyMuPDF has painted each redaction as a fill *and* a 1pt
+            # stroke straddling its edge, strokes last, which left a hairline
+            # wherever a black rect met a white one; that was visible in real
+            # deliverables. It does not reproduce on 1.26.7, so treat this as
+            # insurance rather than a fix: repainting fill-only in the same
+            # order costs one op per rect and covers the case if a future
+            # version strokes again. The CLI path has always done it.
+            for rect, fill in applied:
+                fitz_page.draw_rect(rect, fill=fill, color=None, width=0)
 
         # ── Full redacted PDF ──
         t0 = time.time()

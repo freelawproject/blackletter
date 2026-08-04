@@ -364,6 +364,7 @@ def pair_and_compute_rects(
     """
     from blackletter.models import Detection, Document, Page
     from blackletter.scanner import (
+        snap_document_columns,
         _pair_opinions,
         _build_opinions_data,
         _group_detections_by_page,
@@ -421,6 +422,7 @@ def pair_and_compute_rects(
         first_page=first_page,
         ocr_applied=True,
     )
+    snap_document_columns(document)
 
     # Pair
     opinions = _pair_opinions(document, excluded=excluded)
@@ -441,7 +443,7 @@ def pair_and_compute_rects(
         json.dump(rects, f)
 
     # Compute margin rects
-    margin_rects = compute_margin_rects(pdf_path)
+    margin_rects = compute_margin_rects(pdf_path, pages=document.pages)
     with open(output_dir / "margin_rects.json", "w") as f:
         json.dump(margin_rects, f)
 
