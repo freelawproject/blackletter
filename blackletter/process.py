@@ -1354,7 +1354,7 @@ def cmd_process(args: argparse.Namespace) -> None:
             _t0 = _time.time()
             print("\n── Bitonal conversion ──", flush=True)
             bitonal_path = base_dir / f"{args.pdf.stem}_bitonal.pdf"
-            bitonal_convert(args.pdf, bitonal_path)
+            bitonal_convert(args.pdf, bitonal_path, workers=getattr(args, "bitonal_workers", 1))
             args.pdf = bitonal_path
             print(f"  Bitonal done ({_time.time() - _t0:.0f}s)", flush=True)
 
@@ -2303,6 +2303,16 @@ def build_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--bitonal",
         action="store_true",
         help="Convert to bitonal (1-bit B&W) before processing for speed/size",
+    )
+    p.add_argument(
+        "--bitonal-workers",
+        type=int,
+        default=1,
+        metavar="N",
+        help=(
+            "Processes to split bitonal conversion across (default: 1). "
+            "Throughput flattens well before one worker per core"
+        ),
     )
     p.add_argument(
         "--detect-only",

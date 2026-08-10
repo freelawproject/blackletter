@@ -15,9 +15,11 @@ Adapted from scanning-utils/process_scan.py.
 
 from __future__ import annotations
 
+import contextlib
 import io
 import logging
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 import fitz
@@ -45,13 +47,39 @@ def _silence_ocr_loggers() -> None:
             logging.getLogger(name).setLevel(logging.ERROR)
 
 
+@contextlib.contextmanager
+def _icc_disabled():
+    """Disable MuPDF ICC colour management for the duration of the block.
+
+    Bitonal rendering rasterises straight to greyscale and immediately
+    thresholds to one bit, so colour management cannot meaningfully change
+    the result, and it costs roughly 30% of render time.
+
+    MuPDF enables ICC by default and exposes no getter for the current
+    state, so that default is what gets restored on the way out.
+    """
+    fitz.TOOLS.set_icc(False)
+    try:
+        yield
+    finally:
+        fitz.TOOLS.set_icc(True)
+
+
 def _render_bitonal_page(
     src_page: fitz.Page,
     out_doc: fitz.Document,
     dpi: int,
     threshold: int,
 ) -> None:
-    """Render ``src_page`` as a 1-bit CCITT G4 TIFF and append it to ``out_doc``.
+    """Render ``src_page`` as a 1-bit image and append it to ``out_doc``.
+
+    The TIFF handed to ``insert_image`` is deliberately uncompressed.
+    MuPDF decodes whatever it is given and re-encodes the embedded image
+    as ``/FlateDecode``, so compressing here (this used to emit CCITT G4)
+    costs time and produces a byte-identical PDF.
+
+    Callers that convert more than a page or two should wrap the loop in
+    :func:`_icc_disabled`.
 
     :param src_page: Source page to rasterize.
     :param out_doc: Destination ``fitz.Document`` the rendered page is
@@ -64,9 +92,13 @@ def _render_bitonal_page(
     new_page = out_doc.new_page(width=src_page.rect.width, height=src_page.rect.height)
     pix = src_page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
     gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-    bw = Image.fromarray((gray > threshold).astype(np.uint8) * 255).convert("1")
+    # packbits writes the 1-bit rows PIL's "1" mode expects (each row padded
+    # to a byte boundary) in one pass, rather than materialising a full
+    # uint8 image and letting PIL threshold it a second time.
+    packed = np.packbits(gray > threshold, axis=1)
+    bw = Image.frombytes("1", (pix.width, pix.height), packed.tobytes())
     buf = io.BytesIO()
-    bw.save(buf, format="TIFF", compression="group4")
+    bw.save(buf, format="TIFF")
     new_page.insert_image(new_page.rect, stream=buf.getvalue())
 
 
@@ -465,32 +497,93 @@ print("DONE", flush=True)
     return output_path
 
 
-_BITONAL_WORKER_SCRIPT = """
-import io, sys
-import fitz
-import numpy as np
-from PIL import Image
+def run_bitonal(
+    src_path: str | Path,
+    dst_path: str | Path,
+    dpi: int = 200,
+    threshold: int = 160,
+    workers: int = 1,
+    progress_callback: Callable[[int, int, str], None] | None = None,
+) -> int:
+    """Convert every page of ``src_path`` to 1-bit and write ``dst_path``.
 
-src_path, dst_path = sys.argv[1], sys.argv[2]
-page_start, page_end = int(sys.argv[3]), int(sys.argv[4])
-dpi, threshold = int(sys.argv[5]), int(sys.argv[6])
+    The shared implementation behind :func:`blackletter.api.bitonal` and
+    :func:`bitonal_convert`.
 
-src = fitz.open(src_path)
-out = fitz.open()
-for i in range(page_start, page_end):
-    page = src[i]
-    new_page = out.new_page(width=page.rect.width, height=page.rect.height)
-    pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csGRAY)
-    gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
-    bw = Image.fromarray((gray > threshold).astype(np.uint8) * 255).convert("1")
-    buf = io.BytesIO()
-    bw.save(buf, format="TIFF", compression="group4")
-    new_page.insert_image(new_page.rect, stream=buf.getvalue())
-out.save(dst_path, garbage=4, deflate=True)
-out.close()
-src.close()
-print(f"  Bitonal worker: pages {page_start+1}-{page_end} done", flush=True)
-"""
+    With ``workers=1`` the conversion runs in the calling process and
+    progress is reported per page. With ``workers>1`` the pages are split
+    into one contiguous range per worker, converted in separate processes,
+    and merged back in page order; progress is then reported as each range
+    completes, so it advances in jumps rather than smoothly.
+
+    Rasterisation is memory-bandwidth bound, so throughput flattens out
+    well before one worker per core. Callers are expected to choose a
+    worker count that suits the machine they are on: the default of 1
+    keeps this a plain sequential call unless asked otherwise.
+
+    :param src_path: PDF to convert.
+    :param dst_path: Where the converted PDF is written.
+    :param dpi: Render DPI.
+    :param threshold: Grayscale threshold (0-255) for binarisation.
+    :param workers: Number of worker processes. Values below 2 run inline.
+    :param progress_callback: Optional callable(current, total, message).
+    :returns: Number of pages converted.
+    """
+    src_path = Path(src_path)
+    dst_path = Path(dst_path)
+
+    with fitz.open(str(src_path)) as src:
+        total = src.page_count
+
+    if total == 0:
+        # Defensive: MuPDF currently refuses to *open* a page-less PDF, so
+        # this is unreachable through a file path. It stays because the
+        # alternative is "cannot save with zero pages" from deep inside the
+        # save, which names neither the file nor the step that failed.
+        raise ValueError(f"cannot convert {src_path.name}: it has no pages")
+
+    if workers < 2:
+        with _icc_disabled(), fitz.open(str(src_path)) as src, fitz.open() as out:
+            for i in range(total):
+                _render_bitonal_page(src[i], out, dpi, threshold)
+                if progress_callback and ((i + 1) % 10 == 0 or i == total - 1):
+                    progress_callback(i + 1, total, f"Bitonal: {i + 1}/{total} pages")
+            out.save(str(dst_path), garbage=4, deflate=True)
+        return total
+
+    import multiprocessing
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    from blackletter.tasks import bitonal_chunk, merge_pdfs, split_page_ranges
+
+    # "spawn" rather than the Linux default of "fork": the main consumer of
+    # this calls it from inside a Django worker, and forking would hand each
+    # child a copy of that process's database connections and client state.
+    # Workers need nothing from the parent but their arguments, and the
+    # startup cost is trivial next to the conversion itself.
+    context = multiprocessing.get_context("spawn")
+
+    ranges = split_page_ranges(total, workers)
+    with tempfile.TemporaryDirectory(prefix="bl_bitonal_") as tmp_dir:
+        chunk_paths = [str(Path(tmp_dir) / f"chunk_{i:04d}.pdf") for i in range(len(ranges))]
+        done = 0
+        with ProcessPoolExecutor(max_workers=len(ranges), mp_context=context) as pool:
+            futures = {
+                pool.submit(bitonal_chunk, str(src_path), chunk, start, end, dpi, threshold): (
+                    start,
+                    end,
+                )
+                for chunk, (start, end) in zip(chunk_paths, ranges, strict=True)
+            }
+            for future in as_completed(futures):
+                future.result()  # re-raise whatever the worker hit
+                start, end = futures[future]
+                done += end - start
+                if progress_callback:
+                    progress_callback(done, total, f"Bitonal: {done}/{total} pages")
+        # Merge in page order, which is not the order they finished in.
+        merge_pdfs(chunk_paths, str(dst_path))
+    return total
 
 
 def bitonal_convert(
@@ -498,101 +591,31 @@ def bitonal_convert(
     dst_path: Path,
     dpi: int = 200,
     threshold: int = 160,
+    workers: int = 1,
 ) -> None:
-    """Convert a PDF to bitonal CCITT G4 (1-bit black/white).
+    """Convert a PDF to bitonal (1-bit black/white), printing progress.
 
-    Renders each page to grayscale at dpi, applies a threshold, and saves
-    as TIFF Group 4 compressed images. Uses parallel workers for large docs.
+    Renders each page to grayscale at ``dpi`` and thresholds it. See
+    :func:`run_bitonal` for the ``workers`` semantics.
     """
-    import multiprocessing
-    import subprocess
-    import sys
-    import time as _time
-
-    src = fitz.open(str(src_path))
-    total = len(src)
-    src.close()
-
-    n_workers = max(1, multiprocessing.cpu_count() // 2)
-    use_parallel = total >= 40 and n_workers > 1
-
     orig_mb = src_path.stat().st_size / (1024 * 1024)
-    print(
-        f"  Bitonal: converting {total} pages at {dpi} DPI ({n_workers} workers)..."
-        if use_parallel
-        else f"  Bitonal: converting {total} pages at {dpi} DPI...",
-        flush=True,
+    suffix = f" ({workers} workers)" if workers > 1 else ""
+    with fitz.open(str(src_path)) as src:
+        total = src.page_count
+    print(f"  Bitonal: converting {total} pages at {dpi} DPI{suffix}...", flush=True)
+
+    def _report(current: int, page_total: int, _message: str) -> None:
+        if workers > 1 or current % 20 == 0 or current == page_total:
+            print(f"  Bitonal: {current}/{page_total}", flush=True)
+
+    run_bitonal(
+        src_path,
+        dst_path,
+        dpi=dpi,
+        threshold=threshold,
+        workers=workers,
+        progress_callback=_report,
     )
-
-    if use_parallel:
-        # Write worker script
-        worker_script = Path(tempfile.gettempdir()) / "_bl_bitonal_worker.py"
-        worker_script.write_text(_BITONAL_WORKER_SCRIPT)
-
-        chunk_size = (total + n_workers - 1) // n_workers
-        chunk_outputs = []
-        procs = []
-
-        for i in range(n_workers):
-            s = i * chunk_size
-            e = min(s + chunk_size, total)
-            if s >= e:
-                break
-            chunk_out = Path(tempfile.gettempdir()) / f"_bitonal_chunk_{i}.pdf"
-            chunk_outputs.append(chunk_out)
-            p = subprocess.Popen(
-                [
-                    sys.executable,
-                    str(worker_script),
-                    str(src_path),
-                    str(chunk_out),
-                    str(s),
-                    str(e),
-                    str(dpi),
-                    str(threshold),
-                ],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-            )
-            procs.append((i, p, s, e))
-
-        completed = set()
-        while len(completed) < len(procs):
-            for i, p, s, e in procs:
-                if i in completed:
-                    continue
-                ret = p.poll()
-                if ret is not None:
-                    completed.add(i)
-                    out = p.stdout.read().decode(errors="replace")
-                    if out.strip():
-                        print(out.strip(), flush=True)
-                    if ret != 0:
-                        raise RuntimeError(f"Bitonal worker {i} failed:\n{out}")
-                    done_pages = sum(e2 - s2 for j, _, s2, e2 in procs if j in completed)
-                    print(f"  Bitonal: {done_pages}/{total} pages", flush=True)
-            if len(completed) < len(procs):
-                _time.sleep(0.5)
-
-        # Merge chunks
-        from blackletter.tasks import merge_pdfs
-
-        merge_pdfs(chunk_outputs, dst_path)
-
-        for f in chunk_outputs:
-            f.unlink(missing_ok=True)
-        worker_script.unlink(missing_ok=True)
-    else:
-        # Single-process for small docs
-        src = fitz.open(str(src_path))
-        out = fitz.open()
-        for i in range(total):
-            _render_bitonal_page(src[i], out, dpi, threshold)
-            if (i + 1) % 20 == 0 or (i + 1) == total:
-                print(f"  Bitonal: {i + 1}/{total}", flush=True)
-        out.save(str(dst_path), garbage=4, deflate=True)
-        out.close()
-        src.close()
 
     final_mb = dst_path.stat().st_size / (1024 * 1024)
     print(f"  Bitonal: {orig_mb:.1f} MB -> {final_mb:.1f} MB")

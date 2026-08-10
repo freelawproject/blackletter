@@ -45,7 +45,7 @@ def bitonal_chunk(
     dpi: int = 200,
     threshold: int = 160,
 ) -> str:
-    """Convert a page range to bitonal CCITT G4.
+    """Convert a page range to bitonal (1-bit black/white).
 
     Args:
         src_path: Input PDF path.
@@ -58,15 +58,18 @@ def bitonal_chunk(
     Returns:
         Path to the output chunk PDF.
     """
-    from blackletter.ocr import _render_bitonal_page
+    from blackletter.ocr import _icc_disabled, _render_bitonal_page
 
-    src = fitz.open(str(src_path))
-    out = fitz.open()
-    for i in range(page_start, page_end):
-        _render_bitonal_page(src[i], out, dpi, threshold)
-    out.save(str(dst_path), garbage=4, deflate=True)
-    out.close()
-    src.close()
+    # ICC is process-global state, so it has to be set here rather than by
+    # the caller: this runs in its own process under the parallel path.
+    with _icc_disabled():
+        src = fitz.open(str(src_path))
+        out = fitz.open()
+        for i in range(page_start, page_end):
+            _render_bitonal_page(src[i], out, dpi, threshold)
+        out.save(str(dst_path), garbage=4, deflate=True)
+        out.close()
+        src.close()
     return str(dst_path)
 
 
