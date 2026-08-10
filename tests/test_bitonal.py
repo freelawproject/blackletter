@@ -133,6 +133,31 @@ class TestParallelMatchesSequential:
         for i, (a, b) in enumerate(zip(page_rasters(sequential), page_rasters(parallel))):
             assert np.array_equal(a, b), f"page {i} differs"
 
+    def test_start_method_is_pinned_to_spawn(self, source_pdf, tmp_path, monkeypatch):
+        """The pool must not fall back to the platform default.
+
+        "fork" is that default on Linux, is unavailable on Windows, and is
+        the method this codebase has hit runtime problems with before. A
+        change that drops ``mp_context`` would otherwise be invisible until
+        it reached a machine that behaves differently.
+        """
+        import concurrent.futures
+
+        captured = {}
+        real_executor = concurrent.futures.ProcessPoolExecutor
+
+        class RecordingExecutor(real_executor):
+            def __init__(self, *args, **kwargs):
+                captured["mp_context"] = kwargs.get("mp_context")
+                super().__init__(*args, **kwargs)
+
+        monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", RecordingExecutor)
+        run_bitonal(source_pdf, tmp_path / "out.pdf", workers=2)
+
+        context = captured["mp_context"]
+        assert context is not None, "pool fell back to the platform default"
+        assert context.get_start_method() == "spawn"
+
     def test_more_workers_than_pages_is_harmless(self, tmp_path):
         src = tmp_path / "two.pdf"
         write_numbered_pages(src, 2)

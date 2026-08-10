@@ -526,6 +526,9 @@ def run_bitonal(
     :param dpi: Render DPI.
     :param threshold: Grayscale threshold (0-255) for binarisation.
     :param workers: Number of worker processes. Values below 2 run inline.
+        Above that the pool uses the "spawn" start method, which re-imports
+        the caller's ``__main__`` in each child, so a script calling this at
+        module scope needs the usual ``if __name__ == "__main__":`` guard.
     :param progress_callback: Optional callable(current, total, message).
     :returns: Number of pages converted.
     """
@@ -556,11 +559,16 @@ def run_bitonal(
 
     from blackletter.tasks import bitonal_chunk, merge_pdfs, split_page_ranges
 
-    # "spawn" rather than the Linux default of "fork": the main consumer of
-    # this calls it from inside a Django worker, and forking would hand each
-    # child a copy of that process's database connections and client state.
-    # Workers need nothing from the parent but their arguments, and the
-    # startup cost is trivial next to the conversion itself.
+    # "spawn" is pinned rather than left to the platform default, which is
+    # "fork" on Linux but "spawn" on macOS and unavailable on Windows. Pinning
+    # it is what makes this behave the same everywhere, and it is what the
+    # subprocess-per-chunk implementation this replaced already did.
+    #
+    # "fork" would also be the riskier of the two. It has bitten this codebase
+    # before (see the oneDNN/MKL note in analyze.py), and the main consumer
+    # calls this from inside a Django worker, where forking hands every child
+    # a copy of that process's database connections and client state. Workers
+    # need nothing from the parent but their arguments.
     context = multiprocessing.get_context("spawn")
 
     ranges = split_page_ranges(total, workers)
