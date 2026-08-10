@@ -2165,6 +2165,7 @@ def process(
     progress_callback=None,
     excluded: set[tuple[int, int, int, int]] | None = None,
     bitonal: bool = False,
+    bitonal_workers: int = 1,
     detect_only: bool = False,
     has_state_abbrev: bool | None = None,
     text_layer: bool = False,
@@ -2186,6 +2187,8 @@ def process(
         optimize: ocrmypdf optimization level (0-3).
         progress_callback: Optional callable(current, total, message) for progress.
         detect_only: If True, stop after detection + pairing (Phase 1).
+        bitonal_workers: Processes to split the bitonal conversion across
+            when ``bitonal`` is set. Defaults to 1, which converts inline.
         text_layer: Add a searchable text layer to the generated PDFs,
             after redaction. Off by default; see ``api.add_text_layer``.
         ocr: Run the ocrmypdf pre-pass over the source before detection.
@@ -2217,6 +2220,7 @@ def process(
         progress_callback=progress_callback,
         excluded=excluded,
         bitonal=bitonal,
+        bitonal_workers=bitonal_workers,
         detect_only=detect_only,
         has_state_abbrev=has_state_abbrev,
         text_layer=text_layer,

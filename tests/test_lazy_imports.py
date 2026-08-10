@@ -17,8 +17,14 @@ import textwrap
 def _run(script: str) -> str:
     """Execute ``script`` in a fresh Python subprocess.
 
+    Returns the last non-empty line rather than the whole stream. A
+    dependency may print at import time, and one that does would
+    otherwise fail every one of these on output it merely prefixed:
+    PyMuPDF 1.28 emits a ``fitz`` deprecation banner to stdout. Each
+    script here prints its one value last, so that line is the answer.
+
     :param script: Python source to run.
-    :returns: Captured stdout.
+    :returns: The last non-empty line of stdout.
     :rtype: str
     """
     result = subprocess.run(
@@ -27,7 +33,8 @@ def _run(script: str) -> str:
         capture_output=True,
         text=True,
     )
-    return result.stdout.strip()
+    lines = [line for line in result.stdout.strip().splitlines() if line.strip()]
+    return lines[-1].strip() if lines else ""
 
 
 class TestLazyUltralyticsImport:

@@ -535,24 +535,28 @@ def run_bitonal(
     src_path = Path(src_path)
     dst_path = Path(dst_path)
 
+    # One open serves the page count, the guard, and the sequential render.
+    # The parallel path cannot share it: workers are separate processes and
+    # get the path instead.
     with fitz.open(str(src_path)) as src:
         total = src.page_count
 
-    if total == 0:
-        # Defensive: MuPDF currently refuses to *open* a page-less PDF, so
-        # this is unreachable through a file path. It stays because the
-        # alternative is "cannot save with zero pages" from deep inside the
-        # save, which names neither the file nor the step that failed.
-        raise ValueError(f"cannot convert {src_path.name}: it has no pages")
+        if total == 0:
+            # Defensive: MuPDF currently refuses to *open* a page-less PDF,
+            # so this is unreachable through a file path. It stays because
+            # the alternative is "cannot save with zero pages" from deep
+            # inside the save, which names neither the file nor the step
+            # that failed.
+            raise ValueError(f"cannot convert {src_path.name}: it has no pages")
 
-    if workers < 2:
-        with _icc_disabled(), fitz.open(str(src_path)) as src, fitz.open() as out:
-            for i in range(total):
-                _render_bitonal_page(src[i], out, dpi, threshold)
-                if progress_callback and ((i + 1) % 10 == 0 or i == total - 1):
-                    progress_callback(i + 1, total, f"Bitonal: {i + 1}/{total} pages")
-            out.save(str(dst_path), garbage=4, deflate=True)
-        return total
+        if workers < 2:
+            with _icc_disabled(), fitz.open() as out:
+                for i in range(total):
+                    _render_bitonal_page(src[i], out, dpi, threshold)
+                    if progress_callback and ((i + 1) % 10 == 0 or i == total - 1):
+                        progress_callback(i + 1, total, f"Bitonal: {i + 1}/{total} pages")
+                out.save(str(dst_path), garbage=4, deflate=True)
+            return total
 
     import multiprocessing
     from concurrent.futures import ProcessPoolExecutor, as_completed
