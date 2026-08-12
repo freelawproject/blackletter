@@ -169,3 +169,7 @@ output/
 blackletter/weights/*.pt
 
 uv.lock
+
+# bl-warm model documentation + class-example images (shared with
+# the team outside the repo)
+/docs/
