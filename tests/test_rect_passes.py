@@ -18,6 +18,7 @@ from blackletter.process import (
     _drop_degenerate,
     _drop_rects_off_the_columns,
     _grow_headnote_rects,
+    _right_column_inner,
     _snap_headnote_x_to_columns,
     _split_headnote_rects_at_headnotes,
 )
@@ -133,6 +134,46 @@ class TestSnapHeadnoteXToColumns:
         rects = [headnote(80, 150, 290, 400)]
         _snap_headnote_x_to_columns(page, rects)
         assert (rects[0]["x0"], rects[0]["x1"]) == (80, 290)
+
+
+class TestRightColumnInner:
+    """The gutter boundary a headnote blackout is held to."""
+
+    def test_the_right_column_box_gives_the_boundary(self):
+        page = detected_page(columns())
+        assert _right_column_inner(page) == RIGHT_COL[0]
+
+    def test_the_left_column_box_is_ignored(self):
+        page = detected_page([detection(Label.TEXT_COLUMN, LEFT_COL[0], 100, LEFT_COL[1], 700)])
+        assert _right_column_inner(page) is None
+
+    def test_headnotes_are_the_fallback_without_a_column_box(self):
+        page = detected_page(
+            [
+                detection(Label.HEADNOTE, RIGHT_COL[0], 150, RIGHT_COL[1], 165),
+                detection(Label.HEADNOTE, RIGHT_COL[0] + 40, 200, RIGHT_COL[1], 215),
+            ]
+        )
+        assert _right_column_inner(page) == RIGHT_COL[0]
+
+    def test_nothing_to_go_on_returns_none(self):
+        page = detected_page([detection(Label.PAGE_HEADER, 72, 40, 540, 52)])
+        assert _right_column_inner(page) is None
+
+    def test_a_column_box_beats_narrow_keycite_headnotes(self):
+        """Regression: bl-warm's ``keycite`` boxes cover only the West key-number
+        token, not the whole headnote line, so they sit well inside the column.
+        Taking the boundary from them put it at mid-column and cut right-column
+        blackouts to half the column width."""
+        mid_col = (RIGHT_COL[0] + RIGHT_COL[1]) / 2
+        page = detected_page(
+            columns()
+            + [
+                detection(Label.HEADNOTE, mid_col, 150, mid_col + 60, 165),
+                detection(Label.HEADNOTE, mid_col + 10, 200, mid_col + 70, 215),
+            ]
+        )
+        assert _right_column_inner(page) == RIGHT_COL[0]
 
 
 class TestSplitHeadnoteRects:

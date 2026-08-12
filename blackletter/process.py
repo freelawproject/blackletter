@@ -277,6 +277,46 @@ def _redact_bitonal_image(fitz_page, fitz_doc, redaction_rects):
     fitz_doc.xref_set_key(xref, "ColorSpace", "/DeviceGray")
 
 
+def _right_column_inner(page) -> float | None:
+    """Where the right column starts, in image pixels.
+
+    Used to keep a headnote blackout on its own side of the gutter.
+
+    ``TEXT_COLUMN`` is the source of record: one box per column, already
+    corrected against the page ink by
+    :func:`~blackletter.scanner.snap_text_columns_to_ink`, so its left edge
+    *is* the boundary.
+
+    Right-column ``HEADNOTE`` detections are a fallback for pages with no
+    right column box, and only ever approximated the boundary. That holds
+    while a HEADNOTE box covers a whole headnote line, which starts at the
+    column edge. It breaks under bl-warm, whose ``keycite`` boxes cover only
+    the West key-number token: those sit well inside the column, so the
+    leftmost one put the boundary near mid-column and cut right-column
+    blackouts to roughly half the column width. Worse, the half-width rect
+    that came out was then too far off its column box for
+    :func:`_snap_headnote_x_to_columns` to repair, since it fails the
+    :data:`COLUMN_WIDTH_TOLERANCE` check.
+
+    :param page: The page whose detections to read.
+    :returns: The boundary in image pixels, or ``None`` when neither a right
+        column box nor a right-column headnote is available.
+    """
+    mid_px = page.midpoint
+    right_cols = [
+        d for d in page.detections if d.label == Label.TEXT_COLUMN and d.bbox.center_x > mid_px
+    ]
+    if right_cols:
+        return min(d.bbox.x1 for d in right_cols)
+    # Right-column HEADNOTEs: center in right half, left edge at least 75% across
+    right_hn = [
+        d
+        for d in page.detections
+        if d.label == Label.HEADNOTE and d.bbox.center_x > mid_px and d.bbox.x1 >= mid_px * 0.75
+    ]
+    return min(d.bbox.x1 for d in right_hn) if right_hn else None
+
+
 def compute_redaction_rects(
     document,
     opinions: list[tuple],
@@ -362,19 +402,9 @@ def compute_redaction_rects(
             # Headnote zones — compute in image pixel coords
             hb, ft = _margin_bounds(page)
 
-            # Use right-column HEADNOTE detections to establish the inner column
-            # boundary: the leftmost x0 of any right-column HEADNOTE is where the
-            # right column starts. The left column ends 10px before that.
             mid_px = page.midpoint
-            # Right-column HEADNOTEs: center in right half, left edge at least 75% across
-            right_hn = [
-                d
-                for d in page.detections
-                if d.label == Label.HEADNOTE
-                and d.bbox.center_x > mid_px
-                and d.bbox.x1 >= mid_px * 0.75
-            ]
-            right_col_inner_pdf = min(d.bbox.x1 for d in right_hn) * sx if right_hn else None
+            _inner_px = _right_column_inner(page)
+            right_col_inner_pdf = None if _inner_px is None else _inner_px * sx
 
             for rect_page_idx, rect in all_headnote_rects:
                 if rect_page_idx == src_idx:
