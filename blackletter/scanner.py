@@ -34,11 +34,12 @@ YOLO_BATCH = 4
 LABEL_CONFIDENCE: dict[Label, float] = {
     Label.KEY_ICON: 0.50,
     Label.CASE_CAPTION: 0.50,
-    Label.PAGE_HEADER: 0.50,
+    Label.PAGE_HEADER: 0.30,
     Label.PAGE_NUMBER: 0.75,
     Label.HEADNOTE: 0.50,
-    Label.HEADNOTE_BRACKET: 0.50,
+    Label.HEADNOTE_BRACKET: 0.30,
     Label.BACKGROUND: 0.50,
+    Label.EDITORIAL: 0.50,
 }
 
 # Colors per label (RGB)
