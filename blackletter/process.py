@@ -11,6 +11,7 @@ from pathlib import Path
 import fitz
 
 from blackletter import ink
+from blackletter.bl_warm import is_bl_warm, iter_label_rows
 from blackletter.models import BBox, Detection, Label
 from blackletter.refine import refine_headnote_rects
 from blackletter.scanner import (
@@ -1450,18 +1451,22 @@ def cmd_process(args: argparse.Namespace) -> None:
     if _has_sa_flag is False:
         missing_sa = []  # explicitly disabled
     if missing_sa and (_has_sa_flag or (sa_pages and len(sa_pages) > len(all_pages) * 0.1)):
+        # bl-warm already is the best SA detector available; reuse it
+        # rather than mixing original-model detections into its run.
+        _primary_is_warm = is_bl_warm(model.names)
         print(
             f"\n  Auto-fill: {len(sa_pages)} pages have STATE_ABBREVIATION, "
-            f"{len(missing_sa)} missing — scanning with large model...",
+            f"{len(missing_sa)} missing — scanning with "
+            f"{'bl-warm' if _primary_is_warm else 'large'} model...",
             flush=True,
         )
         _t0 = _time.time()
         large_model_path = Path(__file__).resolve().parent / "weights" / "large.pt"
-        if large_model_path.exists():
+        if _primary_is_warm or large_model_path.exists():
             from PIL import Image as _PILImage
             from blackletter.scanner import DPI
 
-            large_model = YOLO(str(large_model_path))
+            large_model = model if _primary_is_warm else YOLO(str(large_model_path))
             mat = fitz.Matrix(DPI / 72, DPI / 72)
             with fitz.open(str(document.pdf_path)) as pdf_file:
                 added = 0
@@ -1469,15 +1474,12 @@ def cmd_process(args: argparse.Namespace) -> None:
                     pix = pdf_file[pi].get_pixmap(matrix=mat)
                     img = _PILImage.frombytes("RGB", (pix.width, pix.height), pix.samples)
                     results = large_model([img], conf=0.50, verbose=False)
-                    for box in results[0].boxes:
-                        cls = int(box.cls[0].item())
-                        conf = float(box.conf[0].item())
+                    for cls, conf, bbox in iter_label_rows(results[0]):
                         if cls == int(Label.STATE_ABBREVIATION) and conf >= 0.50:
-                            bbox = box.xyxy[0].tolist()
                             det = Detection(
                                 bbox=BBox.from_xyxy(bbox),
                                 label=Label.STATE_ABBREVIATION,
-                                confidence=float(box.conf[0].item()),
+                                confidence=conf,
                                 page_index=pi,
                             )
                             _pages_by_idx[pi].detections.append(det)
@@ -1486,7 +1488,7 @@ def cmd_process(args: argparse.Namespace) -> None:
                                     "page_index": pi,
                                     "label": "STATE_ABBREVIATION",
                                     "label_id": int(Label.STATE_ABBREVIATION),
-                                    "confidence": round(float(box.conf[0].item()), 3),
+                                    "confidence": round(conf, 3),
                                     "bbox": [round(v, 1) for v in bbox],
                                     "page_number": _pages_by_idx[pi].page_number,
                                     "img_width": pix.width,
@@ -2248,6 +2250,12 @@ def build_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--large",
         action="store_true",
         help="Use the large model (analyze.pt, run_59) with 21 detection classes",
+    )
+    p.add_argument(
+        "--bl-warm",
+        action="store_true",
+        help="Use the bl-warm replacement model (bl_warm.pt, single model "
+        "standing in for small/medium/large via blackletter.bl_warm)",
     )
     p.add_argument(
         "--reporter",

@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image
 
 from blackletter import ink
+from blackletter.bl_warm import iter_label_rows
 from blackletter.models import BBox, Detection, Document, Label, Page
 
 if TYPE_CHECKING:
@@ -479,6 +480,7 @@ from ultralytics import YOLO
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from blackletter.scanner import _safe_detect_columns, _extract_page_number, DPI
 from blackletter.models import Label
+from blackletter.bl_warm import iter_label_rows
 
 pdf_path, model_path = sys.argv[1], sys.argv[2]
 page_start, page_end = int(sys.argv[3]), int(sys.argv[4])
@@ -505,8 +507,8 @@ for bs in range(page_start, page_end, BATCH):
     results = model(imgs, conf=confidence, verbose=False, device=None)
     for j, (pi, pdf_w, pdf_h, pw, ph, cols) in enumerate(meta):
         dets = []
-        for box in results[j].boxes:
-            dets.append({"bbox": box.xyxy[0].tolist(), "label": int(box.cls[0].item()), "conf": float(box.conf[0].item())})
+        for label_id, conf_v, xyxy in iter_label_rows(results[j]):
+            dets.append({"bbox": xyxy, "label": label_id, "conf": conf_v})
 
         fp = pdf[pi]
         sx, sy = pdf_w / pw, pdf_h / ph
@@ -790,13 +792,12 @@ def scan(
                     col_right_x2=rx2,
                     midpoint=mid,
                 )
-                for box in batch_results[j].boxes:
-                    class_id = int(box.cls[0].item())
+                for class_id, conf, xyxy in iter_label_rows(batch_results[j]):
                     page.detections.append(
                         Detection(
-                            bbox=BBox.from_xyxy(box.xyxy[0].tolist()),
+                            bbox=BBox.from_xyxy(xyxy),
                             label=Label(class_id),
-                            confidence=float(box.conf[0].item()),
+                            confidence=conf,
                             page_index=page_idx,
                         )
                     )

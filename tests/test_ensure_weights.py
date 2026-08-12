@@ -77,7 +77,7 @@ class TestMissingWeightsDownload:
         fake_hf.hf_hub_download.assert_called_once_with(
             repo_id=HF_REPO,
             filename=f"{name}.pt",
-            revision=api._HF_REVISION,
+            revision=api._HF_WEIGHTS[name][2],
             local_dir=str(weights_dir),
         )
         assert resolved[name] == weights_dir / f"{name}.pt"

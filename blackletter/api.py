@@ -33,21 +33,41 @@ from pathlib import Path
 
 import fitz
 
+from blackletter.bl_warm import iter_label_rows
+
 
 # Hugging Face sources for the YOLO weights. No weights are bundled in
 # the package (to keep it small); all are downloaded on demand to
 # ``blackletter/weights/``.
-_HF_WEIGHTS: dict[str, tuple[str, str]] = {
-    "small": ("freelawproject/blackletter-weights", "small.pt"),
-    "medium": ("freelawproject/blackletter-weights", "medium.pt"),
-    "large": ("freelawproject/blackletter-weights", "large.pt"),
+# Each weight is pinned to the commit sha it was uploaded at. Pinning
+# (instead of tracking ``main``) protects against a compromised repo
+# serving different binaries: torch weight files are pickles and can
+# execute code on load. Bump a sha deliberately whenever new weights
+# are uploaded. bl_warm ships in the same consolidated weights repo as
+# the legacy trio, as an ADDITIONAL file, pinned at the commit that
+# added it.
+_HF_WEIGHTS: dict[str, tuple[str, str, str]] = {
+    "small": (
+        "freelawproject/blackletter-weights",
+        "small.pt",
+        "3808b7ef889420cf145e26483106d04ca4de811d",
+    ),
+    "medium": (
+        "freelawproject/blackletter-weights",
+        "medium.pt",
+        "3808b7ef889420cf145e26483106d04ca4de811d",
+    ),
+    "large": (
+        "freelawproject/blackletter-weights",
+        "large.pt",
+        "3808b7ef889420cf145e26483106d04ca4de811d",
+    ),
+    "bl_warm": (
+        "freelawproject/blackletter-weights",
+        "bl_warm.pt",
+        "ee34c6c625dc2d2f49d389946922a5e3861af098",
+    ),
 }
-
-# Commit sha the weights are downloaded at. Pinning (instead of tracking
-# ``main``) protects against a compromised repo serving different
-# binaries: torch weight files are pickles and can execute code on load.
-# Bump this sha deliberately whenever new weights are uploaded.
-_HF_REVISION = "3808b7ef889420cf145e26483106d04ca4de811d"
 
 
 def ensure_weights(models: list[str] | None = None) -> dict[str, Path]:
@@ -97,12 +117,12 @@ def ensure_weights(models: list[str] | None = None) -> dict[str, Path]:
                 "Install with `pip install blackletter[detect]`."
             ) from exc
 
-        repo_id, filename = source
+        repo_id, filename, revision = source
         print(f"  Downloading {filename} from {repo_id}...", flush=True)
         downloaded = hf_hub_download(
             repo_id=repo_id,
             filename=filename,
-            revision=_HF_REVISION,
+            revision=revision,
             local_dir=str(weights_dir),
         )
         resolved[name] = Path(downloaded)
@@ -502,8 +522,7 @@ def detect(
                 results = model(imgs, conf=confidence, verbose=False)
                 for j, res in enumerate(results):
                     pm = metas[j]
-                    for box in res.boxes:
-                        class_id = int(box.cls[0].item())
+                    for class_id, conf_v, xyxy in iter_label_rows(res):
                         try:
                             label_name = Label(class_id).name
                         except ValueError:
@@ -513,8 +532,8 @@ def detect(
                                 "page_index": pm["index"],
                                 "label": label_name,
                                 "label_id": class_id,
-                                "confidence": round(float(box.conf[0].item()), 3),
-                                "bbox": [round(v, 1) for v in box.xyxy[0].tolist()],
+                                "confidence": round(conf_v, 3),
+                                "bbox": [round(v, 1) for v in xyxy],
                                 "img_width": pm["img_width"],
                                 "img_height": pm["img_height"],
                                 "model": model_name,
@@ -526,14 +545,22 @@ def detect(
             print(f"    {model_name} done ({time.time() - t0:.0f}s)", flush=True)
 
     # Merge across models with label-specific strategies:
-    #   CASE_CAPTION, KEY_ICON: medium model only (large hallucinates)
+    #   CASE_CAPTION, KEY_ICON: trusted models only (large hallucinates;
+    #     of the legacy trio only medium is trusted — bl_warm is trusted
+    #     as a single model)
     #   CASE_SEQUENCE: all models, overlaps keep smallest box
     #   Everything else: all models, overlaps keep highest confidence
     MEDIUM_ONLY = {"CASE_CAPTION", "KEY_ICON"}
+    TRUSTED_CAPTION_MODELS = {"medium", "bl_warm"}
     SMALLEST_BOX = {"CASE_SEQUENCE"}
 
-    # Filter: for medium-only labels, keep only medium model detections
-    filtered = [d for d in all_raw if d["label"] not in MEDIUM_ONLY or d["model"] == "medium"]
+    filtered = [
+        d
+        for d in all_raw
+        if d["label"] not in MEDIUM_ONLY
+        or d["model"] in TRUSTED_CAPTION_MODELS
+        or d["model"].startswith("bl_warm")
+    ]
 
     def _bbox_area(bbox):
         return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
