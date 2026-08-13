@@ -45,7 +45,15 @@ def bitonal_chunk(
     dpi: int = 200,
     threshold: int = 160,
 ) -> str:
-    """Convert a page range to bitonal CCITT G4.
+    """Convert a page range to bitonal (1-bit black/white).
+
+    Chunks must be fanned out over *processes*, not threads. This disables
+    ICC colour management for the render, which is global to the process,
+    so under threads the first chunk to finish restores it for every render
+    still in flight and chunks of one document get thresholded under
+    different colour pipelines. That disagrees only near the threshold, and
+    only on colour sources, which makes it the kind of bug that shows up as
+    a handful of stray pixels on one page months later.
 
     Args:
         src_path: Input PDF path.
@@ -58,15 +66,13 @@ def bitonal_chunk(
     Returns:
         Path to the output chunk PDF.
     """
-    from blackletter.ocr import _render_bitonal_page
+    from blackletter.ocr import _icc_disabled, _render_bitonal_page
 
-    src = fitz.open(str(src_path))
-    out = fitz.open()
-    for i in range(page_start, page_end):
-        _render_bitonal_page(src[i], out, dpi, threshold)
-    out.save(str(dst_path), garbage=4, deflate=True)
-    out.close()
-    src.close()
+    # Set here rather than by the caller: the caller is in another process.
+    with _icc_disabled(), fitz.open(str(src_path)) as src, fitz.open() as out:
+        for i in range(page_start, page_end):
+            _render_bitonal_page(src[i], out, dpi, threshold)
+        out.save(str(dst_path), garbage=4, deflate=True)
     return str(dst_path)
 
 

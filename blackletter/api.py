@@ -117,7 +117,7 @@ def bitonal(
     threshold: int = 160,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> Path:
-    """Convert a PDF to bitonal (CCITT G4 TIFF images).
+    """Convert a PDF to bitonal (1-bit black/white images).
 
     :param pdf_path: Path to the source PDF.
     :param output_dir: Directory to write bitonal.pdf into.
@@ -127,24 +127,26 @@ def bitonal(
         invoked during processing.
     :returns: Path to the bitonal PDF.
     """
-    from blackletter.ocr import _render_bitonal_page
+    from blackletter.ocr import run_bitonal
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / "bitonal.pdf"
 
-    with fitz.open(str(pdf_path)) as src, fitz.open() as out:
-        total = src.page_count
+    def _report(current: int, total: int, message: str) -> None:
+        if progress_callback:
+            progress_callback(current, total, message)
+        if current % 50 == 0 or current == total:
+            print(f"  Bitonal {current}/{total}", flush=True)
 
-        for i in range(total):
-            _render_bitonal_page(src[i], out, dpi, threshold)
-            if progress_callback and ((i + 1) % 10 == 0 or i == total - 1):
-                progress_callback(i + 1, total, f"Bitonal: {i + 1}/{total} pages")
-            if (i + 1) % 50 == 0 or i == total - 1:
-                print(f"  Bitonal {i + 1}/{total}", flush=True)
-
-        out.save(str(output_path), garbage=4, deflate=True)
+    run_bitonal(
+        pdf_path,
+        output_path,
+        dpi=dpi,
+        threshold=threshold,
+        progress_callback=_report,
+    )
     print(f"  Saved bitonal.pdf ({output_path.stat().st_size / 1024 / 1024:.1f} MB)", flush=True)
     return output_path
 
