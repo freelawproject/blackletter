@@ -51,9 +51,14 @@ def _silence_ocr_loggers() -> None:
 def _icc_disabled():
     """Disable MuPDF ICC colour management for the duration of the block.
 
-    Bitonal rendering rasterises straight to greyscale and immediately
-    thresholds to one bit, so colour management cannot meaningfully change
-    the result, and it costs roughly 30% of render time.
+    Worth roughly 30% of render time on a page that is about to be
+    thresholded to one bit. It is not free of effect: colour management
+    shifts the greyscale a colour page rasterises to (a ``(0.2, 0.6, 0.9)``
+    fill measures 145 with it and 130 without), so a source pixel landing
+    within that distance of the threshold can flip. Greyscale scans, which
+    is what this pipeline is normally pointed at, are unaffected. Measured
+    across a 942-page colour-JPEG volume the difference was under 0.1% of
+    pixels, with ink coverage matching to two decimal places.
 
     MuPDF enables ICC by default and exposes no getter for the current
     state, so that default is what gets restored on the way out.
@@ -62,7 +67,12 @@ def _icc_disabled():
     try:
         yield
     finally:
-        fitz.TOOLS.set_icc(True)
+        # A MuPDF built without ICC support silently ignores the disable
+        # above and raises ValueError here. Suppressing keeps this working
+        # on such a build, and keeps a real exception on its way out of the
+        # block from being replaced by this one.
+        with contextlib.suppress(ValueError):
+            fitz.TOOLS.set_icc(True)
 
 
 def _render_bitonal_page(
@@ -502,42 +512,29 @@ def run_bitonal(
     dst_path: str | Path,
     dpi: int = 200,
     threshold: int = 160,
-    workers: int = 1,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> int:
     """Convert every page of ``src_path`` to 1-bit and write ``dst_path``.
 
     The shared implementation behind :func:`blackletter.api.bitonal` and
-    :func:`bitonal_convert`.
+    :func:`bitonal_convert`. The conversion runs in the calling process.
 
-    With ``workers=1`` the conversion runs in the calling process and
-    progress is reported per page. With ``workers>1`` the pages are split
-    into one contiguous range per worker, converted in separate processes,
-    and merged back in page order; progress is then reported as each range
-    completes, so it advances in jumps rather than smoothly.
-
-    Rasterisation is memory-bandwidth bound, so throughput flattens out
-    well before one worker per core. Callers are expected to choose a
-    worker count that suits the machine they are on: the default of 1
-    keeps this a plain sequential call unless asked otherwise.
+    Callers that want it spread across processes should fan out over
+    :func:`blackletter.tasks.bitonal_chunk` themselves and merge the
+    chunks with :func:`blackletter.tasks.merge_pdfs`. Deciding how much
+    of a machine to take belongs to whoever knows what the machine was
+    granted, which this library does not.
 
     :param src_path: PDF to convert.
     :param dst_path: Where the converted PDF is written.
     :param dpi: Render DPI.
     :param threshold: Grayscale threshold (0-255) for binarisation.
-    :param workers: Number of worker processes. Values below 2 run inline.
-        Above that the pool uses the "spawn" start method, which re-imports
-        the caller's ``__main__`` in each child, so a script calling this at
-        module scope needs the usual ``if __name__ == "__main__":`` guard.
     :param progress_callback: Optional callable(current, total, message).
     :returns: Number of pages converted.
     """
     src_path = Path(src_path)
     dst_path = Path(dst_path)
 
-    # One open serves the page count, the guard, and the sequential render.
-    # The parallel path cannot share it: workers are separate processes and
-    # get the path instead.
     with fitz.open(str(src_path)) as src:
         total = src.page_count
 
@@ -549,52 +546,12 @@ def run_bitonal(
             # that failed.
             raise ValueError(f"cannot convert {src_path.name}: it has no pages")
 
-        if workers < 2:
-            with _icc_disabled(), fitz.open() as out:
-                for i in range(total):
-                    _render_bitonal_page(src[i], out, dpi, threshold)
-                    if progress_callback and ((i + 1) % 10 == 0 or i == total - 1):
-                        progress_callback(i + 1, total, f"Bitonal: {i + 1}/{total} pages")
-                out.save(str(dst_path), garbage=4, deflate=True)
-            return total
-
-    import multiprocessing
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-
-    from blackletter.tasks import bitonal_chunk, merge_pdfs, split_page_ranges
-
-    # "spawn" is pinned rather than left to the platform default, which is
-    # "fork" on Linux but "spawn" on macOS and unavailable on Windows. Pinning
-    # it is what makes this behave the same everywhere, and it is what the
-    # subprocess-per-chunk implementation this replaced already did.
-    #
-    # "fork" would also be the riskier of the two. It has bitten this codebase
-    # before (see the oneDNN/MKL note in analyze.py), and the main consumer
-    # calls this from inside a Django worker, where forking hands every child
-    # a copy of that process's database connections and client state. Workers
-    # need nothing from the parent but their arguments.
-    context = multiprocessing.get_context("spawn")
-
-    ranges = split_page_ranges(total, workers)
-    with tempfile.TemporaryDirectory(prefix="bl_bitonal_") as tmp_dir:
-        chunk_paths = [str(Path(tmp_dir) / f"chunk_{i:04d}.pdf") for i in range(len(ranges))]
-        done = 0
-        with ProcessPoolExecutor(max_workers=len(ranges), mp_context=context) as pool:
-            futures = {
-                pool.submit(bitonal_chunk, str(src_path), chunk, start, end, dpi, threshold): (
-                    start,
-                    end,
-                )
-                for chunk, (start, end) in zip(chunk_paths, ranges, strict=True)
-            }
-            for future in as_completed(futures):
-                future.result()  # re-raise whatever the worker hit
-                start, end = futures[future]
-                done += end - start
-                if progress_callback:
-                    progress_callback(done, total, f"Bitonal: {done}/{total} pages")
-        # Merge in page order, which is not the order they finished in.
-        merge_pdfs(chunk_paths, str(dst_path))
+        with _icc_disabled(), fitz.open() as out:
+            for i in range(total):
+                _render_bitonal_page(src[i], out, dpi, threshold)
+                if progress_callback and ((i + 1) % 10 == 0 or i == total - 1):
+                    progress_callback(i + 1, total, f"Bitonal: {i + 1}/{total} pages")
+            out.save(str(dst_path), garbage=4, deflate=True)
     return total
 
 
@@ -603,21 +560,18 @@ def bitonal_convert(
     dst_path: Path,
     dpi: int = 200,
     threshold: int = 160,
-    workers: int = 1,
 ) -> None:
     """Convert a PDF to bitonal (1-bit black/white), printing progress.
 
-    Renders each page to grayscale at ``dpi`` and thresholds it. See
-    :func:`run_bitonal` for the ``workers`` semantics.
+    Renders each page to grayscale at ``dpi`` and thresholds it.
     """
     orig_mb = src_path.stat().st_size / (1024 * 1024)
-    suffix = f" ({workers} workers)" if workers > 1 else ""
     with fitz.open(str(src_path)) as src:
         total = src.page_count
-    print(f"  Bitonal: converting {total} pages at {dpi} DPI{suffix}...", flush=True)
+    print(f"  Bitonal: converting {total} pages at {dpi} DPI...", flush=True)
 
     def _report(current: int, page_total: int, _message: str) -> None:
-        if workers > 1 or current % 20 == 0 or current == page_total:
+        if current % 20 == 0 or current == page_total:
             print(f"  Bitonal: {current}/{page_total}", flush=True)
 
     run_bitonal(
@@ -625,7 +579,6 @@ def bitonal_convert(
         dst_path,
         dpi=dpi,
         threshold=threshold,
-        workers=workers,
         progress_callback=_report,
     )
 

@@ -1354,7 +1354,7 @@ def cmd_process(args: argparse.Namespace) -> None:
             _t0 = _time.time()
             print("\n── Bitonal conversion ──", flush=True)
             bitonal_path = base_dir / f"{args.pdf.stem}_bitonal.pdf"
-            bitonal_convert(args.pdf, bitonal_path, workers=getattr(args, "bitonal_workers", 1))
+            bitonal_convert(args.pdf, bitonal_path)
             args.pdf = bitonal_path
             print(f"  Bitonal done ({_time.time() - _t0:.0f}s)", flush=True)
 
@@ -2165,7 +2165,6 @@ def process(
     progress_callback=None,
     excluded: set[tuple[int, int, int, int]] | None = None,
     bitonal: bool = False,
-    bitonal_workers: int = 1,
     detect_only: bool = False,
     has_state_abbrev: bool | None = None,
     text_layer: bool = False,
@@ -2187,8 +2186,6 @@ def process(
         optimize: ocrmypdf optimization level (0-3).
         progress_callback: Optional callable(current, total, message) for progress.
         detect_only: If True, stop after detection + pairing (Phase 1).
-        bitonal_workers: Processes to split the bitonal conversion across
-            when ``bitonal`` is set. Defaults to 1, which converts inline.
         text_layer: Add a searchable text layer to the generated PDFs,
             after redaction. Off by default; see ``api.add_text_layer``.
         ocr: Run the ocrmypdf pre-pass over the source before detection.
@@ -2220,7 +2217,6 @@ def process(
         progress_callback=progress_callback,
         excluded=excluded,
         bitonal=bitonal,
-        bitonal_workers=bitonal_workers,
         detect_only=detect_only,
         has_state_abbrev=has_state_abbrev,
         text_layer=text_layer,
@@ -2307,16 +2303,6 @@ def build_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--bitonal",
         action="store_true",
         help="Convert to bitonal (1-bit B&W) before processing for speed/size",
-    )
-    p.add_argument(
-        "--bitonal-workers",
-        type=int,
-        default=1,
-        metavar="N",
-        help=(
-            "Processes to split bitonal conversion across (default: 1). "
-            "Throughput flattens well before one worker per core"
-        ),
     )
     p.add_argument(
         "--detect-only",

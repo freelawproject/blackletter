@@ -1,13 +1,12 @@
-"""Tests for bitonal conversion, sequential and parallel.
+"""Tests for bitonal conversion.
 
-The parallel path splits the document into one contiguous page range per
-worker, converts each in its own process, and merges the chunks back. The
-merge has to restore page order, which is *not* the order the workers
-finish in, so most of what is worth asserting here is that ``workers=N``
-is indistinguishable from ``workers=1`` no matter how the ranges land.
+Conversion runs page by page in the calling process, and a caller that
+wants it parallelised fans out over ``tasks.bitonal_chunk`` itself. What
+is worth asserting here is that the renderer both paths share produces
+1-bit pages, in order, with the geometry and ink the threshold implies.
 
 The pages carry a marker whose vertical position encodes the page index,
-so a reordered merge is detectable from the raster alone.
+so a page that came back out of order is detectable from the raster alone.
 """
 
 from __future__ import annotations
@@ -69,9 +68,48 @@ def page_rasters(pdf: Path) -> list[np.ndarray]:
     return out
 
 
+# A colour fill rasterises to a different grey depending on whether MuPDF's
+# colour management is on, which is the only handle these tests have on a
+# flag PyMuPDF exposes no getter for.
+COLOUR_FILL = (0.2, 0.6, 0.9)
+ICC_ON_GREY = 145
+ICC_OFF_GREY = 130
+
+
+def write_colour_page(path: Path) -> None:
+    """Write a one-page PDF filled with :data:`COLOUR_FILL`."""
+    with fitz.open() as doc:
+        page = doc.new_page(width=PAGE_W, height=PAGE_H)
+        page.draw_rect(page.rect, fill=COLOUR_FILL, width=0)
+        doc.save(str(path))
+
+
+def grey_of(pdf: Path) -> int:
+    """Rasterise page 1 to greyscale and return its centre pixel."""
+    with fitz.open(str(pdf)) as doc:
+        pix = doc[0].get_pixmap(dpi=72, colorspace=fitz.csGRAY)
+        gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+        return int(gray[pix.height // 2, pix.width // 2])
+
+
+def convert_in_chunks(src: Path, dst: Path, n_chunks: int, tmp_dir: Path) -> None:
+    """Convert ``src`` a range at a time and merge, as a caller would."""
+    from blackletter.tasks import bitonal_chunk, merge_pdfs, split_page_ranges
+
+    with fitz.open(str(src)) as doc:
+        total = doc.page_count
+
+    chunks = []
+    for i, (start, end) in enumerate(split_page_ranges(total, n_chunks)):
+        chunk = tmp_dir / f"chunk_{dst.stem}_{i:04d}.pdf"
+        bitonal_chunk(str(src), str(chunk), start, end)
+        chunks.append(chunk)
+    merge_pdfs(chunks, dst)
+
+
 @pytest.fixture(scope="module")
 def source_pdf(tmp_path_factory):
-    """A 12-page source, enough to split unevenly across several workers."""
+    """A 12-page source, enough to split unevenly into several ranges."""
     path = tmp_path_factory.mktemp("bitonal") / "source.pdf"
     write_numbered_pages(path, 12)
     return path
@@ -112,64 +150,64 @@ class TestRunBitonal:
         assert all((p < 128).all() for p in page_rasters(tmp_path / "t255.pdf"))
 
 
-class TestParallelMatchesSequential:
-    @pytest.mark.parametrize("workers", [2, 3, 5, 8])
-    def test_page_order_survives_the_merge(self, source_pdf, tmp_path, workers):
-        dst = tmp_path / f"out_{workers}.pdf"
-        run_bitonal(source_pdf, dst, workers=workers)
+class TestChunkedMatchesWholeDocument:
+    """The contract a caller fanning out over ``bitonal_chunk`` relies on.
+
+    Parallelism lives above this library, so what has to hold is that
+    converting a document in ranges and merging the chunks back gives the
+    same pages, in the same order, as converting it in one call.
+    """
+
+    @pytest.mark.parametrize("n_chunks", [2, 3, 5, 8])
+    def test_page_order_survives_the_merge(self, source_pdf, tmp_path, n_chunks):
+        dst = tmp_path / f"out_{n_chunks}.pdf"
+        convert_in_chunks(source_pdf, dst, n_chunks, tmp_path)
 
         rows = marker_rows(dst)
         assert len(rows) == 12
         assert rows == sorted(rows), "pages came back out of order"
         assert len(set(rows)) == 12, "a page was duplicated or dropped"
 
-    @pytest.mark.parametrize("workers", [2, 3, 5])
-    def test_output_is_identical_to_sequential(self, source_pdf, tmp_path, workers):
-        sequential = tmp_path / "seq.pdf"
-        parallel = tmp_path / f"par_{workers}.pdf"
-        run_bitonal(source_pdf, sequential)
-        run_bitonal(source_pdf, parallel, workers=workers)
+    @pytest.mark.parametrize("n_chunks", [2, 3, 5])
+    def test_output_is_identical_to_one_call(self, source_pdf, tmp_path, n_chunks):
+        whole = tmp_path / "whole.pdf"
+        chunked = tmp_path / f"chunked_{n_chunks}.pdf"
+        run_bitonal(source_pdf, whole)
+        convert_in_chunks(source_pdf, chunked, n_chunks, tmp_path)
 
-        for i, (a, b) in enumerate(zip(page_rasters(sequential), page_rasters(parallel))):
+        for i, (a, b) in enumerate(zip(page_rasters(whole), page_rasters(chunked))):
             assert np.array_equal(a, b), f"page {i} differs"
 
-    def test_start_method_is_pinned_to_spawn(self, source_pdf, tmp_path, monkeypatch):
-        """The pool must not fall back to the platform default.
+    def test_chunk_disables_icc_itself(self, tmp_path):
+        """ICC is process-global, so a chunk running in its own process
+        cannot inherit the setting from whoever fanned it out.
 
-        "fork" is that default on Linux, is unavailable on Windows, and is
-        the method this codebase has hit runtime problems with before. A
-        change that drops ``mp_context`` would otherwise be invisible until
-        it reached a machine that behaves differently.
+        Thresholded at ``ICC_OFF_GREY < t < ICC_ON_GREY``, so the fill
+        comes out black only if the chunk turned colour management off.
         """
-        import concurrent.futures
+        from blackletter.tasks import bitonal_chunk
 
-        captured = {}
-        real_executor = concurrent.futures.ProcessPoolExecutor
+        src = tmp_path / "colour.pdf"
+        write_colour_page(src)
+        chunk = tmp_path / "chunk.pdf"
 
-        class RecordingExecutor(real_executor):
-            def __init__(self, *args, **kwargs):
-                captured["mp_context"] = kwargs.get("mp_context")
-                super().__init__(*args, **kwargs)
+        fitz.TOOLS.set_icc(True)
+        bitonal_chunk(str(src), str(chunk), 0, 1, threshold=137)
 
-        monkeypatch.setattr(concurrent.futures, "ProcessPoolExecutor", RecordingExecutor)
-        run_bitonal(source_pdf, tmp_path / "out.pdf", workers=2)
+        assert (page_rasters(chunk)[0] < 128).any(), "the fill rendered under ICC"
 
-        context = captured["mp_context"]
-        assert context is not None, "pool fell back to the platform default"
-        assert context.get_start_method() == "spawn"
-
-    def test_more_workers_than_pages_is_harmless(self, tmp_path):
+    def test_more_chunks_than_pages_is_harmless(self, tmp_path):
         src = tmp_path / "two.pdf"
         write_numbered_pages(src, 2)
         dst = tmp_path / "out.pdf"
 
-        assert run_bitonal(src, dst, workers=16) == 2
+        convert_in_chunks(src, dst, 16, tmp_path)
         with fitz.open(str(dst)) as doc:
             assert doc.page_count == 2
 
 
 class TestProgressCallback:
-    def test_sequential_reports_each_page_and_finishes_at_total(self, source_pdf, tmp_path):
+    def test_reports_each_page_and_finishes_at_total(self, source_pdf, tmp_path):
         seen = []
         run_bitonal(
             source_pdf,
@@ -181,36 +219,48 @@ class TestProgressCallback:
         assert [c for c, _ in seen] == sorted(c for c, _ in seen)
         assert all(t == 12 for _, t in seen)
 
-    def test_parallel_accounts_for_every_page(self, source_pdf, tmp_path):
-        seen = []
-        run_bitonal(
-            source_pdf,
-            tmp_path / "out.pdf",
-            workers=3,
-            progress_callback=lambda c, t, m: seen.append((c, t)),
-        )
-
-        assert seen[-1] == (12, 12)
-        assert [c for c, _ in seen] == sorted(c for c, _ in seen)
-
 
 class TestIccHandling:
-    def test_state_is_restored_after_conversion(self, source_pdf, tmp_path):
-        """The context manager must not leave ICC off for later renders."""
+    """ICC is global to the process, so the flag has to come back on.
+
+    None of this can be checked against the black-on-white fixture above,
+    which rasterises identically either way — a test written on it would
+    pass with the restore deleted. These use a colour fill instead, the
+    one thing in this file whose rendering the flag actually moves.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _icc_on(self):
+        """Leave the flag on for the next test whatever this one does."""
+        fitz.TOOLS.set_icc(True)
+        yield
+        fitz.TOOLS.set_icc(True)
+
+    def test_the_probe_can_see_the_flag(self, tmp_path):
+        """Guards the rest of the class: without this they go blind."""
+        probe = tmp_path / "probe.pdf"
+        write_colour_page(probe)
+
+        assert grey_of(probe) == ICC_ON_GREY
         with _icc_disabled():
-            pass
-        baseline = page_rasters(source_pdf)
+            assert grey_of(probe) == ICC_OFF_GREY
+
+    def test_state_is_restored_after_conversion(self, source_pdf, tmp_path):
+        probe = tmp_path / "probe.pdf"
+        write_colour_page(probe)
 
         run_bitonal(source_pdf, tmp_path / "out.pdf")
 
-        assert np.array_equal(baseline[0], page_rasters(source_pdf)[0])
+        assert grey_of(probe) == ICC_ON_GREY, "conversion left colour management off"
 
-    def test_restores_on_exception(self):
+    def test_restores_on_exception(self, tmp_path):
+        probe = tmp_path / "probe.pdf"
+        write_colour_page(probe)
+
         with pytest.raises(RuntimeError), _icc_disabled():
             raise RuntimeError("boom")
-        # Reaching here without the flag stuck off is the assertion; a
-        # leaked "off" would change every subsequent colour render.
-        fitz.TOOLS.set_icc(True)
+
+        assert grey_of(probe) == ICC_ON_GREY, "the flag stuck off"
 
 
 class TestApiBitonal:
@@ -224,17 +274,10 @@ class TestApiBitonal:
 
     def test_creates_missing_output_dir(self, source_pdf, tmp_path):
         target = tmp_path / "nested" / "dir"
-        out = bitonal(source_pdf, target, workers=2)
+        out = bitonal(source_pdf, target)
 
         assert out.exists()
         assert out.parent == target
-
-    def test_workers_reaches_the_conversion(self, source_pdf, tmp_path):
-        sequential = bitonal(source_pdf, tmp_path / "a")
-        parallel = bitonal(source_pdf, tmp_path / "b", workers=3)
-
-        for a, b in zip(page_rasters(sequential), page_rasters(parallel)):
-            assert np.array_equal(a, b)
 
     def test_progress_callback_is_forwarded(self, source_pdf, tmp_path):
         seen = []

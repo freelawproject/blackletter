@@ -116,7 +116,6 @@ def bitonal(
     dpi: int = 200,
     threshold: int = 160,
     progress_callback: Callable[[int, int, str], None] | None = None,
-    workers: int = 1,
 ) -> Path:
     """Convert a PDF to bitonal (1-bit black/white images).
 
@@ -125,12 +124,7 @@ def bitonal(
     :param dpi: Rendering resolution for rasterisation.
     :param threshold: Grayscale threshold (0-255) for binarisation.
     :param progress_callback: Optional callable(current, total, message)
-        invoked during processing. Under ``workers>1`` this fires once per
-        completed page range rather than smoothly per page.
-    :param workers: Number of worker processes to split the pages across.
-        The default of 1 converts inline. Rasterisation is memory-bandwidth
-        bound, so throughput flattens well before one worker per core;
-        pick a value that leaves the host some headroom.
+        invoked during processing.
     :returns: Path to the bitonal PDF.
     """
     from blackletter.ocr import run_bitonal
@@ -151,7 +145,6 @@ def bitonal(
         output_path,
         dpi=dpi,
         threshold=threshold,
-        workers=workers,
         progress_callback=_report,
     )
     print(f"  Saved bitonal.pdf ({output_path.stat().st_size / 1024 / 1024:.1f} MB)", flush=True)

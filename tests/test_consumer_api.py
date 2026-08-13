@@ -417,36 +417,3 @@ class TestProcessExposesTheFlags:
 
         assert seen["args"].text_layer is False
         assert seen["args"].ocr is False
-
-    def test_bitonal_worker_count_reaches_the_namespace(self, monkeypatch):
-        """``cmd_process`` reads this with a ``getattr`` default of 1.
-
-        So omitting it from the namespace costs a Python caller the whole
-        parallel conversion without raising anything: the sequential path
-        produces identical output, only slower.
-        """
-        import argparse
-
-        import blackletter.process as bl
-
-        seen: dict[str, argparse.Namespace] = {}
-        monkeypatch.setattr(bl, "cmd_process", lambda args: seen.setdefault("args", args))
-        monkeypatch.setattr(bl, "_build_output_dir", lambda args: args.output)
-
-        bl.process("in.pdf", "out", bitonal=True, bitonal_workers=6)
-
-        assert seen["args"].bitonal is True
-        assert seen["args"].bitonal_workers == 6
-
-    def test_bitonal_workers_defaults_to_inline(self, monkeypatch):
-        import argparse
-
-        import blackletter.process as bl
-
-        seen: dict[str, argparse.Namespace] = {}
-        monkeypatch.setattr(bl, "cmd_process", lambda args: seen.setdefault("args", args))
-        monkeypatch.setattr(bl, "_build_output_dir", lambda args: args.output)
-
-        bl.process("in.pdf", "out")
-
-        assert seen["args"].bitonal_workers == 1
