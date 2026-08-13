@@ -61,6 +61,28 @@ def is_bl_warm(names: dict[int, str]) -> bool:
     return "keycite" in vals and "body" in vals
 
 
+def rows_are_bl_warm(rows: list[dict]) -> bool:
+    """True when bl-warm alone produced these serialised detection rows.
+
+    Rows carry provenance either as ``model`` (the sidecar written by
+    :func:`blackletter.scanner._write_detections_sidecar`) or as
+    ``found_by`` (the merged rows :func:`blackletter.api.detect` returns).
+    A mixed or provenance-less set reads as not-bl-warm, so it keeps the
+    legacy confidence gates.
+
+    :param rows: Raw detection dicts, e.g. loaded from detections.json.
+    :returns: Whether every row with provenance came from bl-warm.
+    """
+    models: set[str] = set()
+    for row in rows:
+        found_by = row.get("found_by")
+        if found_by:
+            models.update(entry.get("model") for entry in found_by)
+        elif row.get("model"):
+            models.add(row["model"])
+    return bool(models) and models == {"bl_warm"}
+
+
 def iter_label_rows(result: Any) -> Iterator[tuple[int, float, list[float]]]:
     """Yield ``(label_id, confidence, xyxy)`` rows in blackletter's
     taxonomy from one ultralytics result.

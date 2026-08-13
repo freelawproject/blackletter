@@ -362,6 +362,7 @@ def pair_and_compute_rects(
     Returns:
         Dict with opinions_count, rects_count.
     """
+    from blackletter.bl_warm import rows_are_bl_warm
     from blackletter.models import Detection, Document, Page
     from blackletter.scanner import (
         snap_document_columns,
@@ -421,6 +422,7 @@ def pair_and_compute_rects(
         volume=volume,
         first_page=first_page,
         ocr_applied=True,
+        bl_warm=rows_are_bl_warm(raw),
     )
     snap_document_columns(document)
 

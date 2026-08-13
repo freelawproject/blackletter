@@ -554,6 +554,11 @@ def detect(
     TRUSTED_CAPTION_MODELS = {"medium", "bl_warm"}
     SMALLEST_BOX = {"CASE_SEQUENCE"}
 
+    # The startswith clause is deliberate, not redundant with the set
+    # membership above it: ensure_weights resolves any name that has a
+    # matching .pt in the weights dir, so a locally-dropped bl-warm
+    # variant (e.g. "bl_warm_v2") is a reachable model name and stays
+    # trusted for these labels.
     filtered = [
         d
         for d in all_raw
@@ -657,6 +662,7 @@ def pair(
     :returns: List of opinion dicts with page ranges, bboxes, and
         outside_rects.
     """
+    from blackletter.bl_warm import rows_are_bl_warm
     from blackletter.models import Detection as BLDetection, Document, Page
     from blackletter.scanner import _pair_opinions, snap_document_columns
 
@@ -703,6 +709,7 @@ def pair(
             volume=volume,
             first_page=first_page,
             ocr_applied=True,
+            bl_warm=rows_are_bl_warm(raw),
         )
         snap_document_columns(document)
 
@@ -797,6 +804,7 @@ def build_redacted(
         ``output_dir / "redaction_rects.json"``.
     :returns: Path to the redacted PDF.
     """
+    from blackletter.bl_warm import rows_are_bl_warm
     from blackletter.process import _build_redacted_from_rects
     from blackletter.models import Document, Page
 
@@ -838,7 +846,9 @@ def build_redacted(
 
     from blackletter.scanner import snap_document_columns
 
-    document = Document(pdf_path=pdf_path, pages=pages, ocr_applied=True)
+    document = Document(
+        pdf_path=pdf_path, pages=pages, ocr_applied=True, bl_warm=rows_are_bl_warm(det_data)
+    )
     snap_document_columns(document)
 
     # Build scan name

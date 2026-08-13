@@ -11,7 +11,7 @@ from pathlib import Path
 import fitz
 
 from blackletter import ink
-from blackletter.bl_warm import is_bl_warm, iter_label_rows
+from blackletter.bl_warm import is_bl_warm, iter_label_rows, rows_are_bl_warm
 from blackletter.models import BBox, Detection, Label
 from blackletter.refine import refine_headnote_rects
 from blackletter.scanner import (
@@ -41,8 +41,7 @@ from blackletter.scanner import (
     _REDACT_WHITE,
     _REDACT_BLACK,
     _filter_key_icons_by_size,
-    LABEL_CONFIDENCE,
-    CONFIDENCE_THRESHOLD,
+    label_confidence,
 )
 
 logger = logging.getLogger("blackletter")
@@ -101,7 +100,7 @@ def _key_rects_pdf_by_page_from_document(document) -> dict[int, list[fitz.Rect]]
     :rtype: dict[int, list[fitz.Rect]]
     """
     result: dict[int, list[fitz.Rect]] = {}
-    thresh = LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
+    thresh = label_confidence(Label.KEY_ICON, document.bl_warm)
     for page in document.pages:
         key_dets = [d for d in page.detections if d.label == Label.KEY_ICON]
         if not key_dets:
@@ -458,9 +457,7 @@ def compute_redaction_rects(
                 if _check_excluded(d, excluded):
                     continue
                 _is_approved = approved and _check_excluded(d, approved)
-                if not _is_approved and d.confidence < LABEL_CONFIDENCE.get(
-                    d.label, CONFIDENCE_THRESHOLD
-                ):
+                if not _is_approved and d.confidence < label_confidence(d.label, document.bl_warm):
                     continue
                 _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
                 if _skip_tighten:
@@ -540,7 +537,7 @@ def compute_redaction_rects(
                     continue
                 if _check_excluded(d, excluded):
                     continue
-                if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
+                if d.confidence < label_confidence(d.label, document.bl_warm):
                     continue
                 _add_px(src_idx, d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, "black", "KEY_ICON")
 
@@ -1184,7 +1181,7 @@ def _build_full_redacted(
                     continue
                 if _check_excluded(d, excluded):
                     continue
-                if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
+                if d.confidence < label_confidence(d.label, document.bl_warm):
                     continue
                 rect = d.bbox.to_fitz_pdf_rect(sx, sy)
                 _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
@@ -1213,7 +1210,7 @@ def _build_full_redacted(
                     continue
                 if _check_excluded(d, excluded):
                     continue
-                if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
+                if d.confidence < label_confidence(d.label, document.bl_warm):
                     continue
                 rect = d.bbox.to_fitz_pdf_rect(sx, sy)
                 add_safe(rect, (0, 0, 0))
@@ -1269,7 +1266,7 @@ def _extract_images(document, output_dir: Path) -> int:
                 d
                 for d in page.detections
                 if d.label == Label.IMAGE
-                and d.confidence >= LABEL_CONFIDENCE.get(Label.IMAGE, CONFIDENCE_THRESHOLD)
+                and d.confidence >= label_confidence(Label.IMAGE, document.bl_warm)
             ]
             if not images:
                 continue
@@ -1367,6 +1364,19 @@ def cmd_process(args: argparse.Namespace) -> None:
 
         model_path = ensure_weights([model_path.stem])[model_path.stem]
     model = YOLO(str(model_path))
+
+    # bl-warm was trained on grayscale renders and its large region classes
+    # (body/TEXT_COLUMN above all, which the column split and every rect
+    # read off it depend on) collapse on 1-bit input. Detecting on the
+    # bitonal copy would degrade the run silently, so refuse the pair.
+    if getattr(args, "bitonal", False) and is_bl_warm(model.names):
+        print(
+            "Error: --bitonal cannot be combined with bl-warm. bl-warm detects on "
+            "the original PDF; its large region classes collapse on 1-bit input. "
+            "Drop --bitonal, or use --model small.pt/medium.pt/large.pt.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     base_dir = _build_output_dir(args)
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -1952,6 +1962,7 @@ def rebuild_full_redacted_from_detections(
         volume=volume,
         first_page=first_page,
         ocr_applied=True,
+        bl_warm=rows_are_bl_warm(raw),
     )
     snap_document_columns(document)
 
@@ -2057,6 +2068,7 @@ def generate_files(
         volume=volume,
         first_page=first_page,
         ocr_applied=True,
+        bl_warm=rows_are_bl_warm(raw),
     )
     snap_document_columns(document)
 
