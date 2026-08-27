@@ -4,12 +4,17 @@
 
 The following changes are not yet released, but are code complete:
 
+## Current
+
+0.3.0 (2026-08-26)
+
 - Add `bl_warm.pt`, one 18-class YOLOv8m model intended to replace the small/medium/large trio, behind the existing pipeline. A detection-time adapter (`blackletter.bl_warm`) maps its class names onto `Label` ids, splits the whole-page `body` box into two `TEXT_COLUMN` boxes at its center line, and drops the two classes with no `Label` equivalent; `api.detect` accepts `models=["bl_warm"]`, `process`/CLI gain `--bl-warm`, and the caption/key-icon trust filter trusts it alongside `medium`. bl-warm must detect on the original PDF rather than the bitonal processing copy (its large region classes collapse on 1-bit input). End-to-end through the scanning-style redaction flow on held-out golden volumes it scores macro F1 0.965 (val) / 0.907 (test) against 0.727 / 0.705 for the legacy three-model ensemble. The legacy trio remains the default (#73)
 - Pin each entry in `_HF_WEIGHTS` to its own weights-repo commit sha instead of one shared `_HF_REVISION`, so a newly added weights file can be pinned at the commit that added it without moving the trio's pin (#73)
 - Retune the confidence gates for bl-warm only: `PAGE_HEADER` and `HEADNOTE_BRACKET` drop from 0.50 to 0.30 and `EDITORIAL` gains a 0.50 gate, measured on the golden val/test set — everything bl-warm places between 0.25 and 0.50 for the two lowered classes is a true positive the old gate silently dropped, while `EDITORIAL`'s one harmful false positive sits below 0.50 and every true positive above it. The two families score these labels differently, so the numbers live in `scanner.BL_WARM_LABEL_CONFIDENCE` and are picked per detection family by `scanner.label_confidence(label, bl_warm)`; a legacy small/medium/large run keeps `LABEL_CONFIDENCE` unchanged. `Document.bl_warm` carries the family, set from the loaded model in `scan()`, from `found_by` on `api.detect` rows, and from a `model` key that `detections.json` now stamps on bl-warm rows so a rebuilt `Document` still knows (#73)
 - Refuse `blackletter process --bitonal` when the model is bl-warm, instead of silently detecting on the 1-bit copy that its large region classes collapse on (#73)
+- Consumers that build their own `Document` rather than going through `scan()`, `api.pair`, `api.build_redacted`, `process.generate_files` or `tasks.pair_and_compute_rects` must now pass `bl_warm=True` (or feed rows that carry `found_by`/`model` and let `bl_warm.rows_are_bl_warm` decide) when the detections came from bl-warm. `Document.bl_warm` defaults to `False`, and a bl-warm run left at the default silently gets the legacy gates: `PAGE_HEADER`/`HEADNOTE_BRACKET` back at 0.50, which drops real redactions, and `EDITORIAL` down at `CONFIDENCE_THRESHOLD`, which keeps the false positive its 0.50 gate exists to remove. Nothing raises — the rects just change shape — so check this before pointing a consumer at `models=["bl_warm"]` (#73)
 
-## Current
+## Past
 
 0.2.0 (2026-08-04)
 
@@ -25,7 +30,6 @@ The following changes are not yet released, but are code complete:
 - Tighten margin cleanup with detection geometry: `compute_margin_rects` and `clean_margins` accept the detected `pages` and intersect the measured content box with the `TEXT_COLUMN` band and the header row, so one bleed-through mark in a corner no longer widens the content box and shrinks the strip on that side. The four strips are also reshaped — full-width above and below the body, side strips spanning the body rows only — which covers the same region while keeping a side strip away from a page number printed outside the columns. On a real volume this raised masked area 23% and junk ink covered 3.3x, and no ink inside a content detection is erased across 60 pages of a real volume, against 27,267 px of scanner artifacts that are. A side bound is only tightened past ink that reads as an artifact, near-solid or negligible in its own pixel columns; text-like ink means a column went undetected and the band is not to be trusted there (#68)
 - `clean_margins` now computes its strips through `compute_margin_rects` instead of duplicating the geometry, so the two can no longer disagree (#68)
 
-## Past
 
 0.1.1 (2026-07-15)
 
