@@ -293,6 +293,11 @@ class Document:
     :func:`blackletter.scanner._measure_from_ink`). A PDF with no text layer
     at all is measured from ink either way, so the flag only matters when
     there is a text layer worth distrusting.
+
+    ``bl_warm`` records that these detections came from bl-warm rather than
+    the legacy small/medium/large models. The two families score the same
+    labels differently, so the confidence gates are picked per family (see
+    :func:`blackletter.scanner.label_confidence`).
     """
 
     pdf_path: Path
@@ -301,6 +306,7 @@ class Document:
     reporter: str | None = None
     first_page: int = 1
     ocr_applied: bool = False
+    bl_warm: bool = False
 
     def by_label(self, *labels: Label) -> list[Detection]:
         """All detections matching the given labels, in reading order.

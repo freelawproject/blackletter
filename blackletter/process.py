@@ -11,6 +11,7 @@ from pathlib import Path
 import fitz
 
 from blackletter import ink
+from blackletter.bl_warm import is_bl_warm, iter_label_rows, rows_are_bl_warm
 from blackletter.models import BBox, Detection, Label
 from blackletter.refine import refine_headnote_rects
 from blackletter.scanner import (
@@ -40,8 +41,7 @@ from blackletter.scanner import (
     _REDACT_WHITE,
     _REDACT_BLACK,
     _filter_key_icons_by_size,
-    LABEL_CONFIDENCE,
-    CONFIDENCE_THRESHOLD,
+    label_confidence,
 )
 
 logger = logging.getLogger("blackletter")
@@ -100,7 +100,7 @@ def _key_rects_pdf_by_page_from_document(document) -> dict[int, list[fitz.Rect]]
     :rtype: dict[int, list[fitz.Rect]]
     """
     result: dict[int, list[fitz.Rect]] = {}
-    thresh = LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
+    thresh = label_confidence(Label.KEY_ICON, document.bl_warm)
     for page in document.pages:
         key_dets = [d for d in page.detections if d.label == Label.KEY_ICON]
         if not key_dets:
@@ -276,6 +276,46 @@ def _redact_bitonal_image(fitz_page, fitz_doc, redaction_rects):
     fitz_doc.xref_set_key(xref, "ColorSpace", "/DeviceGray")
 
 
+def _right_column_inner(page) -> float | None:
+    """Where the right column starts, in image pixels.
+
+    Used to keep a headnote blackout on its own side of the gutter.
+
+    ``TEXT_COLUMN`` is the source of record: one box per column, already
+    corrected against the page ink by
+    :func:`~blackletter.scanner.snap_text_columns_to_ink`, so its left edge
+    *is* the boundary.
+
+    Right-column ``HEADNOTE`` detections are a fallback for pages with no
+    right column box, and only ever approximated the boundary. That holds
+    while a HEADNOTE box covers a whole headnote line, which starts at the
+    column edge. It breaks under bl-warm, whose ``keycite`` boxes cover only
+    the West key-number token: those sit well inside the column, so the
+    leftmost one put the boundary near mid-column and cut right-column
+    blackouts to roughly half the column width. Worse, the half-width rect
+    that came out was then too far off its column box for
+    :func:`_snap_headnote_x_to_columns` to repair, since it fails the
+    :data:`COLUMN_WIDTH_TOLERANCE` check.
+
+    :param page: The page whose detections to read.
+    :returns: The boundary in image pixels, or ``None`` when neither a right
+        column box nor a right-column headnote is available.
+    """
+    mid_px = page.midpoint
+    right_cols = [
+        d for d in page.detections if d.label == Label.TEXT_COLUMN and d.bbox.center_x > mid_px
+    ]
+    if right_cols:
+        return min(d.bbox.x1 for d in right_cols)
+    # Right-column HEADNOTEs: center in right half, left edge at least 75% across
+    right_hn = [
+        d
+        for d in page.detections
+        if d.label == Label.HEADNOTE and d.bbox.center_x > mid_px and d.bbox.x1 >= mid_px * 0.75
+    ]
+    return min(d.bbox.x1 for d in right_hn) if right_hn else None
+
+
 def compute_redaction_rects(
     document,
     opinions: list[tuple],
@@ -361,19 +401,9 @@ def compute_redaction_rects(
             # Headnote zones — compute in image pixel coords
             hb, ft = _margin_bounds(page)
 
-            # Use right-column HEADNOTE detections to establish the inner column
-            # boundary: the leftmost x0 of any right-column HEADNOTE is where the
-            # right column starts. The left column ends 10px before that.
             mid_px = page.midpoint
-            # Right-column HEADNOTEs: center in right half, left edge at least 75% across
-            right_hn = [
-                d
-                for d in page.detections
-                if d.label == Label.HEADNOTE
-                and d.bbox.center_x > mid_px
-                and d.bbox.x1 >= mid_px * 0.75
-            ]
-            right_col_inner_pdf = min(d.bbox.x1 for d in right_hn) * sx if right_hn else None
+            _inner_px = _right_column_inner(page)
+            right_col_inner_pdf = None if _inner_px is None else _inner_px * sx
 
             for rect_page_idx, rect in all_headnote_rects:
                 if rect_page_idx == src_idx:
@@ -427,9 +457,7 @@ def compute_redaction_rects(
                 if _check_excluded(d, excluded):
                     continue
                 _is_approved = approved and _check_excluded(d, approved)
-                if not _is_approved and d.confidence < LABEL_CONFIDENCE.get(
-                    d.label, CONFIDENCE_THRESHOLD
-                ):
+                if not _is_approved and d.confidence < label_confidence(d.label, document.bl_warm):
                     continue
                 _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
                 if _skip_tighten:
@@ -509,7 +537,7 @@ def compute_redaction_rects(
                     continue
                 if _check_excluded(d, excluded):
                     continue
-                if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
+                if d.confidence < label_confidence(d.label, document.bl_warm):
                     continue
                 _add_px(src_idx, d.bbox.x1, d.bbox.y1, d.bbox.x2, d.bbox.y2, "black", "KEY_ICON")
 
@@ -1153,7 +1181,7 @@ def _build_full_redacted(
                     continue
                 if _check_excluded(d, excluded):
                     continue
-                if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
+                if d.confidence < label_confidence(d.label, document.bl_warm):
                     continue
                 rect = d.bbox.to_fitz_pdf_rect(sx, sy)
                 _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
@@ -1182,7 +1210,7 @@ def _build_full_redacted(
                     continue
                 if _check_excluded(d, excluded):
                     continue
-                if d.confidence < LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD):
+                if d.confidence < label_confidence(d.label, document.bl_warm):
                     continue
                 rect = d.bbox.to_fitz_pdf_rect(sx, sy)
                 add_safe(rect, (0, 0, 0))
@@ -1238,7 +1266,7 @@ def _extract_images(document, output_dir: Path) -> int:
                 d
                 for d in page.detections
                 if d.label == Label.IMAGE
-                and d.confidence >= LABEL_CONFIDENCE.get(Label.IMAGE, CONFIDENCE_THRESHOLD)
+                and d.confidence >= label_confidence(Label.IMAGE, document.bl_warm)
             ]
             if not images:
                 continue
@@ -1336,6 +1364,19 @@ def cmd_process(args: argparse.Namespace) -> None:
 
         model_path = ensure_weights([model_path.stem])[model_path.stem]
     model = YOLO(str(model_path))
+
+    # bl-warm was trained on grayscale renders and its large region classes
+    # (body/TEXT_COLUMN above all, which the column split and every rect
+    # read off it depend on) collapse on 1-bit input. Detecting on the
+    # bitonal copy would degrade the run silently, so refuse the pair.
+    if getattr(args, "bitonal", False) and is_bl_warm(model.names):
+        print(
+            "Error: --bitonal cannot be combined with bl-warm. bl-warm detects on "
+            "the original PDF; its large region classes collapse on 1-bit input. "
+            "Drop --bitonal, or use --model small.pt/medium.pt/large.pt.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     base_dir = _build_output_dir(args)
     base_dir.mkdir(parents=True, exist_ok=True)
@@ -1450,18 +1491,22 @@ def cmd_process(args: argparse.Namespace) -> None:
     if _has_sa_flag is False:
         missing_sa = []  # explicitly disabled
     if missing_sa and (_has_sa_flag or (sa_pages and len(sa_pages) > len(all_pages) * 0.1)):
+        # bl-warm already is the best SA detector available; reuse it
+        # rather than mixing original-model detections into its run.
+        _primary_is_warm = is_bl_warm(model.names)
         print(
             f"\n  Auto-fill: {len(sa_pages)} pages have STATE_ABBREVIATION, "
-            f"{len(missing_sa)} missing — scanning with large model...",
+            f"{len(missing_sa)} missing — scanning with "
+            f"{'bl-warm' if _primary_is_warm else 'large'} model...",
             flush=True,
         )
         _t0 = _time.time()
         large_model_path = Path(__file__).resolve().parent / "weights" / "large.pt"
-        if large_model_path.exists():
+        if _primary_is_warm or large_model_path.exists():
             from PIL import Image as _PILImage
             from blackletter.scanner import DPI
 
-            large_model = YOLO(str(large_model_path))
+            large_model = model if _primary_is_warm else YOLO(str(large_model_path))
             mat = fitz.Matrix(DPI / 72, DPI / 72)
             with fitz.open(str(document.pdf_path)) as pdf_file:
                 added = 0
@@ -1469,15 +1514,12 @@ def cmd_process(args: argparse.Namespace) -> None:
                     pix = pdf_file[pi].get_pixmap(matrix=mat)
                     img = _PILImage.frombytes("RGB", (pix.width, pix.height), pix.samples)
                     results = large_model([img], conf=0.50, verbose=False)
-                    for box in results[0].boxes:
-                        cls = int(box.cls[0].item())
-                        conf = float(box.conf[0].item())
+                    for cls, conf, bbox in iter_label_rows(results[0]):
                         if cls == int(Label.STATE_ABBREVIATION) and conf >= 0.50:
-                            bbox = box.xyxy[0].tolist()
                             det = Detection(
                                 bbox=BBox.from_xyxy(bbox),
                                 label=Label.STATE_ABBREVIATION,
-                                confidence=float(box.conf[0].item()),
+                                confidence=conf,
                                 page_index=pi,
                             )
                             _pages_by_idx[pi].detections.append(det)
@@ -1486,7 +1528,7 @@ def cmd_process(args: argparse.Namespace) -> None:
                                     "page_index": pi,
                                     "label": "STATE_ABBREVIATION",
                                     "label_id": int(Label.STATE_ABBREVIATION),
-                                    "confidence": round(float(box.conf[0].item()), 3),
+                                    "confidence": round(conf, 3),
                                     "bbox": [round(v, 1) for v in bbox],
                                     "page_number": _pages_by_idx[pi].page_number,
                                     "img_width": pix.width,
@@ -1920,6 +1962,7 @@ def rebuild_full_redacted_from_detections(
         volume=volume,
         first_page=first_page,
         ocr_applied=True,
+        bl_warm=rows_are_bl_warm(raw),
     )
     snap_document_columns(document)
 
@@ -2025,6 +2068,7 @@ def generate_files(
         volume=volume,
         first_page=first_page,
         ocr_applied=True,
+        bl_warm=rows_are_bl_warm(raw),
     )
     snap_document_columns(document)
 
@@ -2248,6 +2292,12 @@ def build_parser(sub: argparse._SubParsersAction) -> argparse.ArgumentParser:
         "--large",
         action="store_true",
         help="Use the large model (analyze.pt, run_59) with 21 detection classes",
+    )
+    p.add_argument(
+        "--bl-warm",
+        action="store_true",
+        help="Use the bl-warm replacement model (bl_warm.pt, single model "
+        "standing in for small/medium/large via blackletter.bl_warm)",
     )
     p.add_argument(
         "--reporter",

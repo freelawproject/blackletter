@@ -17,8 +17,14 @@ import textwrap
 def _run(script: str) -> str:
     """Execute ``script`` in a fresh Python subprocess.
 
+    Every script here prints its answer, and prints it last. Only that line
+    is returned, because an import can put its own lines on stdout ahead of
+    it: pymupdf 1.28 announces the ``fitz`` deprecation that way, so
+    importing any module that reaches for ``fitz`` prefixes the answer with
+    a warning the caller never asked about.
+
     :param script: Python source to run.
-    :returns: Captured stdout.
+    :returns: The last non-blank line of stdout.
     :rtype: str
     """
     result = subprocess.run(
@@ -27,7 +33,8 @@ def _run(script: str) -> str:
         capture_output=True,
         text=True,
     )
-    return result.stdout.strip()
+    lines = [line for line in result.stdout.strip().splitlines() if line.strip()]
+    return lines[-1].strip() if lines else ""
 
 
 class TestLazyUltralyticsImport:

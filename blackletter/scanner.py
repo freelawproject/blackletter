@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image
 
 from blackletter import ink
+from blackletter.bl_warm import is_bl_warm, iter_label_rows
 from blackletter.models import BBox, Detection, Document, Label, Page
 
 if TYPE_CHECKING:
@@ -39,6 +40,31 @@ LABEL_CONFIDENCE: dict[Label, float] = {
     Label.HEADNOTE_BRACKET: 0.50,
     Label.BACKGROUND: 0.50,
 }
+
+# Gates that apply only to bl-warm detections, measured on the golden
+# val/test set against bl-warm's score distribution. The legacy trio scores
+# these labels differently, so it keeps LABEL_CONFIDENCE above — in
+# particular EDITORIAL, which falls through to CONFIDENCE_THRESHOLD there
+# and would silently under-redact copyrighted content at bl-warm's 0.50.
+BL_WARM_LABEL_CONFIDENCE: dict[Label, float] = {
+    Label.PAGE_HEADER: 0.30,
+    Label.HEADNOTE_BRACKET: 0.30,
+    Label.EDITORIAL: 0.50,
+}
+
+
+def label_confidence(label: Label, bl_warm: bool = False) -> float:
+    """Minimum confidence a detection of *label* needs to be drawn/redacted.
+
+    :param label: The detection's label.
+    :param bl_warm: Whether bl-warm produced the detection (normally
+        :attr:`blackletter.models.Document.bl_warm`).
+    :returns: The confidence floor for that label and model family.
+    """
+    if bl_warm and label in BL_WARM_LABEL_CONFIDENCE:
+        return BL_WARM_LABEL_CONFIDENCE[label]
+    return LABEL_CONFIDENCE.get(label, CONFIDENCE_THRESHOLD)
+
 
 # Colors per label (RGB)
 LABEL_COLORS: dict[Label, tuple[int, int, int]] = {
@@ -479,6 +505,7 @@ from ultralytics import YOLO
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from blackletter.scanner import _safe_detect_columns, _extract_page_number, DPI
 from blackletter.models import Label
+from blackletter.bl_warm import iter_label_rows
 
 pdf_path, model_path = sys.argv[1], sys.argv[2]
 page_start, page_end = int(sys.argv[3]), int(sys.argv[4])
@@ -505,8 +532,8 @@ for bs in range(page_start, page_end, BATCH):
     results = model(imgs, conf=confidence, verbose=False, device=None)
     for j, (pi, pdf_w, pdf_h, pw, ph, cols) in enumerate(meta):
         dets = []
-        for box in results[j].boxes:
-            dets.append({"bbox": box.xyxy[0].tolist(), "label": int(box.cls[0].item()), "conf": float(box.conf[0].item())})
+        for label_id, conf_v, xyxy in iter_label_rows(results[j]):
+            dets.append({"bbox": xyxy, "label": label_id, "conf": conf_v})
 
         fp = pdf[pi]
         sx, sy = pdf_w / pw, pdf_h / ph
@@ -630,7 +657,14 @@ def scan(
                 print(f"  Copied to {dest_copy.name}")
             actual_path = dest_copy
 
-    doc = Document(pdf_path=actual_path, first_page=first_page, ocr_applied=actual_path != pdf_path)
+    doc = Document(
+        pdf_path=actual_path,
+        first_page=first_page,
+        ocr_applied=actual_path != pdf_path,
+        # getattr for parity with iter_label_rows: a duck-typed stand-in
+        # for a YOLO model need not carry names, and is not bl-warm.
+        bl_warm=is_bl_warm(getattr(model, "names", None) or {}),
+    )
     pdf = fitz.open(actual_path)
     total_pages = len(pdf)
 
@@ -790,13 +824,12 @@ def scan(
                     col_right_x2=rx2,
                     midpoint=mid,
                 )
-                for box in batch_results[j].boxes:
-                    class_id = int(box.cls[0].item())
+                for class_id, conf, xyxy in iter_label_rows(batch_results[j]):
                     page.detections.append(
                         Detection(
-                            bbox=BBox.from_xyxy(box.xyxy[0].tolist()),
+                            bbox=BBox.from_xyxy(xyxy),
                             label=Label(class_id),
-                            confidence=float(box.conf[0].item()),
+                            confidence=conf,
                             page_index=page_idx,
                         )
                     )
@@ -952,7 +985,7 @@ def draw_detections(
         dets = _filter_key_icons_by_size(dets)
         if labels is not None:
             dets = [d for d in dets if d.label in labels]
-        dets = _filter_dets(dets)
+        dets = _filter_dets(dets, document.bl_warm)
 
         _draw_boxes(shape, dets, page, fitz_page)
         shape.commit()
@@ -986,8 +1019,8 @@ def _pair_opinions(
     if not document.pages:
         return []
 
-    caption_thresh = LABEL_CONFIDENCE.get(Label.CASE_CAPTION, CONFIDENCE_THRESHOLD)
-    key_thresh = LABEL_CONFIDENCE.get(Label.KEY_ICON, CONFIDENCE_THRESHOLD)
+    caption_thresh = label_confidence(Label.CASE_CAPTION, document.bl_warm)
+    key_thresh = label_confidence(Label.KEY_ICON, document.bl_warm)
 
     captions: list[Detection] = []
     all_keys: list[Detection] = []
@@ -1260,16 +1293,17 @@ def _tighten_to_text(
     )
 
 
-def _filter_dets(dets: list[Detection]) -> list[Detection]:
+def _filter_dets(dets: list[Detection], bl_warm: bool = False) -> list[Detection]:
     """Apply per-label confidence thresholds and resolve overlaps.
 
     - Drops detections below their label's confidence threshold.
     - When STATE_ABBREVIATION overlaps a PAGE_NUMBER, trims the SA box
       so page numbers are never covered by a state-abbreviation redaction.
+
+    :param dets: Detections to filter.
+    :param bl_warm: Whether bl-warm produced them, selecting its gates.
     """
-    filtered = [
-        d for d in dets if d.confidence >= LABEL_CONFIDENCE.get(d.label, CONFIDENCE_THRESHOLD)
-    ]
+    filtered = [d for d in dets if d.confidence >= label_confidence(d.label, bl_warm)]
 
     # Resolve PAGE_NUMBER / STATE_ABBREVIATION overlaps: trim SA
     pn_boxes = [d.bbox for d in filtered if d.label == Label.PAGE_NUMBER]
@@ -1871,23 +1905,26 @@ def _write_detections_sidecar(document: Document, output_dir: Path) -> int:
     rows: list[dict] = []
     for page in document.pages:
         for det in page.detections:
-            rows.append(
-                {
-                    "page_index": det.page_index,
-                    "label": det.label.name,
-                    "label_id": int(det.label),
-                    "confidence": round(det.confidence, 3),
-                    "bbox": [
-                        round(det.bbox.x1, 1),
-                        round(det.bbox.y1, 1),
-                        round(det.bbox.x2, 1),
-                        round(det.bbox.y2, 1),
-                    ],
-                    "page_number": page.page_number,
-                    "img_width": page.img_width,
-                    "img_height": page.img_height,
-                }
-            )
+            row = {
+                "page_index": det.page_index,
+                "label": det.label.name,
+                "label_id": int(det.label),
+                "confidence": round(det.confidence, 3),
+                "bbox": [
+                    round(det.bbox.x1, 1),
+                    round(det.bbox.y1, 1),
+                    round(det.bbox.x2, 1),
+                    round(det.bbox.y2, 1),
+                ],
+                "page_number": page.page_number,
+                "img_width": page.img_width,
+                "img_height": page.img_height,
+            }
+            if document.bl_warm:
+                # Provenance so a Document rebuilt from this sidecar picks
+                # bl-warm's confidence gates back up (see rows_are_bl_warm).
+                row["model"] = "bl_warm"
+            rows.append(row)
     (output_dir / "detections.json").write_text(_json.dumps(rows))
     return len(rows)
 
@@ -2498,10 +2535,7 @@ def split_opinions(
                         continue
                     if _check_excluded(d, excluded):
                         continue
-                    if d.confidence < LABEL_CONFIDENCE.get(
-                        d.label,
-                        CONFIDENCE_THRESHOLD,
-                    ):
+                    if d.confidence < label_confidence(d.label, document.bl_warm):
                         continue
                     # Skip detections outside this opinion's content
                     # (but always redact margin elements like headers)
@@ -2531,10 +2565,7 @@ def split_opinions(
                         continue
                     if _check_excluded(d, excluded):
                         continue
-                    if d.confidence < LABEL_CONFIDENCE.get(
-                        d.label,
-                        CONFIDENCE_THRESHOLD,
-                    ):
+                    if d.confidence < label_confidence(d.label, document.bl_warm):
                         continue
                     rect = d.bbox.to_fitz_pdf_rect(sx, sy)
                     sk = d.sort_key(mid)
@@ -2556,7 +2587,10 @@ def split_opinions(
                 # Draw bounding boxes for requested labels on top of redacted page
                 if draw_labels:
                     shape = fitz_page.new_shape()
-                    dets = _filter_dets([d for d in page.detections if d.label in draw_labels])
+                    dets = _filter_dets(
+                        [d for d in page.detections if d.label in draw_labels],
+                        document.bl_warm,
+                    )
                     _draw_boxes(shape, dets, page, fitz_page)
                     shape.commit()
 
@@ -2605,7 +2639,8 @@ def split_opinions(
                             for d in page.detections
                             if d.label in draw_labels
                             and (d.label in _MARGIN_LABELS or cap_key <= d.sort_key(mid) <= key_key)
-                        ]
+                        ],
+                        document.bl_warm,
                     )
                     _draw_boxes(shape, dets, page, fitz_page)
 

@@ -20,6 +20,7 @@ logger = logging.getLogger("blackletter")
 DEFAULT_MODEL = Path(__file__).resolve().parent / "weights" / "small.pt"
 MEDIUM_MODEL = Path(__file__).resolve().parent / "weights" / "medium.pt"
 LARGE_MODEL = Path(__file__).resolve().parent / "weights" / "large.pt"
+BL_WARM_MODEL = Path(__file__).resolve().parent / "weights" / "bl_warm.pt"
 
 
 def _ensure_model(path: Path) -> None:
@@ -51,6 +52,12 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         "--large",
         action="store_true",
         help="Use the large model (analyze.pt, run_59) with 21 detection classes",
+    )
+    parser.add_argument(
+        "--bl-warm",
+        action="store_true",
+        help="Use the bl-warm replacement model (bl_warm.pt, single model "
+        "standing in for small/medium/large via blackletter.bl_warm)",
     )
     parser.add_argument(
         "--reporter",
@@ -259,8 +266,10 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    # Resolve --medium / --large flags to the appropriate model path
-    if getattr(args, "large", False) and args.model == DEFAULT_MODEL:
+    # Resolve --medium / --large / --bl-warm flags to the model path
+    if getattr(args, "bl_warm", False) and args.model == DEFAULT_MODEL:
+        args.model = BL_WARM_MODEL
+    elif getattr(args, "large", False) and args.model == DEFAULT_MODEL:
         args.model = LARGE_MODEL
     elif getattr(args, "medium", False) and args.model == DEFAULT_MODEL:
         args.model = MEDIUM_MODEL
