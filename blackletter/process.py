@@ -40,6 +40,7 @@ from blackletter.scanner import (
     _text_x_bounds,
     _REDACT_WHITE,
     _REDACT_BLACK,
+    _NO_TIGHTEN,
     _filter_key_icons_by_size,
     label_confidence,
 )
@@ -459,7 +460,7 @@ def compute_redaction_rects(
                 _is_approved = approved and _check_excluded(d, approved)
                 if not _is_approved and d.confidence < label_confidence(d.label, document.bl_warm):
                     continue
-                _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
+                _skip_tighten = d.label in _NO_TIGHTEN
                 if _skip_tighten:
                     # Use raw YOLO bbox (image pixels)
                     fill = "black" if d.label in _REDACT_BLACK else "white"
@@ -1184,7 +1185,7 @@ def _build_full_redacted(
                 if d.confidence < label_confidence(d.label, document.bl_warm):
                     continue
                 rect = d.bbox.to_fitz_pdf_rect(sx, sy)
-                _skip_tighten = d.label in (Label.HEADNOTE_BRACKET, Label.STATE_ABBREVIATION)
+                _skip_tighten = d.label in _NO_TIGHTEN
                 if not _skip_tighten:
                     tight = _tighten_to_text(fitz_page, rect, skip=False, ocr_applied=_ocr_applied)
                     if tight is not None:

@@ -4,6 +4,9 @@
 
 The following changes are not yet released, but are code complete:
 
+- Fix a `DIVIDER` redaction covering only a corner of the printed rule. The per-detection rect was tightened to the ink inside it, and `ink.ink_bbox` refuses ink that is too solid: a rule is 100% dark in every pixel column it occupies, over the `BBOX_MAX_FRACTION` ceiling that keeps the platen bar and the gutter shadow out of a headnote measurement. Either no column survived and the raw box stayed by accident, or the one half-covered column at an end of the rule survived and became the whole rect — a 0.7 pt redaction over a 62 pt rule — with only sub-pixel alignment deciding which, so it did not reproduce on every divider. `DIVIDER` now joins `HEADNOTE_BRACKET` and `STATE_ABBREVIATION` as a label that is never tightened, since its content is not text and the measurement has nothing to give. The ceiling itself is unchanged: every headnote rect still depends on it (#75)
+- Hold that skip set in one place, `scanner._NO_TIGHTEN`, instead of the three copies the loops carried. `compute_redaction_rects` and `_build_full_redacted` each spelled it inline and `split_opinions` had none at all, so a `HEADNOTE_BRACKET` or `STATE_ABBREVIATION` redaction in a per-opinion file was tightened where the same redaction in the full PDF was not. Those two labels now keep their raw box in the per-opinion files too, which changes their rects there — the shape the other two loops have always produced. `--draw` skips the same labels, so a debug overlay no longer draws a box the deliverable does not match (#75)
+
 ## Current
 
 0.3.0 (2026-08-26)
