@@ -1348,7 +1348,8 @@ def _draw_boxes(
     items: list[tuple[Detection, fitz.Rect]] = []
     for det in dets:
         rect = det.bbox.to_fitz_pdf_rect(page.scale_x, page.scale_y)
-        if fitz_page is not None and det.label != Label.KEY_ICON:
+        _skip = det.label == Label.KEY_ICON or det.label in _NO_TIGHTEN
+        if fitz_page is not None and not _skip:
             tight = _tighten_to_text(fitz_page, rect)
             if tight is not None:
                 rect = tight
@@ -2198,6 +2199,23 @@ _REDACT_BLACK = frozenset(
     }
 )
 
+# Labels whose box is the redaction, measured content and all. Tightening
+# asks "where is the text in here", and these three have none to find: a
+# bracket and a two-letter margin abbreviation are too small for a word
+# box to place, and a divider is a solid rule that `ink.ink_bbox` throws
+# away wholesale — every pixel column of it is 100% dark, over the
+# `BBOX_MAX_FRACTION` ceiling that keeps the platen bar and the gutter
+# shadow out of a headnote measurement. What came back was either None,
+# leaving the raw box by luck, or the one half-covered column at an end
+# of the rule, which is a 0.7 pt redaction over a 62 pt rule (#75).
+_NO_TIGHTEN = frozenset(
+    {
+        Label.DIVIDER,
+        Label.HEADNOTE_BRACKET,
+        Label.STATE_ABBREVIATION,
+    }
+)
+
 
 def _extract_opinion_footnotes(
     src_pdf,
@@ -2544,9 +2562,10 @@ def split_opinions(
                         if sk < cap_key or sk > key_key:
                             continue
                     rect = d.bbox.to_fitz_pdf_rect(sx, sy)
-                    tight = _tighten_to_text(fitz_page, rect, skip=False)
-                    if tight is not None:
-                        rect = tight
+                    if d.label not in _NO_TIGHTEN:
+                        tight = _tighten_to_text(fitz_page, rect, skip=False)
+                        if tight is not None:
+                            rect = tight
                     fill = (0, 0, 0) if d.label in _REDACT_BLACK else (1, 1, 1)
                     add_safe(rect, fill)
 
