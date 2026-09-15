@@ -60,7 +60,7 @@ from pathlib import Path
 import fitz
 
 from blackletter.ink import content_box, page_mask
-from blackletter.models import Detection, Label, Page
+from blackletter.models import BBox, Detection, Label, Page
 
 logger = logging.getLogger(__name__)
 
@@ -187,10 +187,14 @@ def _content_bounds(
 def _detection_bounds(page: Page) -> tuple[float | None, float | None, float | None]:
     """Content bounds a page's detections support, in PDF points.
 
-    The horizontal band spans the text columns *and* the header row. A page
-    number can sit outside the columns, and the side strips reach up into
-    the header row, so leaving the header out of the band would let a strip
-    cover it.
+    The horizontal band spans the text columns *and* the header family,
+    wherever it sits on the page. A page number can sit outside the
+    columns, and the side strips reach the header row and the foot, so
+    leaving one out of the band would let a strip cover it: a corner folio
+    is small enough that the ink check reads it as a speck and lets the
+    band past it. Only a header-family detection above
+    ``HEADER_MAX_FRACTION`` defines the header top, though, since a footer
+    there would put a full-width strip over the body.
 
     :param page: The page whose detections to read.
     :returns: ``(band_left, band_right, header_top)``, each None when the
@@ -201,15 +205,15 @@ def _detection_bounds(page: Page) -> tuple[float | None, float | None, float | N
     header_limit = page.pdf_height * HEADER_MAX_FRACTION
     for d in page.detections:
         is_header = d.label in HEADER_LABELS
-        if is_header and (_is_edge_bleed(page, d) or d.bbox.y1 * sy >= header_limit):
-            # Bleed-through from the facing page, or a footer: neither
-            # defines a bound, and covering the bleed is the whole point.
+        if is_header and _is_edge_bleed(page, d):
+            # Bleed-through from the facing page defines nothing, and
+            # covering it is the whole point.
             continue
         if is_header or d.label in COLUMN_LABELS:
             left, right = d.bbox.x1 * sx, d.bbox.x2 * sx
             band_left = left if band_left is None else min(band_left, left)
             band_right = right if band_right is None else max(band_right, right)
-        if is_header:
+        if is_header and d.bbox.y1 * sy < header_limit:
             top = d.bbox.y1 * sy
             header_top = top if header_top is None else min(header_top, top)
     return band_left, band_right, header_top
@@ -286,14 +290,24 @@ def _fit_to_text_box(
     the four sides of the box off itself, apart from bleed-through at the
     top edge (see :func:`_is_edge_bleed`). The side strips span the header
     row vertically, so the horizontal hold is what keeps a strip off a
-    corner number the caller's reader missed. A hold is applied to a box
-    that is already sound, never to rescue a degenerate one.
+    corner number the caller's reader missed. Only a detection that reaches
+    into ``bounds`` can hold: one wholly outside it is under a strip either
+    way, and clamping to it would undo the fit while protecting nothing. A
+    hold is applied to a box that is already sound, never to rescue a
+    degenerate one.
+
+    A ``TEXT_COLUMN`` the ink snap grew onto a blot abutting the type holds
+    the fit at the blot, and :func:`_shrink_rects_for_detections` would pin
+    the strip there regardless: a strip never covers a detection. The
+    measured effect of the fit on a real volume was taken with that
+    pull-back in place.
 
     The result is refused when the text box is malformed or outside the
     page's pixel frame, when the fitted box is degenerate or narrower than
     ``MIN_TEXT_WIDTH_FRACTION`` of the page, or when it keeps less than
-    ``MARGIN_MIN_KEEP_RATIO`` of ``bounds``: that is what a partial read of
-    the page looks like, and today's answer is the floor.
+    ``MARGIN_MIN_KEEP_RATIO`` of ``bounds`` (see that constant for the
+    measurement behind the floor): that is what a partial read of the page
+    looks like, and today's answer is the floor.
 
     :param bounds: ``(left, top, right, bottom)`` as tightened so far.
     :param page: The page carrying ``text_box`` and the detections.
@@ -302,20 +316,25 @@ def _fit_to_text_box(
     """
     if page.text_box is None:
         return bounds
-    tx1, ty1, tx2, ty2 = page.text_box
+    try:
+        text = BBox(*(float(v) for v in page.text_box))
+    except (TypeError, ValueError):
+        # A caller's bug on one page must not cost the volume its margins.
+        logger.warning("Page %d: text box %r is malformed; ignoring it", page.index, page.text_box)
+        return bounds
     # A box beyond the page's pixels was measured in some other frame (a
     # different render resolution); only the too-large case is visible.
     slack_x, slack_y = page.img_width * 0.01, page.img_height * 0.01
     if (
-        tx2 <= tx1
-        or ty2 <= ty1
-        or tx1 < -slack_x
-        or ty1 < -slack_y
-        or tx2 > page.img_width + slack_x
-        or ty2 > page.img_height + slack_y
+        text.x2 <= text.x1
+        or text.y2 <= text.y1
+        or text.x1 < -slack_x
+        or text.y1 < -slack_y
+        or text.x2 > page.img_width + slack_x
+        or text.y2 > page.img_height + slack_y
     ):
         logger.debug(
-            "Page %d: text box %s is malformed or outside the %dx%d page frame; ignoring it",
+            "Page %d: text box %s is inverted or outside the %dx%d page frame; ignoring it",
             page.index,
             page.text_box,
             page.img_width,
@@ -325,18 +344,26 @@ def _fit_to_text_box(
 
     left, top, right, bottom = bounds
     sx, sy = page.scale_x, page.scale_y
-    new_left = max(left, tx1 * sx - buffer)
-    new_top = max(top, ty1 * sy - buffer)
-    new_right = min(right, tx2 * sx + buffer)
-    new_bottom = min(bottom, ty2 * sy + buffer)
+    tb = text.to_pdf(sx, sy)
+    new_left = max(left, tb.x1 - buffer)
+    new_top = max(top, tb.y1 - buffer)
+    new_right = min(right, tb.x2 + buffer)
+    new_bottom = min(bottom, tb.y2 + buffer)
     if new_right <= new_left or new_bottom <= new_top:
         logger.debug("Page %d: text box lies outside the content box; ignoring it", page.index)
         return bounds
 
     for d in page.detections:
-        if d.label not in HOLD_LABELS or (d.label in HEADER_LABELS and _is_edge_bleed(page, d)):
+        if d.label not in HOLD_LABELS:
+            continue
+        if d.label in HEADER_LABELS and _is_edge_bleed(page, d):
             continue
         box = d.bbox.to_pdf(sx, sy)
+        if box.x2 - box.x1 <= 1 or box.y2 - box.y1 <= 1:
+            # A placeholder, not a measurement.
+            continue
+        if not (box.x1 < right and box.x2 > left and box.y1 < bottom and box.y2 > top):
+            continue
         held = (
             min(new_left, max(left, box.x1)),
             min(new_top, max(top, box.y1)),
@@ -360,8 +387,7 @@ def _fit_to_text_box(
             MIN_TEXT_WIDTH_FRACTION * 100,
         )
         return bounds
-    area = (right - left) * (bottom - top)
-    kept = (new_right - new_left) * (new_bottom - new_top) / area if area > 0 else 0.0
+    kept = (new_right - new_left) * (new_bottom - new_top) / ((right - left) * (bottom - top))
     if kept < MARGIN_MIN_KEEP_RATIO:
         logger.debug(
             "Page %d: text box keeps %.0f%% of the tightened content box, below the %.0f%% "
@@ -394,14 +420,14 @@ def _tighten_bounds(
     tightened only when the ink it would give up reads as an artifact rather
     than as text (see :func:`_ink_is_artifact_like`).
 
-    The caller's own ``text_box``, when the page carries one, is applied
-    last (see :func:`_fit_to_text_box`). It is the signal that reaches ink
-    the band cannot: a blot down the page edge reads as text to the check
-    above, and only a measurement of where the text actually is can give
-    it up.
-
-    Falls back to ``bounds`` if the result would be degenerate (a bogus
+    A degenerate band result falls back to ``bounds`` (a bogus
     ``TEXT_COLUMN`` box should not be able to collapse the content box).
+
+    The caller's own ``text_box``, when the page carries one, is applied
+    last, to whichever box survived (see :func:`_fit_to_text_box`). It is
+    the signal that reaches ink the band cannot: a blot down the page edge
+    reads as text to the check above, and only a measurement of where the
+    text actually is can give it up.
 
     :param bounds: ``(left, top, right, bottom)`` from text or ink.
     :param page: The page whose detections and text box to read.
@@ -428,10 +454,10 @@ def _tighten_bounds(
     # which is exactly what a top strip is for.
     if header_top is not None:
         top = max(top, header_top)
-    left, top, right, bottom = _fit_to_text_box((left, top, right, bottom), page, buffer)
+    tightened = (left, top, right, bottom)
     if right - left < page.pdf_width * MIN_TEXT_WIDTH_FRACTION or bottom <= top:
-        return bounds
-    return left, top, right, bottom
+        tightened = bounds
+    return _fit_to_text_box(tightened, page, buffer)
 
 
 def _rects_for_bounds(
@@ -519,7 +545,9 @@ def _shrink_rects_for_detections(page: Page, rects: list[dict]) -> None:
     boxes = [
         d.bbox.to_pdf(page.scale_x, page.scale_y)
         for d in page.detections
-        if d.label not in NO_PUSHBACK_LABELS
+        # A 1x1 box is a placeholder for a missing measurement, not content
+        # at the page corner, and it would collapse the top and left strips.
+        if d.label not in NO_PUSHBACK_LABELS and d.bbox.width > 1 and d.bbox.height > 1
     ]
     if not boxes:
         return
@@ -575,9 +603,9 @@ def compute_margin_rects(
         reviewer has kept, not everything the model proposed. A page that
         also carries a ``text_box`` (the caller's own measurement of its
         printed text, in the page's pixels) has its content box fitted to
-        it, smaller only, never across a header-row detection, and never
-        below ``MARGIN_MIN_KEEP_RATIO`` of the box; a page with none
-        answers as it would without.
+        it, smaller only, never across a header-row or ``TEXT_COLUMN``
+        detection, and never below ``MARGIN_MIN_KEEP_RATIO`` of the box;
+        a page with none answers as it would without.
     :returns: List of dicts with ``page_index``, ``rects``, ``page_width``
         and ``page_height`` keys, where each rect is a dict with ``x0``,
         ``y0``, ``x1``, ``y1`` in PDF points.
