@@ -174,6 +174,19 @@ class TestPage:
         p = _page()
         assert p.midpoint == 850.0
 
+    def test_text_box_defaults_to_none(self):
+        """A caller that has no text measurement leaves the field alone."""
+        assert _page().text_box is None
+        p = Page(
+            index=0,
+            pdf_width=612.0,
+            pdf_height=792.0,
+            img_width=1700,
+            img_height=2200,
+            text_box=(100.0, 200.0, 1600.0, 2000.0),
+        )
+        assert p.text_box == (100.0, 200.0, 1600.0, 2000.0)
+
     def test_by_label(self):
         dets = [
             _det(Label.CASE_CAPTION),

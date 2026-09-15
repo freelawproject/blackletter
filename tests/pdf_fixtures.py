@@ -59,6 +59,11 @@ STRAY_MARK = fitz.Rect(45, 400, 52, 407)
 # real content that a tightened side strip must not reach.
 CORNER_NUMBER_X = 40.0
 
+# ...and the same number printed in the outer corner at the foot, where
+# some reporters put it. It is small enough that the ink check reads its
+# columns as a speck, so a band without it in is tightened straight past it.
+FOOT_NUMBER_Y = PAGE_H - 40
+
 # ...and along the bottom edge, where it sits well below the last line of
 # text (the case that stretched ink measurements to the page edge).
 BOTTOM_BAR = fitz.Rect(120, PAGE_H - 10, 500, PAGE_H - 4)
@@ -71,6 +76,17 @@ BOTTOM_BAR = fitz.Rect(120, PAGE_H - 10, 500, PAGE_H - 4)
 # continuously across that boundary, so growth can only be stopped by the
 # clamp rather than by white space.
 TOUCHING_BAR = fitz.Rect(0, CONTENT.y0 - 8, PAGE_W, CONTENT.y0 + 6)
+
+# A long blot down the outer edge of the leaf, like the ones a dirty platen
+# leaves on a whole volume (scanning #323). It is drawn as a dashed run so
+# its pixel columns are about half dark: denser than a speck, thinner than
+# a solid bar, which is exactly what printed text looks like to
+# ``margins._ink_is_artifact_like``. The ink content box takes it in (it is
+# within the gap ``ink.content_box`` bridges) and the band tightening then
+# refuses to give it up, so the strip on that side stops short of it and
+# the top and bottom strips vanish with it.
+EDGE_BLOT = fitz.Rect(PAGE_W - 40, 30, PAGE_W - 32, PAGE_H - 30)
+EDGE_BLOT_DASH = 6.0
 
 # An image inside the text column but below the last line, like a key icon
 # at the foot of a page. margins._text_bounds extends the content box
@@ -102,6 +118,8 @@ def write_text_page(
     corner_number: bool = False,
     image_block: bool = False,
     touching_bar: bool = False,
+    edge_blot: bool = False,
+    foot_number: bool = False,
 ) -> None:
     """Write a one-page PDF with real text filling :data:`CONTENT`.
 
@@ -118,6 +136,9 @@ def write_text_page(
         text column, like a key icon at the foot of a page. Only the text
         layer sees it as an image block.
     :param touching_bar: Paint :data:`TOUCHING_BAR`.
+    :param edge_blot: Paint :data:`EDGE_BLOT` as a dashed run.
+    :param foot_number: Print a page number at :data:`CORNER_NUMBER_X`,
+        :data:`FOOT_NUMBER_Y`, outside the text columns at the foot.
     """
     line = _line_for_width(CONTENT.width)
     with fitz.open() as doc:
@@ -126,6 +147,8 @@ def write_text_page(
             page.insert_text((CONTENT.x0, HEADER_LINE_Y), HEADER_TEXT, fontsize=FONT_SIZE)
         if corner_number:
             page.insert_text((CORNER_NUMBER_X, HEADER_LINE_Y), "12", fontsize=FONT_SIZE)
+        if foot_number:
+            page.insert_text((CORNER_NUMBER_X, FOOT_NUMBER_Y), "12", fontsize=FONT_SIZE)
         y = CONTENT.y0 + FONT_SIZE
         while y <= CONTENT.y1:
             page.insert_text((CONTENT.x0, y), line, fontsize=FONT_SIZE)
@@ -144,6 +167,12 @@ def write_text_page(
         ):
             if draw:
                 page.draw_rect(rect, fill=(0, 0, 0), width=0)
+        if edge_blot:
+            y = EDGE_BLOT.y0
+            while y + EDGE_BLOT_DASH <= EDGE_BLOT.y1:
+                dash = fitz.Rect(EDGE_BLOT.x0, y, EDGE_BLOT.x1, y + EDGE_BLOT_DASH)
+                page.draw_rect(dash, fill=(0, 0, 0), width=0)
+                y += 2 * EDGE_BLOT_DASH
         doc.save(str(path))
 
 
@@ -177,6 +206,8 @@ def write_bitonal_page(
     stray_mark: bool = False,
     corner_number: bool = False,
     touching_bar: bool = False,
+    edge_blot: bool = False,
+    foot_number: bool = False,
     tmp_dir: Path | None = None,
 ) -> None:
     """Write a text-less, 1-bit version of :func:`write_text_page`.
@@ -189,6 +220,8 @@ def write_bitonal_page(
     :param stray_mark: Paint :data:`STRAY_MARK` before rasterizing.
     :param corner_number: Print a page number outside the text columns.
     :param touching_bar: Paint :data:`TOUCHING_BAR` before rasterizing.
+    :param edge_blot: Paint :data:`EDGE_BLOT` before rasterizing.
+    :param foot_number: Print a page number at the foot, outside the columns.
     :param tmp_dir: Directory for the intermediate text PDF. Defaults to
         ``path``'s parent.
     """
@@ -203,6 +236,8 @@ def write_bitonal_page(
         stray_mark=stray_mark,
         corner_number=corner_number,
         touching_bar=touching_bar,
+        edge_blot=edge_blot,
+        foot_number=foot_number,
     )
     rasterize(src, path)
 
@@ -276,14 +311,19 @@ def detection(
     )
 
 
-def detected_page(detections: list[Detection], page_index: int = 0) -> Page:
+def detected_page(
+    detections: list[Detection],
+    page_index: int = 0,
+    text_box: tuple[float, float, float, float] | None = None,
+) -> Page:
     """Wrap detections in a :class:`~blackletter.models.Page`.
 
     Image dimensions are set to the page size in points, so ``scale_x`` and
-    ``scale_y`` are 1 and bbox values read as PDF points.
+    ``scale_y`` are 1 and bbox values (and the text box) read as PDF points.
 
     :param detections: Detections found on the page.
     :param page_index: 0-based page index.
+    :param text_box: The caller's text box, if the page carries one.
     :return: The page.
     """
     return Page(
@@ -293,6 +333,7 @@ def detected_page(detections: list[Detection], page_index: int = 0) -> Page:
         img_width=int(PAGE_W),
         img_height=int(PAGE_H),
         detections=list(detections),
+        text_box=text_box,
     )
 
 
