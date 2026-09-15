@@ -247,6 +247,13 @@ class Page:
     #: most (see :func:`blackletter.margins.compute_margin_rects`). Errs
     #: large is safe; errs small is what ``margins.MARGIN_MIN_KEEP_RATIO``
     #: guards.
+    #:
+    #: The frame is ``img_width`` x ``img_height``, the same one the
+    #: detections use. A box measured at another resolution is just four
+    #: numbers, and only the too-large case can be caught: one that fits
+    #: inside the frame at the wrong scale is accepted and puts the strips
+    #: inside the text. In-memory only: the ``detections.json`` page meta
+    #: does not carry it, so a Document rebuilt from a sidecar has None.
     text_box: tuple[float, float, float, float] | None = None
 
     def __post_init__(self):

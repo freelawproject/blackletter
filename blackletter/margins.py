@@ -35,11 +35,13 @@ third signal is the caller's own ``Page.text_box``: a caller that runs an
 OCR pass or a layout model knows where the text is far better than the
 ink does, and the content box is intersected with it, last. That box can
 only make the content box smaller, it is never allowed to cut inside a
-header-row detection (some reporters print the page number at the foot,
-and no reader describes it), and a box that would keep less than
-``MARGIN_MIN_KEEP_RATIO`` of the area is refused, so a partial read never
-puts a strip through the type. A page whose caller has no box answers as
-it did before.
+header-row or ``TEXT_COLUMN`` detection (some reporters print the page
+number at the foot, and no reader describes it), and a box that would keep
+less than ``MARGIN_MIN_KEEP_RATIO`` of the tightened box is refused, so a
+partial read never puts a strip through the type. Every refusal keeps the
+box as the first two signals left it, so a page with a text box never
+answers looser than the same page without one, and a page whose caller
+has no box answers as it did before.
 
 The strips are laid out so the header row is never at risk: full-width
 strips above and below the text body, and side strips that span the body
@@ -89,31 +91,38 @@ EDGE_BLEED_PT = 20.0
 # would put a full-width top strip over the whole body of the page.
 HEADER_MAX_FRACTION = 0.25
 
-# The least of the content box a caller's ``Page.text_box`` may keep for
-# the box to be fitted to it. A partial read (cells that describe a fifth
-# of the page) is the one failure the fit cannot see from the outside, and
-# this floor is the only guard in front of it. Measured on scan 1828 of the
-# scanning app (143 S.Ct., 888 pages): the pages a correct fit had to
-# refuse kept 18-23% of the box, the accepted pages kept 44% at the
-# minimum, 70.6% at the 1st percentile and 92.1% at the median. 0.30 sits
-# in the middle of that gap.
+# The least of the content box (as tightened by the band and the header
+# row) that a caller's ``Page.text_box`` may keep for the box to be fitted
+# to it. A partial read (cells that describe a fifth of the page) is the
+# one failure the fit cannot see from the outside, and this floor is the
+# only guard in front of it. Measured on scan 1828 of the scanning app
+# (143 S.Ct., 888 pages): the pages a correct fit had to refuse kept 18-23%
+# of the box, the accepted pages kept 44% at the minimum, 70.6% at the 1st
+# percentile and 92.1% at the median. 0.30 sits in the middle of that gap.
 MARGIN_MIN_KEEP_RATIO = 0.30
 
+# Detections whose extent a fitted content box may never cut inside: the
+# header row, because some reporters print the page number at the foot and
+# no reader describes it, and the text columns, because they are where the
+# text is by the one signal that describes content rather than marks.
+HOLD_LABELS = HEADER_LABELS | COLUMN_LABELS
 
-def _in_edge_band(page: Page, d: Detection) -> bool:
-    """Does a header-family detection lie wholly within an edge band?
 
-    A ``PAGE_NUMBER`` box inside ``EDGE_BLEED_PT`` of the top edge is
-    bleed-through from the facing page, and one inside the same distance
-    of the bottom edge is a false detection on a scanner mark: a strip is
-    meant to cover either, so neither may define or hold a bound.
+def _is_edge_bleed(page: Page, d: Detection) -> bool:
+    """Is a header-family detection bleed-through at the top edge?
 
-    :param page: The page the detection is on, for the scale and height.
+    A ``PAGE_NUMBER`` box wholly within ``EDGE_BLEED_PT`` of the top edge
+    is the facing page's number showing through, and a strip is meant to
+    cover it, so it may neither define nor hold a bound. There is no
+    matching band at the foot: ``EDGE_BLEED_PT`` was measured against
+    running heads only, and a folio printed close to the foot is content
+    that a wrongly exempted detection would let a strip cover.
+
+    :param page: The page the detection is on, for the scale.
     :param d: The detection.
-    :returns: True when the box is inside the top or the bottom band.
+    :returns: True when the box is inside the top band.
     """
-    sy = page.scale_y
-    return d.bbox.y2 * sy <= EDGE_BLEED_PT or d.bbox.y1 * sy >= page.pdf_height - EDGE_BLEED_PT
+    return d.bbox.y2 * page.scale_y <= EDGE_BLEED_PT
 
 
 def _text_bounds(
@@ -192,7 +201,7 @@ def _detection_bounds(page: Page) -> tuple[float | None, float | None, float | N
     header_limit = page.pdf_height * HEADER_MAX_FRACTION
     for d in page.detections:
         is_header = d.label in HEADER_LABELS
-        if is_header and (_in_edge_band(page, d) or d.bbox.y1 * sy >= header_limit):
+        if is_header and (_is_edge_bleed(page, d) or d.bbox.y1 * sy >= header_limit):
             # Bleed-through from the facing page, or a footer: neither
             # defines a bound, and covering the bleed is the whole point.
             continue
@@ -267,18 +276,24 @@ def _fit_to_text_box(
     The text box arrives in the page's pixels and is padded by ``buffer``
     on every side, the same slack the strips leave around the ink. It may
     only make the box smaller: a side moves in when the text box says the
-    text stops short of the ink, and never out.
+    text stops short of the ink, and never out. Whatever refuses the fit
+    returns ``bounds`` as given, so a page with a text box never answers
+    looser than the same page without one.
 
-    The box is never allowed to cut inside a header-row detection. Some
-    reporters print the page number at the foot, and no reader describes
-    it, so each header-family detection outside the edge bands (see
-    :func:`_in_edge_band`) holds the four sides of the box off itself. The
-    side strips span the header row vertically, so the horizontal hold is
-    what keeps a strip off a corner number the caller's reader missed.
+    The box is never allowed to cut inside a header-row or text-column
+    detection (see ``HOLD_LABELS``). Some reporters print the page number
+    at the foot, and no reader describes it, so each such detection holds
+    the four sides of the box off itself, apart from bleed-through at the
+    top edge (see :func:`_is_edge_bleed`). The side strips span the header
+    row vertically, so the horizontal hold is what keeps a strip off a
+    corner number the caller's reader missed. A hold is applied to a box
+    that is already sound, never to rescue a degenerate one.
 
-    The result is refused when it is degenerate or keeps less than
-    ``MARGIN_MIN_KEEP_RATIO`` of the box it was given: that is what a
-    partial read of the page looks like, and today's answer is the floor.
+    The result is refused when the text box is malformed or outside the
+    page's pixel frame, when the fitted box is degenerate or narrower than
+    ``MIN_TEXT_WIDTH_FRACTION`` of the page, or when it keeps less than
+    ``MARGIN_MIN_KEEP_RATIO`` of ``bounds``: that is what a partial read of
+    the page looks like, and today's answer is the floor.
 
     :param bounds: ``(left, top, right, bottom)`` as tightened so far.
     :param page: The page carrying ``text_box`` and the detections.
@@ -287,29 +302,70 @@ def _fit_to_text_box(
     """
     if page.text_box is None:
         return bounds
+    tx1, ty1, tx2, ty2 = page.text_box
+    # A box beyond the page's pixels was measured in some other frame (a
+    # different render resolution); only the too-large case is visible.
+    slack_x, slack_y = page.img_width * 0.01, page.img_height * 0.01
+    if (
+        tx2 <= tx1
+        or ty2 <= ty1
+        or tx1 < -slack_x
+        or ty1 < -slack_y
+        or tx2 > page.img_width + slack_x
+        or ty2 > page.img_height + slack_y
+    ):
+        logger.debug(
+            "Page %d: text box %s is malformed or outside the %dx%d page frame; ignoring it",
+            page.index,
+            page.text_box,
+            page.img_width,
+            page.img_height,
+        )
+        return bounds
+
     left, top, right, bottom = bounds
     sx, sy = page.scale_x, page.scale_y
-    tx1, ty1, tx2, ty2 = page.text_box
     new_left = max(left, tx1 * sx - buffer)
     new_top = max(top, ty1 * sy - buffer)
     new_right = min(right, tx2 * sx + buffer)
     new_bottom = min(bottom, ty2 * sy + buffer)
+    if new_right <= new_left or new_bottom <= new_top:
+        logger.debug("Page %d: text box lies outside the content box; ignoring it", page.index)
+        return bounds
+
     for d in page.detections:
-        if d.label not in HEADER_LABELS or _in_edge_band(page, d):
+        if d.label not in HOLD_LABELS or (d.label in HEADER_LABELS and _is_edge_bleed(page, d)):
             continue
         box = d.bbox.to_pdf(sx, sy)
-        new_left = min(new_left, max(left, box.x1))
-        new_top = min(new_top, max(top, box.y1))
-        new_right = max(new_right, min(right, box.x2))
-        new_bottom = max(new_bottom, min(bottom, box.y2))
-    if new_right <= new_left or new_bottom <= new_top:
+        held = (
+            min(new_left, max(left, box.x1)),
+            min(new_top, max(top, box.y1)),
+            max(new_right, min(right, box.x2)),
+            max(new_bottom, min(bottom, box.y2)),
+        )
+        if held != (new_left, new_top, new_right, new_bottom):
+            logger.debug(
+                "Page %d: %s detection holds the text box from %s to %s",
+                page.index,
+                d.label.name,
+                (new_left, new_top, new_right, new_bottom),
+                held,
+            )
+            new_left, new_top, new_right, new_bottom = held
+
+    if new_right - new_left < page.pdf_width * MIN_TEXT_WIDTH_FRACTION:
+        logger.debug(
+            "Page %d: text box is narrower than %.0f%% of the page; keeping the measured box",
+            page.index,
+            MIN_TEXT_WIDTH_FRACTION * 100,
+        )
         return bounds
     area = (right - left) * (bottom - top)
     kept = (new_right - new_left) * (new_bottom - new_top) / area if area > 0 else 0.0
     if kept < MARGIN_MIN_KEEP_RATIO:
         logger.debug(
-            "Page %d: text box keeps %.0f%% of the content box, below the %.0f%% floor; "
-            "keeping the measured box",
+            "Page %d: text box keeps %.0f%% of the tightened content box, below the %.0f%% "
+            "floor; keeping the measured box",
             page.index,
             kept * 100,
             MARGIN_MIN_KEEP_RATIO * 100,
@@ -321,8 +377,8 @@ def _fit_to_text_box(
 def _tighten_bounds(
     bounds: tuple[float, float, float, float],
     page: Page,
-    fitz_page: fitz.Page | None = None,
-    buffer: float = DEFAULT_BUFFER,
+    fitz_page: fitz.Page | None,
+    buffer: float,
 ) -> tuple[float, float, float, float]:
     """Intersect measured content bounds with what detections support.
 
@@ -564,7 +620,7 @@ def compute_margin_rects(
                 )
                 detected = None
             if detected is not None:
-                bounds = _tighten_bounds(bounds, detected, page, buffer=buffer)
+                bounds = _tighten_bounds(bounds, detected, page, buffer)
             entry["rects"] = _rects_for_bounds(bounds, pw, ph, buffer)
             if detected is not None:
                 _shrink_rects_for_detections(detected, entry["rects"])

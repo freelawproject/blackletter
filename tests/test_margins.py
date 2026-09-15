@@ -474,15 +474,23 @@ class TestTextBoxFittedMargins:
         assert _rects_for(compute_margin_rects(pdf, pages=[none])) == baseline
 
     def test_a_text_box_below_the_keep_floor_is_refused(self, tmp_path):
-        """A partial read describes a fifth of the page; today's answer is the floor."""
+        """A partial read describes a fifth of the page; today's answer is the floor.
+
+        No TEXT_COLUMN here: a column box holds the fit off itself, which
+        would widen a partial box back to the column before the floor is
+        consulted. The floor is for the page whose columns went undetected.
+        """
         pdf = tmp_path / "blot.pdf"
         write_bitonal_page(pdf, edge_blot=True)
-        baseline = _rects_for(compute_margin_rects(pdf, pages=[detected_page(_columns())]))
+        baseline = _rects_for(compute_margin_rects(pdf, pages=[detected_page([])]))
         # Full width, so only the area floor can refuse it, not the width check.
         partial = fitz.Rect(CONTENT.x0, CONTENT.y0, CONTENT.x1, CONTENT.y0 + 120)
-        ink_area = (EDGE_BLOT.x1 - CONTENT.x0) * (EDGE_BLOT.y1 - EDGE_BLOT.y0)
-        assert partial.get_area() / ink_area < MARGIN_MIN_KEEP_RATIO
-        refused = _fitted_page(_columns(), _box(partial))
+        # The floor is measured against the band-tightened box. With no
+        # detections that is the ink box, which the blot stretches to its
+        # own height.
+        tightened_area = (EDGE_BLOT.x1 - CONTENT.x0) * (EDGE_BLOT.y1 - EDGE_BLOT.y0)
+        assert partial.get_area() / tightened_area < MARGIN_MIN_KEEP_RATIO
+        refused = _fitted_page([], _box(partial))
         assert _rects_for(compute_margin_rects(pdf, pages=[refused])) == baseline
 
     def test_the_box_is_held_off_a_page_number_at_the_foot(self, tmp_path):
@@ -522,7 +530,7 @@ class TestTextBoxFittedMargins:
             assert not (overlap_x > 1 and overlap_y > 1), f"page number covered by margin {r}"
         assert [r for r in rects if r["x0"] <= 1 and r["x1"] > 1], "no left strip"
 
-    def test_a_header_detection_in_an_edge_band_does_not_hold_the_box(self, tmp_path):
+    def test_bleed_through_at_the_top_edge_does_not_hold_the_box(self, tmp_path):
         """Bleed-through labelled PAGE_NUMBER is what a strip is for."""
         pdf = tmp_path / "bleed.pdf"
         write_bitonal_page(pdf, bleed_mark=True, edge_blot=True)
@@ -530,14 +538,88 @@ class TestTextBoxFittedMargins:
             Label.PAGE_NUMBER, BLEED_MARK.x0, BLEED_MARK.y0, BLEED_MARK.x1, BLEED_MARK.y1
         )
         assert top_bleed.bbox.y2 <= EDGE_BLEED_PT
-        bottom_bleed = detection(Label.PAGE_NUMBER, 300, PAGE_H - 15, 320, PAGE_H - 5)
-        assert bottom_bleed.bbox.y1 >= PAGE_H - EDGE_BLEED_PT
-        page = _fitted_page([*_columns(), top_bleed, bottom_bleed], _box(CONTENT))
+        page = _fitted_page([*_columns(), top_bleed], _box(CONTENT))
         rects = _rects_for(compute_margin_rects(pdf, pages=[page]))
         _left, top, _right, bottom = _uncovered_box(rects)
         assert top == pytest.approx(CONTENT.y0 - self.SLACK, abs=2.0)
         assert bottom == pytest.approx(CONTENT.y1 + self.SLACK, abs=2.0)
         assert top > BLEED_MARK.y1, "bleed left unmasked"
+
+    def test_a_folio_close_to_the_foot_still_holds_the_box(self, tmp_path):
+        """There is no bottom edge band: a number near the foot is content.
+
+        The folio sits inside the ink box (the blot runs past it), below
+        the caller's box and near the foot. It holds the bottom of the fit,
+        while the sides are still fitted.
+        """
+        pdf = tmp_path / "blot.pdf"
+        write_bitonal_page(pdf, edge_blot=True)
+        folio = detection(Label.PAGE_NUMBER, 300, EDGE_BLOT.y1 - 14, 320, EDGE_BLOT.y1 - 4)
+        assert folio.bbox.y1 > PAGE_H * 0.9, "must sit near the foot"
+        page = _fitted_page([*_columns(), folio], _box(CONTENT))
+        rects = _rects_for(compute_margin_rects(pdf, pages=[page]))
+        for r in rects:
+            overlap_x = min(folio.bbox.x2, r["x1"]) - max(folio.bbox.x1, r["x0"])
+            overlap_y = min(folio.bbox.y2, r["y1"]) - max(folio.bbox.y1, r["y0"])
+            assert not (overlap_x > 1 and overlap_y > 1), f"folio covered by margin {r}"
+        _left, _top, right, bottom = _uncovered_box(rects)
+        assert bottom >= folio.bbox.y2, "the bottom strip cut into the folio"
+        assert right == pytest.approx(CONTENT.x1 + self.SLACK, abs=2.0)
+
+    def test_a_text_box_never_answers_looser_than_none(self, tmp_path):
+        """A fit the width check refuses must not discard the band tightening.
+
+        The fitted box passes the area floor and fails the width check;
+        the answer has to be the band-tightened box, not the raw ink box
+        with the speck back inside it.
+        """
+        pdf = tmp_path / "stray.pdf"
+        write_bitonal_page(pdf, stray_mark=True)
+        baseline = _rects_for(compute_margin_rects(pdf, pages=[detected_page(_columns())]))
+        assert _uncovered_box(baseline)[0] > STRAY_MARK.x1, "band did not cover the speck"
+        narrow = fitz.Rect(CONTENT.x0, CONTENT.y0, CONTENT.x0 + 0.36 * PAGE_W, CONTENT.y1)
+        page = _fitted_page(_columns(), _box(narrow))
+        assert _rects_for(compute_margin_rects(pdf, pages=[page])) == baseline
+
+    def test_a_malformed_text_box_is_not_rescued_by_a_hold(self, tmp_path):
+        """An inverted box must be refused before any detection can widen it.
+
+        Otherwise a running head narrower than the body becomes the box,
+        and the side strips cut into the type on both sides.
+        """
+        pdf = tmp_path / "hdr.pdf"
+        write_bitonal_page(pdf, header_line=True)
+        head = detection(Label.PAGE_HEADER, 150, HEADER_LINE_Y - 8, 400, HEADER_LINE_Y + 2)
+        assert head.bbox.width >= PAGE_W * 0.40, "wide enough to pass the width check"
+        dets = [*_columns(), head]
+        baseline = _rects_for(compute_margin_rects(pdf, pages=[detected_page(dets)]))
+        inverted = _fitted_page(dets, (CONTENT.x1, CONTENT.y0, CONTENT.x0, CONTENT.y1))
+        assert _rects_for(compute_margin_rects(pdf, pages=[inverted])) == baseline
+        # A well-formed box lying wholly outside the content box is the same case.
+        outside = _fitted_page(dets, (CONTENT.x1 + 20, CONTENT.y0, CONTENT.x1 + 60, CONTENT.y1))
+        assert _rects_for(compute_margin_rects(pdf, pages=[outside])) == baseline
+
+    def test_a_text_box_outside_the_page_frame_is_refused(self, tmp_path):
+        """A box past the page's pixels was measured in some other frame."""
+        pdf = tmp_path / "blot.pdf"
+        write_bitonal_page(pdf, edge_blot=True)
+        baseline = _rects_for(compute_margin_rects(pdf, pages=[detected_page(_columns())]))
+        other_dpi = _fitted_page(
+            _columns(), (CONTENT.x0 * 2, CONTENT.y0 * 2, CONTENT.x1 * 2, CONTENT.y1 * 2)
+        )
+        assert _rects_for(compute_margin_rects(pdf, pages=[other_dpi])) == baseline
+
+    def test_the_box_is_held_off_a_text_column(self, tmp_path):
+        """A one-column read of a two-column page cannot cover the other column."""
+        pdf = tmp_path / "blot.pdf"
+        write_bitonal_page(pdf, edge_blot=True)
+        left_col, right_col = _columns()
+        one_column = fitz.Rect(CONTENT.x0, CONTENT.y0, left_col.bbox.x2, CONTENT.y1)
+        page = _fitted_page([left_col, right_col], _box(one_column))
+        rects = _rects_for(compute_margin_rects(pdf, pages=[page]))
+        _left, _top, right, _bottom = _uncovered_box(rects)
+        assert right >= right_col.bbox.x2, "a strip was placed inside the second column"
+        assert right < EDGE_BLOT.x0, "the hold undid the fit instead of bounding it"
 
     def test_the_text_box_is_read_in_the_page_pixels(self, tmp_path):
         """The caller's frame is the detection render, not points."""
