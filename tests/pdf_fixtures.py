@@ -72,6 +72,17 @@ BOTTOM_BAR = fitz.Rect(120, PAGE_H - 10, 500, PAGE_H - 4)
 # clamp rather than by white space.
 TOUCHING_BAR = fitz.Rect(0, CONTENT.y0 - 8, PAGE_W, CONTENT.y0 + 6)
 
+# A long blot down the outer edge of the leaf, like the ones a dirty platen
+# leaves on a whole volume (scanning #323). It is drawn as a dashed run so
+# its pixel columns are about half dark: denser than a speck, thinner than
+# a solid bar, which is exactly what printed text looks like to
+# ``margins._ink_is_artifact_like``. The ink content box takes it in (it is
+# within the gap ``ink.content_box`` bridges) and the band tightening then
+# refuses to give it up, so the strip on that side stops short of it and
+# the top and bottom strips vanish with it.
+EDGE_BLOT = fitz.Rect(PAGE_W - 40, 30, PAGE_W - 32, PAGE_H - 30)
+EDGE_BLOT_DASH = 6.0
+
 # An image inside the text column but below the last line, like a key icon
 # at the foot of a page. margins._text_bounds extends the content box
 # vertically to take these in.
@@ -102,6 +113,7 @@ def write_text_page(
     corner_number: bool = False,
     image_block: bool = False,
     touching_bar: bool = False,
+    edge_blot: bool = False,
 ) -> None:
     """Write a one-page PDF with real text filling :data:`CONTENT`.
 
@@ -118,6 +130,7 @@ def write_text_page(
         text column, like a key icon at the foot of a page. Only the text
         layer sees it as an image block.
     :param touching_bar: Paint :data:`TOUCHING_BAR`.
+    :param edge_blot: Paint :data:`EDGE_BLOT` as a dashed run.
     """
     line = _line_for_width(CONTENT.width)
     with fitz.open() as doc:
@@ -144,6 +157,12 @@ def write_text_page(
         ):
             if draw:
                 page.draw_rect(rect, fill=(0, 0, 0), width=0)
+        if edge_blot:
+            y = EDGE_BLOT.y0
+            while y + EDGE_BLOT_DASH <= EDGE_BLOT.y1:
+                dash = fitz.Rect(EDGE_BLOT.x0, y, EDGE_BLOT.x1, y + EDGE_BLOT_DASH)
+                page.draw_rect(dash, fill=(0, 0, 0), width=0)
+                y += 2 * EDGE_BLOT_DASH
         doc.save(str(path))
 
 
@@ -177,6 +196,7 @@ def write_bitonal_page(
     stray_mark: bool = False,
     corner_number: bool = False,
     touching_bar: bool = False,
+    edge_blot: bool = False,
     tmp_dir: Path | None = None,
 ) -> None:
     """Write a text-less, 1-bit version of :func:`write_text_page`.
@@ -189,6 +209,7 @@ def write_bitonal_page(
     :param stray_mark: Paint :data:`STRAY_MARK` before rasterizing.
     :param corner_number: Print a page number outside the text columns.
     :param touching_bar: Paint :data:`TOUCHING_BAR` before rasterizing.
+    :param edge_blot: Paint :data:`EDGE_BLOT` before rasterizing.
     :param tmp_dir: Directory for the intermediate text PDF. Defaults to
         ``path``'s parent.
     """
@@ -203,6 +224,7 @@ def write_bitonal_page(
         stray_mark=stray_mark,
         corner_number=corner_number,
         touching_bar=touching_bar,
+        edge_blot=edge_blot,
     )
     rasterize(src, path)
 

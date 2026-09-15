@@ -239,6 +239,15 @@ class Page:
     col_right_x1: float = 0.0
     col_right_x2: float = 0.0
     midpoint: float = 0.0
+    #: The caller's own measurement of the printed-text box of this page,
+    #: ``(x1, y1, x2, y2)`` in this page's pixels, or None when the caller
+    #: has none. blackletter has no reader of its own: a caller that runs
+    #: one (an OCR pass, a layout model) knows where the text is far better
+    #: than the page's ink does, and margin cleanup is where that matters
+    #: most (see :func:`blackletter.margins.compute_margin_rects`). Errs
+    #: large is safe; errs small is what ``margins.MARGIN_MIN_KEEP_RATIO``
+    #: guards.
+    text_box: tuple[float, float, float, float] | None = None
 
     def __post_init__(self):
         if self.midpoint == 0.0:

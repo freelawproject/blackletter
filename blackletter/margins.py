@@ -26,6 +26,21 @@ the header row (``PAGE_HEADER`` / ``PAGE_NUMBER`` / ``STATE_ABBREVIATION``)
 bounds it vertically. The two estimates are intersected, so a bound is only
 tightened when both signals support it.
 
+Detections bound the text, but they do not say where the text stops when
+the ink on the far side of the band reads as text itself. A long blot down
+the outer edge of a leaf does: its pixel columns carry a middling fraction
+of dark rows, exactly what printed type looks like, so the band tightening
+refuses to give it up and the strip on that side stops short of it. The
+third signal is the caller's own ``Page.text_box``: a caller that runs an
+OCR pass or a layout model knows where the text is far better than the
+ink does, and the content box is intersected with it, last. That box can
+only make the content box smaller, it is never allowed to cut inside a
+header-row detection (some reporters print the page number at the foot,
+and no reader describes it), and a box that would keep less than
+``MARGIN_MIN_KEEP_RATIO`` of the area is refused, so a partial read never
+puts a strip through the type. A page whose caller has no box answers as
+it did before.
+
 The strips are laid out so the header row is never at risk: full-width
 strips above and below the text body, and side strips that span the body
 rows only. A page number sitting outside the column band therefore survives
@@ -43,7 +58,7 @@ from pathlib import Path
 import fitz
 
 from blackletter.ink import content_box, page_mask
-from blackletter.models import Label, Page
+from blackletter.models import Detection, Label, Page
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +88,32 @@ EDGE_BLEED_PT = 20.0
 # the page, and a footer must not be allowed to define the top bound: that
 # would put a full-width top strip over the whole body of the page.
 HEADER_MAX_FRACTION = 0.25
+
+# The least of the content box a caller's ``Page.text_box`` may keep for
+# the box to be fitted to it. A partial read (cells that describe a fifth
+# of the page) is the one failure the fit cannot see from the outside, and
+# this floor is the only guard in front of it. Measured on scan 1828 of the
+# scanning app (143 S.Ct., 888 pages): the pages a correct fit had to
+# refuse kept 18-23% of the box, the accepted pages kept 44% at the
+# minimum, 70.6% at the 1st percentile and 92.1% at the median. 0.30 sits
+# in the middle of that gap.
+MARGIN_MIN_KEEP_RATIO = 0.30
+
+
+def _in_edge_band(page: Page, d: Detection) -> bool:
+    """Does a header-family detection lie wholly within an edge band?
+
+    A ``PAGE_NUMBER`` box inside ``EDGE_BLEED_PT`` of the top edge is
+    bleed-through from the facing page, and one inside the same distance
+    of the bottom edge is a false detection on a scanner mark: a strip is
+    meant to cover either, so neither may define or hold a bound.
+
+    :param page: The page the detection is on, for the scale and height.
+    :param d: The detection.
+    :returns: True when the box is inside the top or the bottom band.
+    """
+    sy = page.scale_y
+    return d.bbox.y2 * sy <= EDGE_BLEED_PT or d.bbox.y1 * sy >= page.pdf_height - EDGE_BLEED_PT
 
 
 def _text_bounds(
@@ -151,7 +192,7 @@ def _detection_bounds(page: Page) -> tuple[float | None, float | None, float | N
     header_limit = page.pdf_height * HEADER_MAX_FRACTION
     for d in page.detections:
         is_header = d.label in HEADER_LABELS
-        if is_header and (d.bbox.y2 * sy <= EDGE_BLEED_PT or d.bbox.y1 * sy >= header_limit):
+        if is_header and (_in_edge_band(page, d) or d.bbox.y1 * sy >= header_limit):
             # Bleed-through from the facing page, or a footer: neither
             # defines a bound, and covering the bleed is the whole point.
             continue
@@ -216,10 +257,72 @@ def _ink_is_artifact_like(
     return not bool(text_like.any())
 
 
+def _fit_to_text_box(
+    bounds: tuple[float, float, float, float],
+    page: Page,
+    buffer: float,
+) -> tuple[float, float, float, float]:
+    """Intersect content bounds with the caller's own text box, if any.
+
+    The text box arrives in the page's pixels and is padded by ``buffer``
+    on every side, the same slack the strips leave around the ink. It may
+    only make the box smaller: a side moves in when the text box says the
+    text stops short of the ink, and never out.
+
+    The box is never allowed to cut inside a header-row detection. Some
+    reporters print the page number at the foot, and no reader describes
+    it, so each header-family detection outside the edge bands (see
+    :func:`_in_edge_band`) holds the four sides of the box off itself. The
+    side strips span the header row vertically, so the horizontal hold is
+    what keeps a strip off a corner number the caller's reader missed.
+
+    The result is refused when it is degenerate or keeps less than
+    ``MARGIN_MIN_KEEP_RATIO`` of the box it was given: that is what a
+    partial read of the page looks like, and today's answer is the floor.
+
+    :param bounds: ``(left, top, right, bottom)`` as tightened so far.
+    :param page: The page carrying ``text_box`` and the detections.
+    :param buffer: Slack in PDF points to leave around the text box.
+    :returns: The fitted ``(left, top, right, bottom)``, or ``bounds``.
+    """
+    if page.text_box is None:
+        return bounds
+    left, top, right, bottom = bounds
+    sx, sy = page.scale_x, page.scale_y
+    tx1, ty1, tx2, ty2 = page.text_box
+    new_left = max(left, tx1 * sx - buffer)
+    new_top = max(top, ty1 * sy - buffer)
+    new_right = min(right, tx2 * sx + buffer)
+    new_bottom = min(bottom, ty2 * sy + buffer)
+    for d in page.detections:
+        if d.label not in HEADER_LABELS or _in_edge_band(page, d):
+            continue
+        box = d.bbox.to_pdf(sx, sy)
+        new_left = min(new_left, max(left, box.x1))
+        new_top = min(new_top, max(top, box.y1))
+        new_right = max(new_right, min(right, box.x2))
+        new_bottom = max(new_bottom, min(bottom, box.y2))
+    if new_right <= new_left or new_bottom <= new_top:
+        return bounds
+    area = (right - left) * (bottom - top)
+    kept = (new_right - new_left) * (new_bottom - new_top) / area if area > 0 else 0.0
+    if kept < MARGIN_MIN_KEEP_RATIO:
+        logger.debug(
+            "Page %d: text box keeps %.0f%% of the content box, below the %.0f%% floor; "
+            "keeping the measured box",
+            page.index,
+            kept * 100,
+            MARGIN_MIN_KEEP_RATIO * 100,
+        )
+        return bounds
+    return new_left, new_top, new_right, new_bottom
+
+
 def _tighten_bounds(
     bounds: tuple[float, float, float, float],
     page: Page,
     fitz_page: fitz.Page | None = None,
+    buffer: float = DEFAULT_BUFFER,
 ) -> tuple[float, float, float, float]:
     """Intersect measured content bounds with what detections support.
 
@@ -235,13 +338,20 @@ def _tighten_bounds(
     tightened only when the ink it would give up reads as an artifact rather
     than as text (see :func:`_ink_is_artifact_like`).
 
+    The caller's own ``text_box``, when the page carries one, is applied
+    last (see :func:`_fit_to_text_box`). It is the signal that reaches ink
+    the band cannot: a blot down the page edge reads as text to the check
+    above, and only a measurement of where the text actually is can give
+    it up.
+
     Falls back to ``bounds`` if the result would be degenerate (a bogus
     ``TEXT_COLUMN`` box should not be able to collapse the content box).
 
     :param bounds: ``(left, top, right, bottom)`` from text or ink.
-    :param page: The page whose detections to read.
+    :param page: The page whose detections and text box to read.
     :param fitz_page: The PDF page, for the ink check. Without it the side
         bounds are left alone, since the check cannot be made.
+    :param buffer: Slack in PDF points to leave around the text box.
     :returns: The tightened ``(left, top, right, bottom)``.
     """
     left, top, right, bottom = bounds
@@ -262,6 +372,7 @@ def _tighten_bounds(
     # which is exactly what a top strip is for.
     if header_top is not None:
         top = max(top, header_top)
+    left, top, right, bottom = _fit_to_text_box((left, top, right, bottom), page, buffer)
     if right - left < page.pdf_width * MIN_TEXT_WIDTH_FRACTION or bottom <= top:
         return bounds
     return left, top, right, bottom
@@ -405,7 +516,12 @@ def compute_margin_rects(
         the bounds come from the page's text or marks alone, which is also
         what happens on a page carrying no ``TEXT_COLUMN`` detection. The
         caller owns which detections are in each page: pass the ones a
-        reviewer has kept, not everything the model proposed.
+        reviewer has kept, not everything the model proposed. A page that
+        also carries a ``text_box`` (the caller's own measurement of its
+        printed text, in the page's pixels) has its content box fitted to
+        it, smaller only, never across a header-row detection, and never
+        below ``MARGIN_MIN_KEEP_RATIO`` of the box; a page with none
+        answers as it would without.
     :returns: List of dicts with ``page_index``, ``rects``, ``page_width``
         and ``page_height`` keys, where each rect is a dict with ``x0``,
         ``y0``, ``x1``, ``y1`` in PDF points.
@@ -439,7 +555,7 @@ def compute_margin_rects(
                 # lands somewhere arbitrary, so use the marks alone.
                 logger.warning(
                     "Page %d: detections describe a %.0fx%.0f page but the PDF "
-                    "page is %.0fx%.0f; ignoring them for margins",
+                    "page is %.0fx%.0f; ignoring them and its text box for margins",
                     page_idx,
                     detected.pdf_width,
                     detected.pdf_height,
@@ -448,7 +564,7 @@ def compute_margin_rects(
                 )
                 detected = None
             if detected is not None:
-                bounds = _tighten_bounds(bounds, detected, page)
+                bounds = _tighten_bounds(bounds, detected, page, buffer=buffer)
             entry["rects"] = _rects_for_bounds(bounds, pw, ph, buffer)
             if detected is not None:
                 _shrink_rects_for_detections(detected, entry["rects"])
