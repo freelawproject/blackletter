@@ -4,10 +4,14 @@
 
 The following changes are not yet released, but are code complete:
 
+## Current
+
+0.3.1 (2026-09-14)
+
 - Fix a `DIVIDER` redaction covering only a corner of the printed rule. The per-detection rect was tightened to the ink inside it, and `ink.ink_bbox` refuses ink that is too solid: a rule is 100% dark in every pixel column it occupies, over the `BBOX_MAX_FRACTION` ceiling that keeps the platen bar and the gutter shadow out of a headnote measurement. Either no column survived and the raw box stayed by accident, or the one half-covered column at an end of the rule survived and became the whole rect — a 0.7 pt redaction over a 62 pt rule — with only sub-pixel alignment deciding which, so it did not reproduce on every divider. `DIVIDER` now joins `HEADNOTE_BRACKET` and `STATE_ABBREVIATION` as a label that is never tightened, since its content is not text and the measurement has nothing to give. The ceiling itself is unchanged: every headnote rect still depends on it (#75)
 - Hold that skip set in one place, `scanner._NO_TIGHTEN`, instead of the three copies the loops carried. `compute_redaction_rects` and `_build_full_redacted` each spelled it inline and `split_opinions` had none at all, so a `HEADNOTE_BRACKET` or `STATE_ABBREVIATION` redaction in a per-opinion file was tightened where the same redaction in the full PDF was not. Those two labels now keep their raw box in the per-opinion files too, which changes their rects there — the shape the other two loops have always produced. `--draw` skips the same labels, so a debug overlay no longer draws a box the deliverable does not match (#75)
 
-## Current
+## Past
 
 0.3.0 (2026-08-26)
 
@@ -16,8 +20,6 @@ The following changes are not yet released, but are code complete:
 - Retune the confidence gates for bl-warm only: `PAGE_HEADER` and `HEADNOTE_BRACKET` drop from 0.50 to 0.30 and `EDITORIAL` gains a 0.50 gate, measured on the golden val/test set — everything bl-warm places between 0.25 and 0.50 for the two lowered classes is a true positive the old gate silently dropped, while `EDITORIAL`'s one harmful false positive sits below 0.50 and every true positive above it. The two families score these labels differently, so the numbers live in `scanner.BL_WARM_LABEL_CONFIDENCE` and are picked per detection family by `scanner.label_confidence(label, bl_warm)`; a legacy small/medium/large run keeps `LABEL_CONFIDENCE` unchanged. `Document.bl_warm` carries the family, set from the loaded model in `scan()`, from `found_by` on `api.detect` rows, and from a `model` key that `detections.json` now stamps on bl-warm rows so a rebuilt `Document` still knows (#73)
 - Refuse `blackletter process --bitonal` when the model is bl-warm, instead of silently detecting on the 1-bit copy that its large region classes collapse on (#73)
 - Consumers that build their own `Document` rather than going through `scan()`, `api.pair`, `api.build_redacted`, `process.generate_files` or `tasks.pair_and_compute_rects` must now pass `bl_warm=True` (or feed rows that carry `found_by`/`model` and let `bl_warm.rows_are_bl_warm` decide) when the detections came from bl-warm. `Document.bl_warm` defaults to `False`, and a bl-warm run left at the default silently gets the legacy gates: `PAGE_HEADER`/`HEADNOTE_BRACKET` back at 0.50, which drops real redactions, and `EDITORIAL` down at `CONFIDENCE_THRESHOLD`, which keeps the false positive its 0.50 gate exists to remove. Nothing raises — the rects just change shape — so check this before pointing a consumer at `models=["bl_warm"]` (#73)
-
-## Past
 
 0.2.0 (2026-08-04)
 
