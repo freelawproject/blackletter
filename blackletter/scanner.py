@@ -89,6 +89,8 @@ LABEL_COLORS: dict[Label, tuple[int, int, int]] = {
     Label.DATE: (245, 176, 65),
     Label.COURT: (72, 201, 176),
     Label.CITATION: (205, 97, 85),
+    Label.HEADING: (103, 58, 183),
+    Label.BLOCKQUOTE: (0, 150, 136),
 }
 
 # Max allowed deviation from median key-icon size (as a fraction).
