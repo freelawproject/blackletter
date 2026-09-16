@@ -4,6 +4,8 @@
 
 The following changes are not yet released, but are code complete:
 
+- Add `HEADING` (21) and `BLOCKQUOTE` (22) to `Label`, and map bl-warm's `heading` and `blockquote` classes onto them in `blackletter.bl_warm`. bl-warm emits 18 classes and the adapter mapped 16; the other two had no `Label` equivalent and fell through the adapter's `None` filter, so a run that saw 3,114 headings and 1,035 blockquotes on one volume wrote none of them to `detections.json`, with no log line to say so. Both labels are opinion-body text, so they are neither copyrighted nor structural and no redaction or extraction consumer reads them yet; they now reach the sidecar, `api.detect` rows and the `--draw` overlay instead of vanishing. `len(Label)` is now 23, which a consumer that sizes anything by the enum should note. A new `tests/test_bl_warm.py` pins the full bl-warm class list against the adapter's mapping table in both directions, so a class the next checkpoint adds fails a test rather than being dropped silently again
+
 ## Current
 
 0.4.0 (2026-09-15)
