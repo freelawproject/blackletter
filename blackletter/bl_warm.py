@@ -14,8 +14,9 @@ and ids, so this module translates its raw output into the
   line, since bl-warm draws one box around the whole text body while
   blackletter expects one box per column (``snap_text_columns_to_ink``
   then corrects the synthetic edges against the page ink)
-- ``heading`` and ``blockquote`` have no ``Label`` equivalent and are
-  dropped
+- ``heading`` -> ``HEADING`` and ``blockquote`` -> ``BLOCKQUOTE``: bl-warm
+  only classes for opinion-body structure, carried through so they reach
+  the detections sidecar instead of being dropped
 
 Classes blackletter's models emit that bl-warm does not: the
 consumer-less ``JUDGES``/``DOCKET``/``DATE``/``COURT``/``CITATION``.
@@ -46,8 +47,11 @@ _NAME_TO_LABEL: dict[str, Label] = {
     "body": Label.TEXT_COLUMN,
     # 18-class model (2026-08-10): image feeds _extract_images /
     # has_image / _stamp_original_images; heading and blockquote have
-    # no Label consumer and fall through the None filter below
+    # no redaction consumer yet but are kept so they surface in the
+    # detections sidecar and overlays
     "image": Label.IMAGE,
+    "heading": Label.HEADING,
+    "blockquote": Label.BLOCKQUOTE,
 }
 
 
@@ -89,7 +93,8 @@ def iter_label_rows(result: Any) -> Iterator[tuple[int, float, list[float]]]:
 
     For the original models this is a passthrough of the raw boxes.
     For bl-warm, names are mapped through :data:`_NAME_TO_LABEL`
-    (classes without a Label are dropped) and each ``body`` box
+    (every bl-warm class now has a Label; the ``None`` filter guards
+    against names from a future checkpoint) and each ``body`` box
     becomes two ``TEXT_COLUMN`` rows split at the body's vertical
     center line. Duplicate overlapping detections are left to
     :func:`blackletter.api.detect`'s same-label merge, shared with
@@ -101,7 +106,11 @@ def iter_label_rows(result: Any) -> Iterator[tuple[int, float, list[float]]]:
     names = getattr(result, "names", None)
     if not names or not is_bl_warm(names):
         for box in result.boxes:
-            yield (int(box.cls[0].item()), float(box.conf[0].item()), box.xyxy[0].tolist())
+            yield (
+                int(box.cls[0].item()),
+                float(box.conf[0].item()),
+                box.xyxy[0].tolist(),
+            )
         return
     for box in result.boxes:
         label = _NAME_TO_LABEL.get(names[int(box.cls[0].item())])

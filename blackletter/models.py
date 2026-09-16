@@ -33,6 +33,10 @@ class Label(IntEnum):
     DATE = 18
     COURT = 19
     CITATION = 20
+    # bl-warm only: opinion-body structure. Authentic text, so neither
+    # copyrighted nor structural; kept so detections are not dropped.
+    HEADING = 21
+    BLOCKQUOTE = 22
 
     @property
     def is_copyrighted(self) -> bool:
