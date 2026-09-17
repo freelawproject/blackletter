@@ -25,6 +25,7 @@ OCRing content that is about to be blacked out.
 from __future__ import annotations
 
 import json
+import logging
 import tempfile
 import time
 from collections import Counter
@@ -34,6 +35,8 @@ from pathlib import Path
 import fitz
 
 from blackletter.bl_warm import iter_label_rows
+
+logger = logging.getLogger(__name__)
 
 
 # Hugging Face sources for the YOLO weights. No weights are bundled in
@@ -1031,6 +1034,8 @@ def generate(
     volume: str = "",
     unredacted: bool = False,
     llm: bool = False,
+    full_redacted: bool = True,
+    image_for: Callable[[int, fitz.Rect], bytes | None] | None = None,
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> dict:
     """Generate all output PDFs from a source PDF and a redactions payload.
@@ -1041,8 +1046,17 @@ def generate(
       ranges, and filenames.
     - ``"pages"``: dict mapping page_index to a list of rects (margins
       + redaction rects, all in PDF points).
+    - ``"images"``: optional dict mapping page_index to a list of
+      ``{"x0", "y0", "x1", "y1"}`` rects, in PDF points, where a picture
+      belongs. Read only when *image_for* is given.
 
     Builds in one pass per page (no layering).
+
+    A fault inside one opinion fails that opinion alone: its slot in
+    ``files`` is ``None``, the fault is named in ``failed``, and the
+    other opinions are still written. Only a fault of the whole call --
+    a source PDF that will not open, a payload with no ``opinions`` or
+    no ``pages`` -- raises.
 
     :param pdf_path: Path to the source PDF.
     :param redactions: Path to redactions.json, or the parsed dict.
@@ -1052,10 +1066,29 @@ def generate(
     :param volume: Volume number for filenames (e.g. ``"214"``).
     :param unredacted: Also generate unredacted opinion PDFs.
     :param llm: Also generate per-page LLM PDFs with invisible
-        ``<--CASEEND-->`` stamps on Key-icon locations.
+        ``<--CASEEND-->`` stamps on Key-icon locations. Requires
+        *full_redacted*, which is the document it slices.
+    :param full_redacted: Write the redacted PDF of the whole source
+        before the per-opinion loop. A caller that wants the opinion
+        files alone passes ``False``, and one pass of
+        ``apply_redactions`` over every page of the source is skipped.
+    :param image_for: Optional ``callable(page_index, rect) -> bytes |
+        None``, asked for the picture belonging in each rect of the
+        page's ``"images"`` entry. *page_index* is relative to
+        *pdf_path*. The bytes are inserted over that rect before the
+        redactions are painted, so a rect covering part of a picture
+        still blacks it out; ``None`` leaves the rect as it is. Keeping
+        this a callable keeps the higher-quality source -- which only
+        the caller can locate and align -- out of this library.
     :param progress_callback: Optional callable(current, total, message).
-    :returns: Dict with keys ``redacted_dir``, ``full_redacted``, and
-        ``opinion_count``. Includes ``llm_dir`` when *llm* is True.
+    :returns: Dict with keys ``redacted_dir``, ``full_redacted`` (the
+        path, or ``None`` when it was not written), ``opinion_count``,
+        ``files`` (one entry per input opinion, in input order: the path
+        of its redacted file, or ``None`` if it was not written) and
+        ``failed`` (``[{"index", "error"}]``, empty when every opinion
+        was written). Includes ``llm_dir`` when *llm* is True.
+    :raises ValueError: If *llm* is asked for without *full_redacted*,
+        or the payload has no ``opinions`` or no ``pages``.
     """
     import re
 
@@ -1063,13 +1096,24 @@ def generate(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    if llm and not full_redacted:
+        # ``_split_llm_pages`` slices the full redacted document. Without
+        # it there is nothing to slice, and building one anyway would be
+        # the work ``full_redacted=False`` was passed to avoid.
+        raise ValueError("llm=True requires full_redacted=True")
+
     if isinstance(redactions, (str, Path)):
         data = json.loads(Path(redactions).read_text())
     else:
         data = redactions
 
+    for key in ("opinions", "pages"):
+        if key not in data:
+            raise ValueError(f"redactions payload has no {key!r}")
+
     opinions = data["opinions"]
     pages_rects = data["pages"]
+    images_rects = data.get("images") or {}
 
     # Build prefix from reporter/volume
     prefix = ""
@@ -1079,18 +1123,27 @@ def generate(
         prefix += f"{volume}."
 
     def _opinion_filename(op):
-        """Build filename from opinion page numbers.
+        """Pick the filename for one opinion.
 
-        :param op: Opinion dict with ``first_page_number`` and
-            ``last_page_number`` keys.
+        The caller's own name wins. A consumer that stores these files
+        under an internal name needs that to be a contract rather than
+        the fallback it used to be: a printed range in the name leaves a
+        stale file beside the new one as soon as a boundary moves.
+        ``build_redactions`` writes a ``filename`` equal to the derived
+        name, so a payload it built is unaffected.
+
+        :param op: Opinion dict, with a ``filename`` or with
+            ``first_page_number`` and ``last_page_number`` keys.
         :returns: Filename string (e.g. ``"a3d.333.0001-0010.pdf"``).
         """
+        name = op.get("filename")
+        if name:
+            return name
         first = op.get("first_page_number")
         last = op.get("last_page_number")
         if first is not None and last is not None:
             return f"{prefix}{first:04d}-{last:04d}.pdf"
-        # Fall back to existing filename
-        return op.get("filename", f"{op['caption_page']:04d}-{op['end_page']:04d}.pdf")
+        return f"{op.get('caption_page', 0):04d}-{op.get('end_page', 0):04d}.pdf"
 
     # Detect duplicate filenames and add -1/-2/-3 suffixes
     raw_names = [_opinion_filename(op) for op in opinions]
@@ -1104,7 +1157,66 @@ def generate(
         else:
             filenames.append(name)
 
+    t_call = time.time()
+    full_path: Path | None = None
+    files: list[Path | None] = []
+    failed: list[dict] = []
+
     with fitz.open(str(pdf_path)) as src:
+        logger.info(
+            "generate %s: start - %d page(s), %d opinion(s), full=%s unredacted=%s "
+            "llm=%s images=%s -> %s",
+            pdf_path.name,
+            src.page_count,
+            len(opinions),
+            full_redacted,
+            unredacted,
+            llm,
+            image_for is not None,
+            output_dir,
+        )
+        if logger.isEnabledFor(logging.DEBUG):
+            for idx, (op_dict, op_name) in enumerate(zip(opinions, filenames, strict=True)):
+                logger.debug(
+                    "generate %s: opinion %d -> %s (%s)",
+                    pdf_path.name,
+                    idx,
+                    op_name,
+                    "caller" if op_dict.get("filename") else "derived",
+                )
+
+        def _place_images(fitz_page, src_idx):
+            """Put the caller's pictures on one page, before the paint.
+
+            :param fitz_page: The ``fitz.Page`` to insert onto.
+            :param src_idx: Source page index in the original PDF.
+            :returns: The number of pictures inserted.
+            """
+            if image_for is None:
+                return 0
+            placed = 0
+            for r in images_rects.get(str(src_idx), []):
+                rect = fitz.Rect(r["x0"], r["y0"], r["x1"], r["y1"])
+                if rect.is_empty:
+                    continue
+                data = image_for(src_idx, rect)
+                if not data:
+                    logger.debug(
+                        "generate %s: page %d, no picture for %s",
+                        pdf_path.name,
+                        src_idx,
+                        rect,
+                    )
+                    continue
+                # keep_proportion=False: ``get_pixmap(clip=...)`` snaps the
+                # clip to the pixel grid, so a picture rendered from this
+                # very rect can come back a fraction of a point off its
+                # aspect. Letterboxing that difference would show a
+                # hairline of the page underneath along one edge; filling
+                # the rect the caller declared is the better failure.
+                fitz_page.insert_image(rect, stream=data, keep_proportion=False)
+                placed += 1
+            return placed
 
         def _apply_page(fitz_page, src_idx, opinion, mode):
             """Apply all rects for one page in one pass.
@@ -1115,7 +1227,12 @@ def generate(
             :param mode: One of ``"full"`` (all rects, no outside-opinion
                 whiteout) or ``"redacted"`` (all rects + outside-opinion
                 whiteout).
+            :returns: The number of pictures inserted on the page.
             """
+            # The pictures go on first, so a rect that covers part of one
+            # blacks it out like anything else on the page.
+            placed = _place_images(fitz_page, src_idx)
+
             # Page rects (margins + redactions), all PDF points
             applied: list[tuple[fitz.Rect, tuple]] = []
             for r in pages_rects.get(str(src_idx), []):
@@ -1150,70 +1267,125 @@ def generate(
             # version strokes again. The CLI path has always done it.
             for rect, fill in applied:
                 fitz_page.draw_rect(rect, fill=fill, color=None, width=0)
+            return placed
 
         # ── Full redacted PDF ──
-        t0 = time.time()
-        # Name: reporter.volume.first_page.last_page.redacted.pdf
-        first_pn = opinions[0].get("first_page_number", 1)
-        last_pn = opinions[-1].get("last_page_number", first_pn)
-        full_name = f"{prefix}{first_pn}.{last_pn}.redacted.pdf"
-        full_path = output_dir / full_name
-        with fitz.open() as full_out:
-            full_out.insert_pdf(src)
-            for page_idx in range(full_out.page_count):
-                _apply_page(full_out[page_idx], page_idx, None, "full")
-                if progress_callback and (
-                    (page_idx + 1) % 20 == 0 or page_idx == full_out.page_count - 1
-                ):
-                    progress_callback(page_idx + 1, full_out.page_count, "Redacting pages...")
-            full_out.save(str(full_path), garbage=4, deflate=True)
-        print(
-            f"  Full redacted: {full_path.name} ({full_path.stat().st_size / 1024 / 1024:.1f} MB, {time.time() - t0:.0f}s)",
-            flush=True,
-        )
+        if full_redacted:
+            t0 = time.time()
+            # Name: reporter.volume.first_page.last_page.redacted.pdf
+            if opinions:
+                first_pn = opinions[0].get("first_page_number", 1)
+                last_pn = opinions[-1].get("last_page_number", first_pn)
+                full_name = f"{prefix}{first_pn}.{last_pn}.redacted.pdf"
+            else:
+                full_name = f"{prefix}redacted.pdf"
+            full_path = output_dir / full_name
+            logger.info(
+                "generate %s: full redacted over %d page(s) -> %s",
+                pdf_path.name,
+                src.page_count,
+                full_name,
+            )
+            with fitz.open() as full_out:
+                full_out.insert_pdf(src)
+                for page_idx in range(full_out.page_count):
+                    _apply_page(full_out[page_idx], page_idx, None, "full")
+                    if progress_callback and (
+                        (page_idx + 1) % 20 == 0 or page_idx == full_out.page_count - 1
+                    ):
+                        progress_callback(page_idx + 1, full_out.page_count, "Redacting pages...")
+                full_out.save(str(full_path), garbage=4, deflate=True)
+            logger.info(
+                "generate %s: full redacted %s (%.1f MB, %.0fs)",
+                pdf_path.name,
+                full_path.name,
+                full_path.stat().st_size / 1024 / 1024,
+                time.time() - t0,
+            )
+        else:
+            logger.debug("generate %s: full redacted skipped (full_redacted=False)", pdf_path.name)
 
         # ── Split opinions ──
         redacted_dir = output_dir / "redacted"
         redacted_dir.mkdir(exist_ok=True)
 
+        unredacted_dir = output_dir / "unredacted"
         if unredacted:
-            unredacted_dir = output_dir / "unredacted"
             unredacted_dir.mkdir(exist_ok=True)
 
         if llm:
             llm_dir = output_dir / "llm"
             llm_dir.mkdir(exist_ok=True)
 
-        t0 = time.time()
-
         # ── Redacted + unredacted: one PDF per opinion ──
         for i, op in enumerate(opinions):
-            start_idx = op["caption_page"]
-            end_idx = op["end_page"]
             filename = filenames[i]
+            t_op = time.time()
+            placed = 0
 
-            with fitz.open() as out:
-                out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
-                for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
-                    _apply_page(out[local_idx], src_idx, op, "redacted")
-                out.save(str(redacted_dir / filename), garbage=4, deflate=True)
+            try:
+                # Inside the try: a dict with no page range is that
+                # opinion's fault, not the call's.
+                start_idx = op["caption_page"]
+                end_idx = op["end_page"]
 
-            if unredacted:
                 with fitz.open() as out:
                     out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
                     for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
-                        for orect in op.get("outside_rects", []):
-                            if orect["page_index"] != src_idx:
-                                continue
-                            rect = fitz.Rect(orect["x0"], orect["y0"], orect["x1"], orect["y1"])
-                            if not rect.is_empty:
-                                out[local_idx].add_redact_annot(rect, fill=(1, 1, 1))
-                        out[local_idx].apply_redactions()
-                    out.save(str(unredacted_dir / filename), garbage=4, deflate=True)
+                        placed += _apply_page(out[local_idx], src_idx, op, "redacted")
+                    out.save(str(redacted_dir / filename), garbage=4, deflate=True)
+
+                if unredacted:
+                    with fitz.open() as out:
+                        out.insert_pdf(src, from_page=start_idx, to_page=end_idx)
+                        for local_idx, src_idx in enumerate(range(start_idx, end_idx + 1)):
+                            for orect in op.get("outside_rects", []):
+                                if orect["page_index"] != src_idx:
+                                    continue
+                                rect = fitz.Rect(orect["x0"], orect["y0"], orect["x1"], orect["y1"])
+                                if not rect.is_empty:
+                                    out[local_idx].add_redact_annot(rect, fill=(1, 1, 1))
+                            out[local_idx].apply_redactions()
+                        out.save(str(unredacted_dir / filename), garbage=4, deflate=True)
+            except Exception as exc:
+                # One opinion's fault is one opinion's failure. The caller
+                # gets the whole batch minus this file, and the traceback
+                # exists nowhere else, since nothing is raised.
+                logger.exception(
+                    "generate %s: opinion %d (%s), pages %s-%s failed: %s",
+                    pdf_path.name,
+                    i,
+                    filename,
+                    op.get("caption_page"),
+                    op.get("end_page"),
+                    exc,
+                )
+                # A fault inside ``save`` leaves a truncated file that looks
+                # like a deliverable.
+                for stale in (redacted_dir / filename, unredacted_dir / filename):
+                    stale.unlink(missing_ok=True)
+                files.append(None)
+                failed.append({"index": i, "error": str(exc)})
+            else:
+                written = redacted_dir / filename
+                files.append(written)
+                logger.debug(
+                    "generate %s: opinion %d (%s), pages %d-%d, %d picture(s), %.1f KB in %.1fs",
+                    pdf_path.name,
+                    i,
+                    filename,
+                    start_idx,
+                    end_idx,
+                    placed,
+                    written.stat().st_size / 1024,
+                    time.time() - t_op,
+                )
 
             done = i + 1
+            if progress_callback:
+                progress_callback(done, len(opinions), "Writing opinion PDFs...")
             if done % 20 == 0 or done == len(opinions):
-                print(f"    Redacted {done}/{len(opinions)}", flush=True)
+                logger.info("generate %s: redacted %d/%d", pdf_path.name, done, len(opinions))
 
         # ── LLM per-page split with CASEEND stamps on Key icons (opt-in) ──
         if llm:
@@ -1230,14 +1402,25 @@ def generate(
                 if rects:
                     key_by_page[int(pi_str)] = rects
             total = _split_llm_pages(full_path, key_by_page, llm_dir)
-            print(f"    LLM {total} pages ({time.time() - t_llm:.0f}s)", flush=True)
+            logger.info(
+                "generate %s: llm %d page(s) (%.0fs)", pdf_path.name, total, time.time() - t_llm
+            )
 
-    print(f"  Split complete ({time.time() - t0:.0f}s)", flush=True)
+    logger.info(
+        "generate %s: done - %d written, %d failed in %.1fs -> %s",
+        pdf_path.name,
+        len([f for f in files if f is not None]),
+        len(failed),
+        time.time() - t_call,
+        redacted_dir,
+    )
 
     result = {
         "full_redacted": full_path,
         "redacted_dir": redacted_dir,
         "opinion_count": len(opinions),
+        "files": files,
+        "failed": failed,
     }
     if llm:
         result["llm_dir"] = llm_dir
