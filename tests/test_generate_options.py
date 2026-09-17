@@ -165,6 +165,52 @@ class TestTheCallersFileNameWins:
         ]
         assert all(p.is_file() for p in result["files"])
 
+    def test_duplicates_are_suffixed_whatever_the_extension(self, source, tmp_path):
+        """The old split matched a lowercase ``.pdf`` and nothing else.
+
+        With the caller's name as the contract, a pair it spells
+        ``.PDF`` would have come back as two paths to one file, the
+        second having overwritten the first.
+        """
+        out = tmp_path / "out"
+        result = generate(
+            source,
+            payload([opinion(0, 1, filename="same.PDF"), opinion(2, 3, filename="same.PDF")]),
+            out,
+            full_redacted=False,
+        )
+
+        assert result["files"] == [
+            out / "redacted" / "same-1.PDF",
+            out / "redacted" / "same-2.PDF",
+        ]
+        assert len({p.read_bytes() for p in result["files"]}) == 2, "one file, written twice"
+
+    def test_a_name_with_a_path_fails_only_that_opinion(self, source, tmp_path):
+        """A name is a file name. Joined verbatim it would escape.
+
+        The cleanup below deletes what a failed opinion left behind, so
+        an escaping name is also a delete outside ``output_dir``.
+        """
+        out = tmp_path / "out"
+        bystander = tmp_path / "bystander.pdf"
+        bystander.write_bytes(b"%PDF-1.7 not ours\n")
+        result = generate(
+            source,
+            payload(
+                [
+                    opinion(0, 0, filename="../bystander.pdf"),
+                    opinion(1, 1, filename="fine.pdf"),
+                ]
+            ),
+            out,
+            full_redacted=False,
+        )
+
+        assert bystander.read_bytes() == b"%PDF-1.7 not ours\n", "wrote or deleted outside"
+        assert result["files"] == [None, out / "redacted" / "fine.pdf"]
+        assert "bare file name" in result["failed"][0]["error"]
+
 
 class TestTheResultNamesEachFile:
     """A caller should not have to re-derive the name it just passed in."""
@@ -236,6 +282,35 @@ class TestOneBadOpinionFailsOneOpinion:
         out, _ = self._three(source, tmp_path)
 
         assert not (out / "redacted" / "broken.pdf").exists()
+
+    def test_an_unredacted_file_of_an_earlier_run_survives(self, source, tmp_path):
+        """The cleanup removes what *this* call wrote, not what it found."""
+        out = tmp_path / "out"
+        earlier = out / "unredacted"
+        earlier.mkdir(parents=True)
+        (earlier / "broken.pdf").write_bytes(b"%PDF-1.7 earlier run\n")
+
+        self._three(source, tmp_path)
+
+        assert (earlier / "broken.pdf").read_bytes() == b"%PDF-1.7 earlier run\n"
+
+    def test_a_dict_with_a_null_page_range_fails_only_that_opinion(self, source, tmp_path):
+        """The derived name formats the range, before the loop."""
+        out = tmp_path / "out"
+        result = generate(
+            source,
+            payload(
+                [
+                    {"caption_page": None, "end_page": None, "outside_rects": []},
+                    opinion(0, 0, filename="ok.pdf"),
+                ]
+            ),
+            out,
+            full_redacted=False,
+        )
+
+        assert result["files"][1] == out / "redacted" / "ok.pdf"
+        assert result["failed"][0]["index"] == 0
 
     def test_opinion_count_still_counts_the_inputs(self, source, tmp_path):
         _, result = self._three(source, tmp_path)

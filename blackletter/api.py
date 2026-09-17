@@ -1052,11 +1052,14 @@ def generate(
 
     Builds in one pass per page (no layering).
 
-    A fault inside one opinion fails that opinion alone: its slot in
-    ``files`` is ``None``, the fault is named in ``failed``, and the
-    other opinions are still written. Only a fault of the whole call --
-    a source PDF that will not open, a payload with no ``opinions`` or
-    no ``pages`` -- raises.
+    A fault inside one opinion's own work fails that opinion alone: its
+    slot in ``files`` is ``None``, the fault is named in ``failed``, and
+    the other opinions are still written. A fault outside that work still
+    raises and ends the call, with no ``failed`` to read: a source PDF
+    that will not open, a payload with no ``opinions`` or no ``pages``,
+    anything the full redacted pass hits (it is one document over the
+    whole source, not one opinion, so there is no slot to report it in),
+    or a *progress_callback* of the caller's that raises.
 
     :param pdf_path: Path to the source PDF.
     :param redactions: Path to redactions.json, or the parsed dict.
@@ -1072,6 +1075,8 @@ def generate(
         before the per-opinion loop. A caller that wants the opinion
         files alone passes ``False``, and one pass of
         ``apply_redactions`` over every page of the source is skipped.
+        This pass is not covered by the per-opinion isolation above: a
+        fault in it ends the call before any opinion is written.
     :param image_for: Optional ``callable(page_index, rect) -> bytes |
         None``, asked for the picture belonging in each rect of the
         page's ``"images"`` entry. *page_index* is relative to
@@ -1079,8 +1084,16 @@ def generate(
         redactions are painted, so a rect covering part of a picture
         still blacks it out; ``None`` leaves the rect as it is. Keeping
         this a callable keeps the higher-quality source -- which only
-        the caller can locate and align -- out of this library.
-    :param progress_callback: Optional callable(current, total, message).
+        the caller can locate and align -- out of this library. It may be
+        asked for the same rect more than once, since every output
+        document covering that page asks for it: with *full_redacted*,
+        once for the full pass and once per opinion holding the page.
+        Nothing is cached here, because holding the bytes of every
+        picture in a volume is the kind of memory only the caller can
+        size; memoise on that side if the render is expensive.
+    :param progress_callback: Optional callable(current, total, message),
+        called for each page of the full redacted pass and then once per
+        opinion. Its own faults are the caller's and are not caught.
     :returns: Dict with keys ``redacted_dir``, ``full_redacted`` (the
         path, or ``None`` when it was not written), ``opinion_count``,
         ``files`` (one entry per input opinion, in input order: the path
@@ -1090,8 +1103,6 @@ def generate(
     :raises ValueError: If *llm* is asked for without *full_redacted*,
         or the payload has no ``opinions`` or no ``pages``.
     """
-    import re
-
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1143,9 +1154,15 @@ def generate(
         last = op.get("last_page_number")
         if first is not None and last is not None:
             return f"{prefix}{first:04d}-{last:04d}.pdf"
-        return f"{op.get('caption_page', 0):04d}-{op.get('end_page', 0):04d}.pdf"
+        # ``or 0``: a dict carrying an explicit ``None`` range would raise
+        # here, before the loop that reports it as one opinion's fault.
+        return f"{op.get('caption_page') or 0:04d}-{op.get('end_page') or 0:04d}.pdf"
 
-    # Detect duplicate filenames and add -1/-2/-3 suffixes
+    # Detect duplicate filenames and add -1/-2/-3 suffixes. The caller's
+    # own name is the primary contract now, so the split has to hold for
+    # whatever it hands over -- ``.PDF``, or no extension at all -- and not
+    # only for a lowercase ``.pdf``, which would leave two opinions sharing
+    # one name and the second overwriting the first.
     raw_names = [_opinion_filename(op) for op in opinions]
     name_counts = Counter(raw_names)
     name_seq: dict[str, int] = {}
@@ -1153,7 +1170,9 @@ def generate(
     for name in raw_names:
         if name_counts[name] > 1:
             name_seq[name] = name_seq.get(name, 0) + 1
-            filenames.append(re.sub(r"\.pdf$", f"-{name_seq[name]}.pdf", name))
+            suffix = Path(name).suffix
+            base = name[: len(name) - len(suffix)] if suffix else name
+            filenames.append(f"{base}-{name_seq[name]}{suffix}")
         else:
             filenames.append(name)
 
@@ -1324,8 +1343,12 @@ def generate(
             placed = 0
 
             try:
-                # Inside the try: a dict with no page range is that
-                # opinion's fault, not the call's.
+                # Inside the try: a malformed dict is that opinion's fault,
+                # not the call's.
+                if Path(filename).name != filename:
+                    # Joined verbatim below, so a name carrying a path would
+                    # write, and on the cleanup delete, outside output_dir.
+                    raise ValueError(f"opinion filename {filename!r} is not a bare file name")
                 start_idx = op["caption_page"]
                 end_idx = op["end_page"]
 
@@ -1361,9 +1384,16 @@ def generate(
                     exc,
                 )
                 # A fault inside ``save`` leaves a truncated file that looks
-                # like a deliverable.
-                for stale in (redacted_dir / filename, unredacted_dir / filename):
-                    stale.unlink(missing_ok=True)
+                # like a deliverable. Only the files this call writes: an
+                # ``unredacted/`` twin it was never asked for belongs to an
+                # earlier run over the same directory, and a name that is
+                # not a bare file name never reached disk.
+                if Path(filename).name == filename:
+                    stale = [redacted_dir / filename]
+                    if unredacted:
+                        stale.append(unredacted_dir / filename)
+                    for path in stale:
+                        path.unlink(missing_ok=True)
                 files.append(None)
                 failed.append({"index": i, "error": str(exc)})
             else:
