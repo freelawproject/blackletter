@@ -314,3 +314,57 @@ class TestMissingPlaceholderPlacement:
             ("pdf", 3),
         ]
         assert page_map[3]["logical_number"] == 4
+
+    def test_gap_past_a_duplicated_last_number_follows_the_last_copy(self):
+        # Printed 1, 2, 3, 3 and the volume should end at 5: nothing is
+        # printed above the gap, so 4 and 5 follow the second "3", not sit
+        # between the two copies.
+        results = [_page(1, "1"), _page(2, "2"), _page(3, "3"), _page(4, "3")]
+
+        page_map = build_issues(build_analysis(results, 1, 5), len(results), 1, 5)["page_map"]
+
+        assert _layout(page_map) == [
+            ("pdf", 0),
+            ("pdf", 1),
+            ("pdf", 2),
+            ("pdf", 3),
+            ("missing", 4),
+            ("missing", 5),
+        ]
+
+    def test_gap_past_a_duplicate_before_an_unnumbered_tail_follows_the_last_copy(self):
+        results = [_page(1, "1"), _page(2, "2"), _page(3, "2"), _page(4), _page(5)]
+
+        page_map = build_issues(build_analysis(results, 1, 3), len(results), 1, 3)["page_map"]
+
+        assert _layout(page_map) == [
+            ("pdf", 0),
+            ("pdf", 1),
+            ("pdf", 2),
+            ("missing", 3),
+            ("pdf", 3),
+            ("pdf", 4),
+        ]
+
+    def test_inverted_range_label_does_not_anchor(self):
+        # "6-4" is a misread: it covers no page, so 3-6 are all missing and
+        # all sit together before 7, after the misread page.
+        results = [
+            _page(1, "1"),
+            _page(2, "2"),
+            {"pdf_page": 3, "detected": "6-4", "type": "range"},
+            _page(4, "7"),
+        ]
+
+        page_map = build_issues(build_analysis(results), len(results))["page_map"]
+
+        assert _layout(page_map) == [
+            ("pdf", 0),
+            ("pdf", 1),
+            ("pdf", 2),
+            ("missing", 3),
+            ("missing", 4),
+            ("missing", 5),
+            ("missing", 6),
+            ("pdf", 3),
+        ]

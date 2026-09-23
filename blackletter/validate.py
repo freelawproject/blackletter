@@ -437,11 +437,15 @@ def build_issues(
     # list).
     seen_logical: dict[int, dict] = {}
     # The printed numbers a page carries, ``(first, last)``, for the pages
-    # that anchor missing page placeholders: the first copy of each printed
-    # number and each range page. Unnumbered and out-of-range pages are left
-    # out, since their ``logical = pdf_page`` is display-only and would pull a
-    # gap near the start of a volume into the front matter (#83), and so are
-    # the 2nd-and-later copies of a repeated number, which are unreliable.
+    # that anchor missing page placeholders. Unnumbered and out-of-range pages
+    # are left out, since their ``logical = pdf_page`` is display-only and
+    # would pull a gap near the start of a volume into the front matter (#83),
+    # and so is an inverted range label ("6-4"), which covers no page.
+    # ``numbered_spans`` holds every page carrying a number; ``anchor_spans``
+    # leaves out the 2nd-and-later copies of a repeated number, whose numbers
+    # are unreliable, so a gap still sits before the first copy of the number
+    # above it (#55).
+    numbered_spans: dict[int, tuple[int, int]] = {}
     anchor_spans: dict[int, tuple[int, int]] = {}
 
     for r in analysis["results"]:
@@ -459,8 +463,9 @@ def build_issues(
             logical = r["pdf_page"]
         elif r["detected"] and r.get("type") == "range":
             m = RANGE_RE.match(r["detected"].replace("\u2013", "-"))
-            if m:
-                anchor_spans[pdf_idx] = (int(m.group(1)), int(m.group(2)))
+            if m and int(m.group(1)) <= int(m.group(2)):
+                span = (int(m.group(1)), int(m.group(2)))
+                numbered_spans[pdf_idx] = anchor_spans[pdf_idx] = span
             page_map.append(
                 {
                     "type": "pdf_page",
@@ -485,6 +490,7 @@ def build_issues(
             "logical_number": logical,
         }
         if detected_single:
+            numbered_spans[pdf_idx] = (logical, logical)
             if logical in seen_logical:
                 entry["duplicate"] = True
                 # Back-flag the first occurrence so every copy is marked.
@@ -495,23 +501,33 @@ def build_issues(
         page_map.append(entry)
 
     # Insert missing page placeholders. A placeholder goes before the first
-    # anchor printed above its number, so an unnumbered page inside the gap
-    # stays before it. With no such anchor (a gap past the last printed
-    # number, followed by unnumbered pages) it goes right after the last
-    # anchor printed below it, not after the unnumbered tail; with no anchor
-    # at all, at the end.
+    # anchor whose first number is above its own, so an unnumbered page inside
+    # the gap stays before it. With no such anchor (a gap past the last
+    # printed number, maybe followed by unnumbered pages) it goes right after
+    # the last page whose last number is below its own, every copy of a
+    # repeated number included, not after the unnumbered tail; with neither,
+    # at the end.
     if actually_missing and all_nums:
-        anchors = [
-            (i, *anchor_spans[entry["pdf_index"]])
+        positions = [
+            (i, entry["pdf_index"])
             for i, entry in enumerate(page_map)
-            if entry.get("pdf_index") in anchor_spans
+            if entry.get("pdf_index") in numbered_spans
         ]
         inserts = []
         for gap_num in actually_missing:
-            insert_pos = next((i for i, first, _ in anchors if first > gap_num), None)
+            insert_pos = next(
+                (
+                    i
+                    for i, idx in positions
+                    if idx in anchor_spans and anchor_spans[idx][0] > gap_num
+                ),
+                None,
+            )
             if insert_pos is None:
-                below = [i for i, _, last in anchors if last < gap_num]
-                insert_pos = below[-1] + 1 if below else len(page_map)
+                insert_pos = next(
+                    (i + 1 for i, idx in reversed(positions) if numbered_spans[idx][1] < gap_num),
+                    len(page_map),
+                )
             inserts.append((insert_pos, gap_num))
 
         # Insert from the back so earlier positions stay valid; placeholders
