@@ -109,15 +109,18 @@ class TestPageMapDuplicates:
         assert missing_pos == first_four_pos - 1
 
 
-def _page(pdf_page, detected=""):
+def _page(pdf_page, detected=None):
     """Build one OCR result dict, unnumbered when ``detected`` is empty.
 
+    An unnumbered page carries ``None`` in both fields, as the analyzer
+    writes it.
+
     :param pdf_page: 1-based PDF page number.
-    :param detected: Printed page number read on the page, or ``""``.
+    :param detected: Printed page number read on the page, or ``None``.
     :returns: OCR result dict accepted by ``build_analysis``.
     :rtype: dict
     """
-    return {"pdf_page": pdf_page, "detected": detected, "type": "single"}
+    return {"pdf_page": pdf_page, "detected": detected, "type": "single" if detected else None}
 
 
 def _layout(page_map):
@@ -366,5 +369,79 @@ class TestMissingPlaceholderPlacement:
             ("missing", 4),
             ("missing", 5),
             ("missing", 6),
+            ("pdf", 3),
+        ]
+
+    def test_inverted_range_label_raises_no_page_range_warning(self):
+        results = [
+            _page(1, "1"),
+            _page(2, "2"),
+            {"pdf_page": 3, "detected": "6-4", "type": "range"},
+            _page(4, "7"),
+        ]
+
+        issues = build_issues(build_analysis(results), len(results))["issues"]
+
+        assert not [i for i in issues if i["check_name"] == "page_range"]
+
+    def test_range_outside_the_expected_range_does_not_anchor(self):
+        # A year span misread as a range ("2021-2022") would anchor every
+        # placeholder in front of it; it is filtered like a stray single.
+        results = [
+            _page(1, "1"),
+            _page(2, "2"),
+            {"pdf_page": 3, "detected": "2021-2022", "type": "range"},
+            _page(4, "3"),
+            _page(5, "5"),
+        ]
+
+        page_map = build_issues(build_analysis(results, 1, 10), len(results), 1, 10)["page_map"]
+
+        assert _layout(page_map) == [
+            ("pdf", 0),
+            ("pdf", 1),
+            ("pdf", 2),
+            ("pdf", 3),
+            ("missing", 4),
+            ("pdf", 4),
+            ("missing", 6),
+            ("missing", 7),
+            ("missing", 8),
+            ("missing", 9),
+            ("missing", 10),
+        ]
+
+    def test_stray_low_reading_in_an_unnumbered_tail_does_not_carry_the_gap(self):
+        # Printed 1-5, then an appendix where one page is misread as "2": the
+        # placeholders past 5 follow the greatest number below them, 5.
+        results = [_page(p, str(p)) for p in range(1, 6)]
+        results += [_page(p) for p in range(6, 26)]
+        results[15] = _page(16, "2")
+
+        page_map = build_issues(build_analysis(results, 1, 7), len(results), 1, 7)["page_map"]
+
+        layout = _layout(page_map)
+        assert layout[4:7] == [("pdf", 4), ("missing", 6), ("missing", 7)]
+        assert layout[7:] == [("pdf", i) for i in range(5, 25)]
+
+    def test_unknown_type_is_not_a_printed_number(self):
+        # Only "single" and an unset type are plain numbers: a reprinted
+        # number under another type is not a duplicate and anchors nothing.
+        results = [
+            _page(1, "1"),
+            _page(2, "2"),
+            {"pdf_page": 3, "detected": "2", "type": "curator-note"},
+            _page(4, "4"),
+        ]
+
+        result = build_issues(build_analysis(results), len(results))
+
+        assert not [e for e in result["page_map"] if e.get("duplicate")]
+        assert result["page_map"][2]["logical_number"] == 3
+        assert _layout(result["page_map"]) == [
+            ("pdf", 0),
+            ("pdf", 1),
+            ("pdf", 2),
+            ("missing", 3),
             ("pdf", 3),
         ]
