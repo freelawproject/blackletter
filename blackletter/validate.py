@@ -7,62 +7,17 @@ gap collapsing, and page map construction for viewer display.
 from __future__ import annotations
 
 import itertools
+import re
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
 import fitz
 
-from .analyze import RANGE_RE, analyze_pdf
+from .analyze import analyze_pdf
 from .process import _infer_from_filename
 
-#: How far outside ``[exp_start, exp_end]`` a printed number may fall and
-#: still be read as a page of the volume rather than a stray number.
-EXPECTED_RANGE_SLACK = 5
-
-
-def _parse_range(text: str | None) -> tuple[int, int] | None:
-    """Read a printed page range label such as ``"677-685"``.
-
-    :param text: The detected label.
-    :returns: ``(first, last)``, or ``None`` for a label that is not a
-        range or is inverted (``"6-4"``), which covers no page.
-    """
-    m = RANGE_RE.match(text or "")
-    if not m:
-        return None
-    first, last = int(m.group(1)), int(m.group(2))
-    return (first, last) if first <= last else None
-
-
-def _printed_number(r: dict) -> int | None:
-    """Read the single printed page number of one OCR result.
-
-    :param r: A per-page OCR result dict.
-    :returns: The number, or ``None`` when the page has no reading, a
-        range, a shape other than a plain number (``"12a"``), or a
-        ``type`` other than ``"single"`` or unset.
-    """
-    if not r.get("detected") or r.get("type") not in (None, "single"):
-        return None
-    try:
-        return int(r["detected"])
-    except ValueError:
-        return None
-
-
-def _outside_range(num: int, start: int | None, end: int | None) -> bool:
-    """Tell whether a printed number falls outside a range of page numbers.
-
-    :param num: The printed number.
-    :param start: First page number of the range, or ``None``.
-    :param end: Last page number of the range, or ``None``.
-    :returns: True when both bounds are known and ``num`` is beyond them
-        by more than :data:`EXPECTED_RANGE_SLACK`.
-    """
-    if start is None or end is None:
-        return False
-    return num < start - EXPECTED_RANGE_SLACK or num > end + EXPECTED_RANGE_SLACK
+RANGE_RE = re.compile(r"^(\d{1,4})\s*[–\-]\s*(\d{1,4})$")
 
 
 def parse_expected_range(pdf_path: str | Path) -> tuple[int | None, int | None]:
@@ -92,11 +47,19 @@ def _split_in_out_of_range(
     out_of_range: list[dict] = []
     seen_nums: dict[int, list[int]] = {}
     for r in results:
-        num = _printed_number(r)
-        if num is None:
+        if not r["detected"] or r.get("type") == "range":
             continue
-        if num < 1 or _outside_range(num, exp_start, exp_end):
+        try:
+            num = int(r["detected"])
+        except ValueError:
+            continue
+        if num < 1:
             out_of_range.append(r)
+        elif exp_start is not None and exp_end is not None:
+            if num < exp_start - 5 or num > exp_end + 5:
+                out_of_range.append(r)
+            else:
+                seen_nums.setdefault(num, []).append(r["pdf_page"])
         else:
             seen_nums.setdefault(num, []).append(r["pdf_page"])
     return out_of_range, seen_nums
@@ -205,10 +168,12 @@ def build_analysis(
     prev_num = prev_pdf = None
     seq_issues: list[tuple] = []
     for r in ocr_results:
-        num = _printed_number(r)
-        if num is None:
-            if not r["detected"] or r.get("type") == "range":
-                prev_num = None
+        if not r["detected"] or r.get("type") == "range":
+            prev_num = None
+            continue
+        try:
+            num = int(r["detected"])
+        except ValueError:
             continue
         if r["pdf_page"] in out_of_range_pages:
             continue
@@ -236,9 +201,10 @@ def build_analysis(
     ranges_found = [r for r in ocr_results if r.get("type") == "range"]
     range_pages: set[int] = set()
     for r in ranges_found:
-        span = _parse_range(r["detected"])
-        if span:
-            range_pages.update(range(span[0], span[1] + 1))
+        m = RANGE_RE.match(r["detected"].replace("\u2013", "-"))
+        if m:
+            for pg in range(int(m.group(1)), int(m.group(2)) + 1):
+                range_pages.add(pg)
 
     # Missing pages
     if exp_start is not None and exp_end is not None and all_nums:
@@ -407,23 +373,12 @@ def build_issues(
     # --- Range coverage ---
     range_covered: set[int] = set()
     for r in analysis.get("ranges_found", []):
-        span = _parse_range(r["detected"])
-        if not span:
-            issues.append(
-                {
-                    "page_number": r["pdf_page"],
-                    "check_name": "suspicious_reading",
-                    "severity": "warning",
-                    "message": (
-                        f"PDF page {r['pdf_page']} reads as the page range "
-                        f"'{r['detected']}', which covers no page. Correct the "
-                        f"page number."
-                    ),
-                }
-            )
-        else:
-            rs, re_ = span
-            range_covered.update(range(rs, re_ + 1))
+        text = r["detected"].replace("\u2013", "-")
+        m = RANGE_RE.match(text)
+        if m:
+            rs, re_ = int(m.group(1)), int(m.group(2))
+            for pg in range(rs, re_ + 1):
+                range_covered.add(pg)
             issues.append(
                 {
                     "page_number": rs,
@@ -479,26 +434,16 @@ def build_issues(
     # Maps a logical number to the first page_map entry that claimed it, so a
     # later repeat can back-flag that first entry too (every copy of a repeated
     # number is marked ``duplicate``, matching the duplicate_page issue's page
-    # list).
+    # list). ``extra_copy_indices`` tracks only the 2nd-and-later copies, whose
+    # logical numbers are unreliable and so are skipped when anchoring missing
+    # page placeholders. ``printed_indices`` tracks the pages that carry a
+    # real printed number; only those anchor a placeholder, since the
+    # ``logical = pdf_page`` fallback of an unnumbered page is display-only
+    # and would pull a gap near the start of a volume into the front
+    # matter (#83).
     seen_logical: dict[int, dict] = {}
-    # The pages that anchor missing page placeholders, as ``(position,
-    # (first, last), first_copy)``: the printed numbers a page carries, and
-    # whether it is the first copy of its number. Unnumbered and out-of-range
-    # pages are left out, since their ``logical = pdf_page`` is display-only
-    # and would pull a gap near the start of a volume into the front matter
-    # (#83), and so is a range label that covers no page ("6-4") or falls
-    # outside the volume's numbers (a year, "2021-2022"): the expected range
-    # when it is known, else the span of the printed numbers read, with the
-    # slack a single reading gets. The 2nd-and-later copies of a repeated
-    # number are unreliable, so a gap still sits before the first copy of
-    # the number above it (#55).
-    anchors: list[tuple[int, tuple[int, int], bool]] = []
-    if exp_start is not None and exp_end is not None:
-        span_start, span_end = exp_start, exp_end
-    elif all_nums:
-        span_start, span_end = all_nums[0], all_nums[-1]
-    else:
-        span_start = span_end = None
+    extra_copy_indices: set[int] = set()
+    printed_indices: set[int] = set()
 
     for r in analysis["results"]:
         pdf_idx = r["pdf_page"] - 1
@@ -508,56 +453,69 @@ def build_issues(
         # that placeholder must not be treated as a real page number, otherwise
         # unnumbered front matter (cover, tables, etc.) would "steal" the low
         # logical numbers and flag the real numbered pages as duplicates.
-        # "Genuinely detected" is ``_printed_number``, as in ``build_analysis``.
-        is_range = bool(r["detected"]) and r.get("type") == "range"
-        if is_range:
-            number = None
-            span = _parse_range(r["detected"])
-            if span and (
-                _outside_range(span[0], span_start, span_end)
-                or _outside_range(span[1], span_start, span_end)
-            ):
-                span = None
+        detected_single = False
+        if r["pdf_page"] in out_of_range_pages:
+            logical = r["pdf_page"]
+        elif r["detected"] and r["type"] == "single":
+            try:
+                logical = int(r["detected"])
+                detected_single = True
+            except ValueError:
+                logical = r["pdf_page"]
+        elif r["detected"] and r["type"] == "range":
+            logical = r["pdf_page"]
+            page_map.append(
+                {
+                    "type": "pdf_page",
+                    "pdf_index": pdf_idx,
+                    "logical_number": logical,
+                    "range_label": r["detected"],
+                }
+            )
+            continue
         else:
-            number = None if r["pdf_page"] in out_of_range_pages else _printed_number(r)
-            span = None if number is None else (number, number)
+            logical = r["pdf_page"]
 
         entry: dict = {
             "type": "pdf_page",
             "pdf_index": pdf_idx,
-            "logical_number": r["pdf_page"] if number is None else number,
+            "logical_number": logical,
         }
-        if is_range:
-            entry["range_label"] = r["detected"]
-        first_copy = True
-        if number is not None:
-            if number in seen_logical:
+        if detected_single:
+            printed_indices.add(pdf_idx)
+            if logical in seen_logical:
                 entry["duplicate"] = True
-                first_copy = False
+                extra_copy_indices.add(pdf_idx)
                 # Back-flag the first occurrence so every copy is marked.
-                seen_logical[number]["duplicate"] = True
+                seen_logical[logical]["duplicate"] = True
             else:
-                seen_logical[number] = entry
-        if span:
-            anchors.append((len(page_map), span, first_copy))
+                seen_logical[logical] = entry
         page_map.append(entry)
 
     # Insert missing page placeholders. A placeholder goes before the first
-    # page, in PDF order, whose first number is above its own, not counting
-    # the extra copies of a repeated number; an unnumbered page inside the
-    # gap therefore stays before it. With no such page (a gap past the last
-    # printed number) it goes right after the last copy of the greatest
-    # number below its own, so neither an unnumbered tail nor a stray low
-    # reading inside that tail carries it further; with neither, at the end.
+    # printed page above its number, so an unnumbered page inside the gap
+    # stays before it. With none (a gap past the last printed number) it goes
+    # right after the last copy of the greatest printed number below it, so an
+    # unnumbered tail does not carry it to the end; with neither, at the end.
     if actually_missing and all_nums:
+        printed = [
+            (i, entry) for i, entry in enumerate(page_map) if entry["pdf_index"] in printed_indices
+        ]
         inserts = []
         for gap_num in actually_missing:
             insert_pos = next(
-                (i for i, (first, _), first_copy in anchors if first_copy and first > gap_num),
+                (
+                    i
+                    for i, entry in printed
+                    if entry["logical_number"] > gap_num
+                    and entry["pdf_index"] not in extra_copy_indices
+                ),
                 None,
             )
             if insert_pos is None:
-                below = [(last, i) for i, (_, last), _ in anchors if last < gap_num]
+                below = [
+                    (e["logical_number"], i) for i, e in printed if e["logical_number"] < gap_num
+                ]
                 insert_pos = max(below)[1] + 1 if below else len(page_map)
             inserts.append((insert_pos, gap_num))
 
