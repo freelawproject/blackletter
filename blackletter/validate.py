@@ -436,9 +436,14 @@ def build_issues(
     # number is marked ``duplicate``, matching the duplicate_page issue's page
     # list). ``extra_copy_indices`` tracks only the 2nd-and-later copies, whose
     # logical numbers are unreliable and so are skipped when anchoring missing
-    # page placeholders.
+    # page placeholders. ``numbered_indices`` tracks the pages that carry a
+    # real printed number; only those anchor a placeholder, since the
+    # ``logical = pdf_page`` fallback of an unnumbered page is display-only
+    # and would pull a gap near the start of a volume into the front
+    # matter (#83).
     seen_logical: dict[int, dict] = {}
     extra_copy_indices: set[int] = set()
+    numbered_indices: set[int] = set()
 
     for r in analysis["results"]:
         pdf_idx = r["pdf_page"] - 1
@@ -477,6 +482,7 @@ def build_issues(
             "logical_number": logical,
         }
         if detected_single:
+            numbered_indices.add(pdf_idx)
             if logical in seen_logical:
                 entry["duplicate"] = True
                 extra_copy_indices.add(pdf_idx)
@@ -492,9 +498,11 @@ def build_issues(
         for gap_num in actually_missing:
             insert_pos = len(page_map)
             for i, entry in enumerate(page_map):
+                pdf_index = entry.get("pdf_index")
                 if (
-                    entry["logical_number"] > gap_num
-                    and entry.get("pdf_index") not in extra_copy_indices
+                    pdf_index in numbered_indices
+                    and pdf_index not in extra_copy_indices
+                    and entry["logical_number"] > gap_num
                 ):
                     insert_pos = i
                     break

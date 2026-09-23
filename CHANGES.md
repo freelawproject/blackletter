@@ -4,6 +4,8 @@
 
 The following changes are not yet released, but are code complete:
 
+- Fix `validate.build_issues` placing a missing-page placeholder in the front matter instead of at its gap. A placeholder for printed page N went before the first `page_map` entry whose `logical_number` was above N, but a page with no printed number (or an out-of-range reading) carries its PDF page number there as a display-only fallback, so when the unnumbered front matter ran longer than N the placeholder landed inside it. On scan 3156 of the scanning app (257 A.3d: 13 unnumbered pages, then 1–9 and 12 onward) the placeholders for 10 and 11 sat after PDF pages 10 and 11, not between PDF pages 22 and 23, and a consumer that addresses an upload or a repair request by the physical page a placeholder follows got a front-matter page. A placeholder now anchors only on an entry carrying a real printed number (the pages of `seen_nums`, still skipping the extra copies of a duplicate), and goes at the end when there is none, as before. Two placements move as a consequence: an unnumbered page inside a gap (9, unnumbered, 12) now stays before the placeholders rather than after them, and a number missing below the first printed one (when `exp_start` is given) now follows the front matter rather than sitting inside it. A volume without front matter gets the same `page_map` as before. `missing_pages` and the issues are unchanged. Scanning corrects the page map with a temporary helper (`services._place_missing_placeholders`) that can go once it raises its floor to this release (#83)
+
 ## Current
 
 0.4.2 (2026-09-17)
