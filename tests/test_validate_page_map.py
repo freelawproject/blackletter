@@ -372,7 +372,9 @@ class TestMissingPlaceholderPlacement:
             ("pdf", 3),
         ]
 
-    def test_inverted_range_label_raises_no_page_range_warning(self):
+    def test_inverted_range_label_is_a_suspicious_reading(self):
+        # No page_range warning claiming the page covers pages 6 to 4, but a
+        # suspicious_reading pointing at the page, so the culprit is named.
         results = [
             _page(1, "1"),
             _page(2, "2"),
@@ -383,6 +385,30 @@ class TestMissingPlaceholderPlacement:
         issues = build_issues(build_analysis(results), len(results))["issues"]
 
         assert not [i for i in issues if i["check_name"] == "page_range"]
+        suspicious = [i for i in issues if i["check_name"] == "suspicious_reading"]
+        assert [i["page_number"] for i in suspicious] == [3]
+
+    def test_range_outside_the_printed_numbers_does_not_anchor(self):
+        # Without an expected range, the span of the numbers read bounds a
+        # range anchor: a year span in a volume printed 1-5 is a stray.
+        results = [
+            _page(1, "1"),
+            _page(2, "2"),
+            {"pdf_page": 3, "detected": "2021-2022", "type": "range"},
+            _page(4, "3"),
+            _page(5, "5"),
+        ]
+
+        page_map = build_issues(build_analysis(results), len(results))["page_map"]
+
+        assert _layout(page_map) == [
+            ("pdf", 0),
+            ("pdf", 1),
+            ("pdf", 2),
+            ("pdf", 3),
+            ("missing", 4),
+            ("pdf", 4),
+        ]
 
     def test_range_outside_the_expected_range_does_not_anchor(self):
         # A year span misread as a range ("2021-2022") would anchor every
@@ -437,6 +463,7 @@ class TestMissingPlaceholderPlacement:
         result = build_issues(build_analysis(results), len(results))
 
         assert not [e for e in result["page_map"] if e.get("duplicate")]
+        assert not [i for i in result["issues"] if i["check_name"] == "duplicate_page"]
         assert result["page_map"][2]["logical_number"] == 3
         assert _layout(result["page_map"]) == [
             ("pdf", 0),

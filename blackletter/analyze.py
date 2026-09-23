@@ -546,7 +546,9 @@ def analyze_pdf(
         called after each page.
     :returns: Dict with keys ``total_pages``, ``results``,
         ``seq_issues``, ``duplicates``, ``seen_nums``, ``all_nums``,
-        ``missing_pages``, ``ranges_found``, and ``not_detected``.
+        ``missing_pages``, ``ranges_found``, ``not_detected`` and
+        ``out_of_range``, the last nine from
+        :func:`blackletter.validate.build_analysis`.
     """
     import fitz
 
@@ -595,69 +597,8 @@ def analyze_pdf(
                         len(results), total, f"Page {r['pdf_page']}/{total}: {detected}"
                     )
 
-    # Build mapping: page number → PDF page(s)
-    seen_nums: dict[int, list[int]] = {}
-    for r in results:
-        if not r["detected"] or r["type"] == "range":
-            continue
-        try:
-            num = int(r["detected"])
-        except ValueError:
-            continue
-        seen_nums.setdefault(num, []).append(r["pdf_page"])
+    # The sequence, duplicate and coverage findings are validate's; one
+    # implementation keeps this report and ``validate`` from disagreeing.
+    from blackletter.validate import build_analysis
 
-    # Sequence analysis
-    prev_num = None
-    prev_pdf = None
-    seq_issues = []
-    for r in results:
-        if not r["detected"] or r["type"] == "range":
-            prev_num = None
-            continue
-        try:
-            num = int(r["detected"])
-        except ValueError:
-            continue
-        if prev_num is not None:
-            diff = num - prev_num
-            if diff == 0:
-                seq_issues.append(("DUPLICATE", r["pdf_page"], num, prev_pdf, prev_num))
-            elif diff < 0:
-                seq_issues.append(("BACKWARD", r["pdf_page"], num, prev_pdf, prev_num))
-            elif diff > 2:
-                gap = list(range(prev_num + 1, num))
-                seq_issues.append(("GAP", r["pdf_page"], num, prev_pdf, prev_num, gap))
-        prev_num = num
-        prev_pdf = r["pdf_page"]
-
-    duplicates = {k: v for k, v in seen_nums.items() if len(v) > 1}
-    all_nums = sorted(seen_nums.keys())
-    ranges_found = [r for r in results if r["type"] == "range"]
-    missing_pages: list[int] = []
-
-    if exp_start is not None and exp_end is not None:
-        range_pages: set[int] = set()
-        for r in ranges_found:
-            m = RANGE_RE.match(r["detected"].replace("\u2013", "-"))
-            if m:
-                rs, re_ = int(m.group(1)), int(m.group(2))
-                for pg in range(rs, re_ + 1):
-                    range_pages.add(pg)
-        expected_set = set(range(exp_start, exp_end + 1))
-        actual_set = set(all_nums) | range_pages
-        missing_pages = sorted(expected_set - actual_set)
-    elif all_nums:
-        expected = set(range(all_nums[0], all_nums[-1] + 1))
-        missing_pages = sorted(expected - set(all_nums))
-
-    return {
-        "total_pages": total,
-        "results": results,
-        "seq_issues": seq_issues,
-        "duplicates": duplicates,
-        "seen_nums": seen_nums,
-        "all_nums": all_nums,
-        "missing_pages": missing_pages,
-        "ranges_found": ranges_found,
-        "not_detected": [r for r in results if not r["detected"]],
-    }
+    return {"total_pages": total, **build_analysis(results, exp_start, exp_end)}
