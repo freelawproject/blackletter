@@ -434,16 +434,15 @@ def build_issues(
     # Maps a logical number to the first page_map entry that claimed it, so a
     # later repeat can back-flag that first entry too (every copy of a repeated
     # number is marked ``duplicate``, matching the duplicate_page issue's page
-    # list). ``extra_copy_indices`` tracks only the 2nd-and-later copies, whose
-    # logical numbers are unreliable and so are skipped when anchoring missing
-    # page placeholders. ``numbered_indices`` tracks the pages that carry a
-    # real printed number; only those anchor a placeholder, since the
-    # ``logical = pdf_page`` fallback of an unnumbered page is display-only
-    # and would pull a gap near the start of a volume into the front
-    # matter (#83).
+    # list).
     seen_logical: dict[int, dict] = {}
-    extra_copy_indices: set[int] = set()
-    numbered_indices: set[int] = set()
+    # The printed numbers a page carries, ``(first, last)``, for the pages
+    # that anchor missing page placeholders: the first copy of each printed
+    # number and each range page. Unnumbered and out-of-range pages are left
+    # out, since their ``logical = pdf_page`` is display-only and would pull a
+    # gap near the start of a volume into the front matter (#83), and so are
+    # the 2nd-and-later copies of a repeated number, which are unreliable.
+    anchor_spans: dict[int, tuple[int, int]] = {}
 
     for r in analysis["results"]:
         pdf_idx = r["pdf_page"] - 1
@@ -453,26 +452,30 @@ def build_issues(
         # that placeholder must not be treated as a real page number, otherwise
         # unnumbered front matter (cover, tables, etc.) would "steal" the low
         # logical numbers and flag the real numbered pages as duplicates.
+        # "Genuinely detected" matches ``_split_in_out_of_range``: any reading
+        # that is not a range and parses as a number.
         detected_single = False
         if r["pdf_page"] in out_of_range_pages:
             logical = r["pdf_page"]
-        elif r["detected"] and r["type"] == "single":
+        elif r["detected"] and r.get("type") == "range":
+            m = RANGE_RE.match(r["detected"].replace("\u2013", "-"))
+            if m:
+                anchor_spans[pdf_idx] = (int(m.group(1)), int(m.group(2)))
+            page_map.append(
+                {
+                    "type": "pdf_page",
+                    "pdf_index": pdf_idx,
+                    "logical_number": r["pdf_page"],
+                    "range_label": r["detected"],
+                }
+            )
+            continue
+        elif r["detected"]:
             try:
                 logical = int(r["detected"])
                 detected_single = True
             except ValueError:
                 logical = r["pdf_page"]
-        elif r["detected"] and r["type"] == "range":
-            logical = r["pdf_page"]
-            page_map.append(
-                {
-                    "type": "pdf_page",
-                    "pdf_index": pdf_idx,
-                    "logical_number": logical,
-                    "range_label": r["detected"],
-                }
-            )
-            continue
         else:
             logical = r["pdf_page"]
 
@@ -482,33 +485,38 @@ def build_issues(
             "logical_number": logical,
         }
         if detected_single:
-            numbered_indices.add(pdf_idx)
             if logical in seen_logical:
                 entry["duplicate"] = True
-                extra_copy_indices.add(pdf_idx)
                 # Back-flag the first occurrence so every copy is marked.
                 seen_logical[logical]["duplicate"] = True
             else:
                 seen_logical[logical] = entry
+                anchor_spans[pdf_idx] = (logical, logical)
         page_map.append(entry)
 
-    # Insert missing page placeholders
+    # Insert missing page placeholders. A placeholder goes before the first
+    # anchor printed above its number, so an unnumbered page inside the gap
+    # stays before it. With no such anchor (a gap past the last printed
+    # number, followed by unnumbered pages) it goes right after the last
+    # anchor printed below it, not after the unnumbered tail; with no anchor
+    # at all, at the end.
     if actually_missing and all_nums:
+        anchors = [
+            (i, *anchor_spans[entry["pdf_index"]])
+            for i, entry in enumerate(page_map)
+            if entry.get("pdf_index") in anchor_spans
+        ]
         inserts = []
         for gap_num in actually_missing:
-            insert_pos = len(page_map)
-            for i, entry in enumerate(page_map):
-                pdf_index = entry.get("pdf_index")
-                if (
-                    pdf_index in numbered_indices
-                    and pdf_index not in extra_copy_indices
-                    and entry["logical_number"] > gap_num
-                ):
-                    insert_pos = i
-                    break
+            insert_pos = next((i for i, first, _ in anchors if first > gap_num), None)
+            if insert_pos is None:
+                below = [i for i, _, last in anchors if last < gap_num]
+                insert_pos = below[-1] + 1 if below else len(page_map)
             inserts.append((insert_pos, gap_num))
 
-        for pos, gap_num in reversed(inserts):
+        # Insert from the back so earlier positions stay valid; placeholders
+        # sharing a position keep ascending order.
+        for pos, gap_num in sorted(inserts, reverse=True):
             page_map.insert(pos, {"type": "missing", "logical_number": gap_num})
 
     return {

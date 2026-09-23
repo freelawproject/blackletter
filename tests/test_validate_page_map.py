@@ -210,9 +210,19 @@ class TestMissingPlaceholderPlacement:
         ]
 
     def test_out_of_range_reading_does_not_anchor_a_placeholder(self):
-        # A stray "900" read on a page inside the gap is out of range; its
-        # fallback number must not anchor the placeholders either.
-        results = [_page(1, "1"), _page(2, "2"), _page(3, "900"), _page(4, "5")]
+        # A stray "900" read on PDF page 6, inside the gap, is out of range.
+        # Its fallback number (6) is above both gap numbers, so under the old
+        # rule it anchored the placeholders in the middle of the gap's
+        # unnumbered pages; they belong before the page that carries 5.
+        results = [
+            _page(1, "1"),
+            _page(2, "2"),
+            _page(3),
+            _page(4),
+            _page(5),
+            _page(6, "900"),
+            _page(7, "5"),
+        ]
 
         page_map = build_issues(build_analysis(results, 1, 5), len(results), 1, 5)["page_map"]
 
@@ -220,7 +230,87 @@ class TestMissingPlaceholderPlacement:
             ("pdf", 0),
             ("pdf", 1),
             ("pdf", 2),
+            ("pdf", 3),
+            ("pdf", 4),
+            ("pdf", 5),
             ("missing", 3),
             ("missing", 4),
+            ("pdf", 6),
+        ]
+
+    def test_gap_past_the_last_printed_number_precedes_an_unnumbered_tail(self):
+        # Printed 1-5, then unnumbered appendix pages, and the volume should
+        # end at 7. No page printed above 6 exists, so the placeholders go
+        # right after the page that carries 5, not after the whole appendix.
+        results = [_page(p, str(p)) for p in range(1, 6)]
+        results += [_page(p) for p in range(6, 51)]
+
+        page_map = build_issues(build_analysis(results, 1, 7), len(results), 1, 7)["page_map"]
+
+        layout = _layout(page_map)
+        assert layout[4:7] == [("pdf", 4), ("missing", 6), ("missing", 7)]
+        assert layout[7:] == [("pdf", i) for i in range(5, 50)]
+
+    def test_range_page_anchors_by_its_first_number(self):
+        # Printed 1, 2, then a page labelled "4-6", then 7: page 3 is missing
+        # and goes before the range page, also behind front matter.
+        for leading in (0, 5):
+            results = [_page(p) for p in range(1, leading + 1)]
+            results += [
+                _page(leading + 1, "1"),
+                _page(leading + 2, "2"),
+                {"pdf_page": leading + 3, "detected": "4-6", "type": "range"},
+                _page(leading + 4, "7"),
+            ]
+            page_map = build_issues(build_analysis(results), len(results))["page_map"]
+
+            assert _layout(page_map)[leading:] == [
+                ("pdf", leading),
+                ("pdf", leading + 1),
+                ("missing", 3),
+                ("pdf", leading + 2),
+                ("pdf", leading + 3),
+            ]
+
+    def test_range_page_anchors_a_gap_past_it_by_its_last_number(self):
+        # Printed 1, 2, then "3-5" and an unnumbered tail; the volume should
+        # end at 6. The placeholder follows the range page.
+        results = [
+            _page(1, "1"),
+            _page(2, "2"),
+            {"pdf_page": 3, "detected": "3-5", "type": "range"},
+            _page(4),
+            _page(5),
+        ]
+
+        page_map = build_issues(build_analysis(results, 1, 6), len(results), 1, 6)["page_map"]
+
+        assert _layout(page_map) == [
+            ("pdf", 0),
+            ("pdf", 1),
+            ("pdf", 2),
+            ("missing", 6),
+            ("pdf", 3),
+            ("pdf", 4),
+        ]
+
+    def test_number_without_a_type_is_a_printed_number(self):
+        # ``build_analysis`` counts a number whose ``type`` is not set; the
+        # page map treats it as printed too, so it anchors the gap before it.
+        results = [
+            _page(1, "1"),
+            _page(2, "2"),
+            {"pdf_page": 3, "detected": "4", "type": None},
+            _page(4, "5"),
+        ]
+
+        page_map = build_issues(build_analysis(results), len(results))["page_map"]
+
+        assert _layout(page_map) == [
+            ("pdf", 0),
+            ("pdf", 1),
+            ("missing", 3),
+            ("pdf", 2),
             ("pdf", 3),
         ]
+        assert page_map[3]["logical_number"] == 4
