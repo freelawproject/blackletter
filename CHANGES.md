@@ -4,10 +4,14 @@
 
 The following changes are not yet released, but are code complete:
 
+## Current
+
+0.4.3 (2026-09-23)
+
 - **Behaviour change:** fix `validate.build_issues` placing a missing-page placeholder in the front matter instead of at its gap. A placeholder for printed page N went before the first `page_map` entry whose `logical_number` was above N, but a page with no printed number, an out-of-range reading and a range page all carry their PDF page number there as a display-only fallback, so when the unnumbered front matter ran longer than N the placeholder landed inside it. On scan 3156 of the scanning app (257 A.3d: 13 unnumbered pages, then 1–9 and 12 onward) the placeholders for 10 and 11 sat after PDF pages 10 and 11, not between PDF pages 22 and 23. Only pages with a single printed number now anchor a placeholder. It goes before the first such page printed above N, skipping the 2nd-and-later copies of a repeated number as before; when there is none, right after the last copy of the greatest number printed below N, so an unnumbered tail after the last printed page does not carry it to the end; and with neither, at the end. Placements that move besides the front-matter case: an unnumbered page, range page or out-of-range reading inside a gap now stays before the placeholders; a number missing below the first printed one (with `exp_start`) now follows the front matter; and a number missing past the last printed one now follows the page carrying the greatest number below it. A volume whose pages all carry a single in-range printed number in ascending order, duplicates included, gets the same `page_map` as before, and `missing_pages` and the issues are unchanged (#83)
 - **Scanning, before raising its floor to this release:** open inserts and repair requests are stored by `anchor_pdf_page`, the physical page the placeholder follows, and `repairs.project_requests` draws its own placeholder at that stored anchor for any INSERT request no `missing` entry covers. So on a volume where a placeholder moves, an open request made under the old placement does not vanish: it shows a second placeholder for the same printed number at the old anchor, in the front matter on a #83-shaped volume. Scanning should re-anchor those rows as part of the upgrade. Separately, a short trailing gap (6 pages or fewer) now sits right after the page carrying the greatest printed number below it, while scanning's `_project_trailing_gap` appends its placeholder for a collapsed trailing run at the very end, after any unnumbered tail; the two rules should be aligned on the scanning side (#83)
 
-## Current
+## Past
 
 0.4.2 (2026-09-17)
 
@@ -18,8 +22,6 @@ The following changes are not yet released, but are code complete:
 - Add `"files"` and `"failed"` to `api.generate`'s result. `files` holds one entry per input opinion, in input order: the path of its redacted file, or `None` if it was not written, so a caller no longer re-derives a name it passed in over a `sorted(glob)`. A fault inside the loop — an `insert_pdf` past the last page, a rect PyMuPDF refuses — used to raise and end the call with the earlier opinions' files on disk and the later ones missing, with nothing to say which was which; it is now caught per opinion, logged with its traceback, named in `failed` as `{"index", "error"}`, and any partial file it left behind is removed. Only a fault of the whole call still raises: a source PDF that will not open, or a payload with no `opinions` or no `pages`, which now raise `ValueError` with a readable message rather than `KeyError` (#81)
 - Add `image_for` to `api.generate`, an optional `callable(page_index, rect) -> bytes | None` asked for the picture belonging in each rect of a new optional top-level `"images"` key on the payload (`{"<page index>": [{"x0", "y0", "x1", "y1"}]}`, in PDF points). The bytes are inserted over that rect before the redactions are painted, so a rect covering part of a picture still blacks it out, and `None` leaves the rect as it is. A consumer whose base PDF is a bitonal copy — which destroys a photograph — previously stamped the pictures into a saved copy of the source before the call; it can now render them on demand from whichever file holds the page at full quality. Keeping it a callable keeps that file, and the page alignment only the caller knows, out of this library. Pictures are placed on the full redacted pass as well as the per-opinion files, and not on the `unredacted/` copies (#81)
 - `api.generate`'s `progress_callback` now also fires once per opinion, as `(index + 1, opinion_count, "Writing opinion PDFs...")`. It fired only inside the full redacted pass, so a caller passing `full_redacted=False` would never have heard from it (#81)
-
-## Past
 
 0.4.1 (2026-09-16)
 
