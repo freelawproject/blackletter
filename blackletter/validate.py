@@ -436,9 +436,14 @@ def build_issues(
     # number is marked ``duplicate``, matching the duplicate_page issue's page
     # list). ``extra_copy_indices`` tracks only the 2nd-and-later copies, whose
     # logical numbers are unreliable and so are skipped when anchoring missing
-    # page placeholders.
+    # page placeholders. ``printed_indices`` tracks the pages that carry a
+    # real printed number; only those anchor a placeholder, since the
+    # ``logical = pdf_page`` fallback of an unnumbered page is display-only
+    # and would pull a gap near the start of a volume into the front
+    # matter (#83).
     seen_logical: dict[int, dict] = {}
     extra_copy_indices: set[int] = set()
+    printed_indices: set[int] = set()
 
     for r in analysis["results"]:
         pdf_idx = r["pdf_page"] - 1
@@ -477,6 +482,7 @@ def build_issues(
             "logical_number": logical,
         }
         if detected_single:
+            printed_indices.add(pdf_idx)
             if logical in seen_logical:
                 entry["duplicate"] = True
                 extra_copy_indices.add(pdf_idx)
@@ -486,21 +492,36 @@ def build_issues(
                 seen_logical[logical] = entry
         page_map.append(entry)
 
-    # Insert missing page placeholders
+    # Insert missing page placeholders. A placeholder goes before the first
+    # printed page above its number, so an unnumbered page inside the gap
+    # stays before it. With none (a gap past the last printed number) it goes
+    # right after the last copy of the greatest printed number below it, so an
+    # unnumbered tail does not carry it to the end; with neither, at the end.
     if actually_missing and all_nums:
+        printed = [
+            (i, entry) for i, entry in enumerate(page_map) if entry["pdf_index"] in printed_indices
+        ]
         inserts = []
         for gap_num in actually_missing:
-            insert_pos = len(page_map)
-            for i, entry in enumerate(page_map):
-                if (
-                    entry["logical_number"] > gap_num
-                    and entry.get("pdf_index") not in extra_copy_indices
-                ):
-                    insert_pos = i
-                    break
+            insert_pos = next(
+                (
+                    i
+                    for i, entry in printed
+                    if entry["logical_number"] > gap_num
+                    and entry["pdf_index"] not in extra_copy_indices
+                ),
+                None,
+            )
+            if insert_pos is None:
+                below = [
+                    (e["logical_number"], i) for i, e in printed if e["logical_number"] < gap_num
+                ]
+                insert_pos = max(below)[1] + 1 if below else len(page_map)
             inserts.append((insert_pos, gap_num))
 
-        for pos, gap_num in reversed(inserts):
+        # Insert from the back so earlier positions stay valid; placeholders
+        # sharing a position keep ascending order.
+        for pos, gap_num in sorted(inserts, reverse=True):
             page_map.insert(pos, {"type": "missing", "logical_number": gap_num})
 
     return {
