@@ -1965,6 +1965,9 @@ def rebuild_full_redacted_from_detections(
         ocr_applied=True,
         bl_warm=rows_are_bl_warm(raw),
     )
+    from blackletter.junk import drop_junk
+
+    drop_junk(document)
     snap_document_columns(document)
 
     opinions = _pair_opinions(document, excluded=excluded)
@@ -2071,6 +2074,9 @@ def generate_files(
         ocr_applied=True,
         bl_warm=rows_are_bl_warm(raw),
     )
+    from blackletter.junk import drop_junk
+
+    drop_junk(document)
     snap_document_columns(document)
 
     # Pair opinions

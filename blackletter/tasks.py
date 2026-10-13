@@ -424,6 +424,9 @@ def pair_and_compute_rects(
         ocr_applied=True,
         bl_warm=rows_are_bl_warm(raw),
     )
+    from blackletter.junk import drop_junk
+
+    drop_junk(document)
     snap_document_columns(document)
 
     # Pair
