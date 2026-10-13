@@ -19,7 +19,7 @@ from PIL import Image
 
 from blackletter import ink
 from blackletter.bl_warm import is_bl_warm, iter_label_rows
-from blackletter.models import BBox, Detection, Document, Label, Page
+from blackletter.models import BBox, CaptionMarker, Detection, Document, Label, Page
 
 if TYPE_CHECKING:
     from ultralytics import YOLO
@@ -997,6 +997,36 @@ def draw_detections(
     return output_path
 
 
+#: The labels of the head matter that follows a caption: the synopsis,
+#: a headnote, the divider or the metadata. A caption box past the first
+#: of them after a key is a box over the body, not a caption.
+HEAD_MATTER_LABELS = frozenset(
+    {Label.BACKGROUND, Label.HEADNOTE, Label.DIVIDER, Label.CASE_METADATA}
+)
+
+
+def key_icons(detections, bl_warm: bool = False) -> list[Detection]:
+    """Return the boxes that are key icons.
+
+    **The one rule for "this box is a key icon"**, read by the pairing
+    and by any consumer that asks the question of its own rows: a
+    ``KEY_ICON`` box at or above the gate for the family that drew it
+    (:func:`label_confidence`), whose size is a key's
+    (:func:`_filter_key_icons_by_size`, which measures every box against
+    the median of the volume's, so it runs over the whole volume at
+    once). A sliver the model draws along a page edge, the ghost of the
+    facing page's icon, is neither: it closes no opinion.
+
+    :param detections: Detections of any label, in one pixel space; the
+        whole volume's, so the median is the volume's.
+    :param bl_warm: Whether bl-warm drew them, the gate's family.
+    :returns: The key icons among them, in the order given.
+    """
+    gate = label_confidence(Label.KEY_ICON, bl_warm)
+    keys = [d for d in detections if d.label == Label.KEY_ICON and d.confidence >= gate]
+    return [d for d in _filter_key_icons_by_size(keys) if d.label == Label.KEY_ICON]
+
+
 def _pair_opinions(
     document: Document,
     excluded: set[tuple[int, int, int, int]] | None = None,
@@ -1004,15 +1034,24 @@ def _pair_opinions(
     """Pair each CASE_CAPTION with the next KEY_ICON in reading order.
 
     Key icons are the reliable anchor. After each key icon, the first
-    caption that follows starts the next opinion. Only the first caption
-    after a key icon is used; subsequent captions before the next key
-    icon are ignored to avoid false-positive splits.
+    caption at or above its gate that follows starts the next opinion.
+    Only the first caption after a key icon is used; subsequent captions
+    before the next key icon are ignored to avoid false-positive splits.
+
+    A key this pass leaves unmatched is then paired on the key before it
+    (:func:`_pair_on_keys_before`): an opinion starts at a caption box,
+    at any confidence, and ends at a key, and a key with no caption box
+    after the key before it closes no opinion of its own, so the opinion
+    before runs on to it. The miss is shown, never covered: no start is
+    invented where the model boxed none.
 
     :param document: Document with pages and detections.
     :param excluded: Optional set of (page_index, label_id,
         round(bbox_x1), round(bbox_y1)) tuples to suppress specific
         detections.
-    :returns: List of (caption, key) detection pairs.
+    :returns: List of (caption, key) detection pairs, in reading order.
+        A caption paired on the key before is a
+        :class:`~blackletter.models.CaptionMarker`.
     """
 
     def _is_excluded(d):
@@ -1022,20 +1061,18 @@ def _pair_opinions(
         return []
 
     caption_thresh = label_confidence(Label.CASE_CAPTION, document.bl_warm)
-    key_thresh = label_confidence(Label.KEY_ICON, document.bl_warm)
 
     captions: list[Detection] = []
-    all_keys: list[Detection] = []
+    kept: list[Detection] = []
     for page in document.pages:
         for d in page.detections:
             if _is_excluded(d):
                 continue
+            kept.append(d)
             if d.label == Label.CASE_CAPTION and d.confidence >= caption_thresh:
                 captions.append(d)
-            elif d.label == Label.KEY_ICON and d.confidence >= key_thresh:
-                all_keys.append(d)
 
-    keys = [d for d in _filter_key_icons_by_size(all_keys) if d.label == Label.KEY_ICON]
+    keys = key_icons(kept, document.bl_warm)
 
     mid = document.pages[0].midpoint
     markers = [(d, "C") for d in captions] + [(d, "K") for d in keys]
@@ -1052,7 +1089,172 @@ def _pair_opinions(
             opinions.append((pending_caption, det))
             pending_caption = None
 
+    opinions, rescued, extended = _pair_on_keys_before(document, opinions, excluded)
+    if rescued or extended:
+        logger.info(
+            "%d opinion(s) paired on the key icon before them, %d ran on past a "
+            "key with no caption box after it",
+            rescued,
+            extended,
+        )
     return opinions
+
+
+def in_a_column(detection: Detection, columns: list[BBox] | None) -> bool:
+    """Return whether a box's centre lies inside one of a page's column boxes.
+
+    A page with no column box (``None`` or empty) vouches for every box,
+    because the question cannot be asked there.
+
+    :param detection: The box.
+    :param columns: The ``TEXT_COLUMN`` boxes of its page, or None.
+    :returns: Whether the box is in a column.
+    """
+    if not columns:
+        return True
+    cx, cy = detection.bbox.center_x, detection.bbox.center_y
+    return any(c.x1 <= cx <= c.x2 and c.y1 <= cy <= c.y2 for c in columns)
+
+
+def _pair_on_keys_before(
+    document: Document,
+    pairs: list[tuple[Detection, Detection]],
+    excluded: set[tuple[int, int, int, int]] | None = None,
+) -> tuple[list[tuple[Detection, Detection]], int, int]:
+    """Pair the key icons the gate pairing left unmatched, on one rule.
+
+    A key icon closes an opinion, and the next opinion starts right
+    after it: a reporter skips no pages. An opinion starts at a caption
+    box, at any confidence the model kept, and nowhere else. The gate
+    pairing pairs a key with the first caption at or above its gate
+    since the key before, so a key whose caption the model boxed under
+    the gate, or boxed in one column of two, closes no opinion, and its
+    pages read as uncovered and its headnotes as exposed.
+
+    For each such key with a key before it, the caption's place is from
+    the key before to the first box of the head matter after it
+    (:data:`HEAD_MATTER_LABELS`), or to this key when the model boxed
+    none of those: a caption box past the synopsis is a box over the
+    body, not a caption.
+
+    - a caption box in that place: the opinion starts just under the key
+      before, in its column, and the caption runs from there to the
+      synopsis, whatever the model made of it. The pair's caption is a
+      :class:`~blackletter.models.CaptionMarker` there, one pixel tall,
+      that names the box, so the slice of the opinion and the headnote
+      geometry read from that point;
+    - no caption box: the model missed the caption, and no opinion
+      starts. The opinion that closed last runs on to this key. The
+      miss stays visible until a person draws the box: a start invented
+      here would hide it, and the rule would then differ from one page
+      to the next.
+
+    The first key of a volume has no key before it: it is paired on
+    such a box, at the box, and left unmatched without one, like a key
+    before which no opinion closed. Two boxes over one icon are one
+    key: a key less than its own height under the one before, on the
+    same page and column, is skipped.
+
+    The gate pass asks the model's confidence to vouch for a caption
+    box; this pass takes any confidence, so it asks the column instead
+    (:func:`in_a_column`): a caption is always inside a text column,
+    and a faint box outside every column box of its page is a footnote
+    or a blot the model called a caption. On page 1242 of 175 N.E.3d
+    the footnote "1. Steven Silva." at the foot of the left column, a
+    0.38 caption, was taken for the caption of the order at the top of
+    the right column, and the caption the model had missed there was
+    asked for by no card. A page with no column box keeps every box.
+
+    :param document: The document.
+    :param pairs: The gate pairing's own pairs.
+    :param excluded: The detections to suppress, as :func:`_pair_opinions`
+        takes them.
+    :returns: Every ``(caption, key)`` pair in reading order, how many
+        were paired on a marker, and how many opinions ran on.
+    """
+    result = list(pairs)
+    if not document.pages:
+        return result, 0, 0
+    mid = document.pages[0].midpoint
+    kept = [
+        d for page in document.pages for d in page.detections if not _check_excluded(d, excluded)
+    ]
+    keys = sorted(key_icons(kept, document.bl_warm), key=lambda d: d.sort_key(mid))
+    columns: dict[int, list[BBox]] = {}
+    for d in kept:
+        if d.label == Label.TEXT_COLUMN:
+            columns.setdefault(d.page_index, []).append(d.bbox)
+    captions = sorted(
+        (
+            d
+            for d in kept
+            if d.label == Label.CASE_CAPTION and in_a_column(d, columns.get(d.page_index))
+        ),
+        key=lambda d: d.sort_key(mid),
+    )
+    head_matter = sorted(d.sort_key(mid) for d in kept if d.label in HEAD_MATTER_LABELS)
+    ends = {id(key) for _, key in result}
+    rescued = extended = 0
+    for i, key in enumerate(keys):
+        if id(key) in ends:
+            continue
+        before = keys[i - 1] if i else None
+        low = before.sort_key(mid) if before else None
+        high = key.sort_key(mid)
+        limit = next((m for m in head_matter if (low is None or m > low) and m < high), high)
+        box = next(
+            (
+                c
+                for c in captions
+                if (low is None or c.sort_key(mid) > low) and c.sort_key(mid) < limit
+            ),
+            None,
+        )
+        if before is None:
+            if box is not None:
+                result.append((box, key))
+                ends.add(id(key))
+            continue
+        same_column = (before.bbox.center_x < mid) == (key.bbox.center_x < mid)
+        if (
+            before.page_index == key.page_index
+            and same_column
+            and key.bbox.y1 - before.bbox.y2 < before.bbox.height
+        ):
+            continue
+        if box is None:
+            # The opinion that closed last runs on to this key.
+            earlier = [
+                (k.sort_key(mid), index)
+                for index, (_, k) in enumerate(result)
+                if k.sort_key(mid) < high
+            ]
+            if not earlier:
+                continue
+            _, index = max(earlier)
+            caption, closed = result[index]
+            result[index] = (caption, key)
+            ends.discard(id(closed))
+            ends.add(id(key))
+            extended += 1
+            continue
+        marker = CaptionMarker(
+            bbox=BBox(
+                x1=before.bbox.x1,
+                y1=before.bbox.y2 + 1,
+                x2=before.bbox.x2,
+                y2=before.bbox.y2 + 2,
+            ),
+            label=Label.CASE_CAPTION,
+            confidence=0.0,
+            page_index=before.page_index,
+            box=box,
+        )
+        result.append((marker, key))
+        ends.add(id(key))
+        rescued += 1
+    result.sort(key=lambda p: p[0].sort_key(mid))
+    return result, rescued, extended
 
 
 _WORD_CACHE_ATTR = "_blackletter_word_cache"

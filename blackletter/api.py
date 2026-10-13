@@ -668,6 +668,7 @@ def pair(
     from blackletter.bl_warm import rows_are_bl_warm
     from blackletter.models import Detection as BLDetection, Document, Page
     from blackletter.scanner import _pair_opinions, snap_document_columns
+    from blackletter.junk import drop_junk
 
     pdf_path = Path(pdf_path)
 
@@ -714,6 +715,7 @@ def pair(
             ocr_applied=True,
             bl_warm=rows_are_bl_warm(raw),
         )
+        drop_junk(document)
         snap_document_columns(document)
 
         # Pair
@@ -848,10 +850,12 @@ def build_redacted(
             )
 
     from blackletter.scanner import snap_document_columns
+    from blackletter.junk import drop_junk
 
     document = Document(
         pdf_path=pdf_path, pages=pages, ocr_applied=True, bl_warm=rows_are_bl_warm(det_data)
     )
+    drop_junk(document)
     snap_document_columns(document)
 
     # Build scan name

@@ -226,6 +226,24 @@ class Detection:
         return (self.page_index, col_ord, self.bbox.y1)
 
 
+@dataclass(frozen=True, slots=True)
+class CaptionMarker(Detection):
+    """The start of an opinion paired on the key icon before it.
+
+    ``scanner._pair_on_keys_before`` pairs a key the gate pairing left
+    unmatched on the caption box in the caption's place after the key
+    before, and starts the opinion just under that key, in its column:
+    a caption can span two columns and the model boxes one, so the box
+    itself is not where the opinion starts. The marker is that start,
+    one pixel tall, a ``CASE_CAPTION`` at confidence 0; ``box`` is the
+    caption box it stands for, so a caller that keys its own rows by
+    the detection objects (the scanning app's boundary rows name the
+    caption's row) can follow the marker to the box.
+    """
+
+    box: Detection | None = None
+
+
 @dataclass
 class Page:
     """A page in the document with its dimensions and detections."""
