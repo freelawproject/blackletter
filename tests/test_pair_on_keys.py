@@ -70,6 +70,34 @@ class TestAKeyWithACaptionUnderTheGate:
         assert pairs == [(c1, k2)]
 
 
+class TestTheColumnVouchesForAFaintCaption:
+    def test_a_faint_box_below_the_column_is_no_caption(self):
+        # The footnote at the foot of the left column, called a caption
+        # at 0.38: outside the column box, so the opinion before runs on.
+        column = detection(Label.TEXT_COLUMN, 80, 60, 300, 600)
+        c1, k1 = caption(LEFT, 100), key(LEFT, 400)
+        footnote = caption(LEFT, 620, confidence=0.38)
+        k2 = key(LEFT, 700)
+        pairs = _pair_opinions(document(detected_page([column, c1, k1, footnote, k2])))
+        assert pairs == [(c1, k2)]
+
+    def test_a_faint_box_inside_the_column_pairs(self):
+        column = detection(Label.TEXT_COLUMN, 80, 60, 300, 760)
+        c1, k1 = caption(LEFT, 100), key(LEFT, 400)
+        faint = caption(LEFT, 450, confidence=0.38)
+        k2 = key(LEFT, 700)
+        pairs = _pair_opinions(document(detected_page([column, c1, k1, faint, k2])))
+        assert [type(c) for c, _ in pairs] == [type(c1), CaptionMarker]
+        assert pairs[1][0].box is faint
+
+    def test_a_page_with_no_column_box_keeps_every_box(self):
+        c1, k1 = caption(LEFT, 100), key(LEFT, 400)
+        faint = caption(LEFT, 620, confidence=0.38)
+        k2 = key(LEFT, 700)
+        pairs = _pair_opinions(document(detected_page([c1, k1, faint, k2])))
+        assert pairs[1][0].box is faint
+
+
 class TestAKeyWithNoCaption:
     def test_the_opinion_before_runs_on_to_it(self):
         c1, k1, k2 = caption(LEFT, 100), key(LEFT, 400), key(LEFT, 700)

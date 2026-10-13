@@ -1100,6 +1100,22 @@ def _pair_opinions(
     return opinions
 
 
+def in_a_column(detection: Detection, columns: list[BBox] | None) -> bool:
+    """Return whether a box's centre lies inside one of a page's column boxes.
+
+    A page with no column box (``None`` or empty) vouches for every box,
+    because the question cannot be asked there.
+
+    :param detection: The box.
+    :param columns: The ``TEXT_COLUMN`` boxes of its page, or None.
+    :returns: Whether the box is in a column.
+    """
+    if not columns:
+        return True
+    cx, cy = detection.bbox.center_x, detection.bbox.center_y
+    return any(c.x1 <= cx <= c.x2 and c.y1 <= cy <= c.y2 for c in columns)
+
+
 def _pair_on_keys_before(
     document: Document,
     pairs: list[tuple[Detection, Detection]],
@@ -1139,6 +1155,16 @@ def _pair_on_keys_before(
     key: a key less than its own height under the one before, on the
     same page and column, is skipped.
 
+    The gate pass asks the model's confidence to vouch for a caption
+    box; this pass takes any confidence, so it asks the column instead
+    (:func:`in_a_column`): a caption is always inside a text column,
+    and a faint box outside every column box of its page is a footnote
+    or a blot the model called a caption. On page 1242 of 175 N.E.3d
+    the footnote "1. Steven Silva." at the foot of the left column, a
+    0.38 caption, was taken for the caption of the order at the top of
+    the right column, and the caption the model had missed there was
+    asked for by no card. A page with no column box keeps every box.
+
     :param document: The document.
     :param pairs: The gate pairing's own pairs.
     :param excluded: The detections to suppress, as :func:`_pair_opinions`
@@ -1154,8 +1180,16 @@ def _pair_on_keys_before(
         d for page in document.pages for d in page.detections if not _check_excluded(d, excluded)
     ]
     keys = sorted(key_icons(kept, document.bl_warm), key=lambda d: d.sort_key(mid))
+    columns: dict[int, list[BBox]] = {}
+    for d in kept:
+        if d.label == Label.TEXT_COLUMN:
+            columns.setdefault(d.page_index, []).append(d.bbox)
     captions = sorted(
-        (d for d in kept if d.label == Label.CASE_CAPTION),
+        (
+            d
+            for d in kept
+            if d.label == Label.CASE_CAPTION and in_a_column(d, columns.get(d.page_index))
+        ),
         key=lambda d: d.sort_key(mid),
     )
     head_matter = sorted(d.sort_key(mid) for d in kept if d.label in HEAD_MATTER_LABELS)
