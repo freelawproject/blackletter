@@ -87,6 +87,7 @@ Blackletter uses three YOLO models, selected via CLI flags:
 | `--medium` | `medium.pt` | 17 | Better structural detection |
 | `--large` | `large.pt` | 21 | Highest accuracy, detects additional elements (editorial, judges, docket, court, citation, date) |
 | `--bl-warm` | `bl_warm.pt` | 18 | Single replacement model for the trio; adds heading and blockquote, drops judges, docket, date, court, citation |
+| `--model bl_hein.pt` | `bl_hein.pt` | 18 | bl-warm retrained on Hein-format pages (1-bit, 300 dpi, page-cropped); same classes, adapter and confidence gates as bl-warm |
 
 The models are hosted at [freelawproject/blackletter-weights](https://huggingface.co/freelawproject/blackletter-weights) and are downloaded automatically to `blackletter/weights/` on first use, keeping the package itself small.
 

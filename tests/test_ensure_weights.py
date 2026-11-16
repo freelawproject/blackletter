@@ -56,7 +56,7 @@ class TestPresentWeights:
 
 
 class TestMissingWeightsDownload:
-    @pytest.mark.parametrize("name", ["small", "medium", "large"])
+    @pytest.mark.parametrize("name", ["small", "medium", "large", "bl_warm", "bl_hein"])
     def test_missing_weight_downloads_from_hf(self, tmp_path, monkeypatch, name):
         """A missing weight triggers a HF download from the weights repo."""
         fake_pkg = _fake_package(tmp_path, monkeypatch)

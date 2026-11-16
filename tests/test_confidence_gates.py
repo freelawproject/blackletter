@@ -91,6 +91,14 @@ class TestRowsAreBlWarm:
         rows = [{"found_by": [{"model": "bl_warm", "confidence": 0.9}]}]
         assert rows_are_bl_warm(rows)
 
+    def test_bl_hein_rows_take_the_bl_warm_gates(self):
+        assert rows_are_bl_warm([{"found_by": [{"model": "bl_hein", "confidence": 0.9}]}])
+        assert rows_are_bl_warm([{"model": "bl_hein"}, {"model": "bl_warm"}])
+
+    def test_bl_hein_mixed_with_a_legacy_model_keeps_the_legacy_gates(self):
+        rows = [{"model": "bl_hein"}, {"model": "medium"}]
+        assert not rows_are_bl_warm(rows)
+
     def test_a_mixed_run_keeps_the_legacy_gates(self):
         rows = [
             {"found_by": [{"model": "bl_warm", "confidence": 0.9}]},
@@ -143,6 +151,18 @@ class TestBitonalIsRefusedForBlWarm:
             cmd_process(self._args(tmp_path))
         assert exc.value.code == 1
         assert "--bitonal cannot be combined with bl-warm" in capsys.readouterr().err
+
+    def test_bl_hein_with_bitonal_is_left_alone(self, tmp_path, monkeypatch):
+        """bl_hein was trained on 1-bit pages, so the guard lets it by."""
+        from blackletter.process import cmd_process
+
+        self._stub_yolo(monkeypatch, {0: "keycite", 1: "body"})
+        args = self._args(tmp_path)
+        args.model = tmp_path / "bl_hein.pt"
+        args.model.touch()
+        with pytest.raises(Exception) as exc:
+            cmd_process(args)
+        assert not isinstance(exc.value, SystemExit)
 
     def test_a_legacy_model_with_bitonal_is_left_alone(self, tmp_path, monkeypatch):
         """It gets past the guard; the run then fails on the missing PDF."""

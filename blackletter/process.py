@@ -11,7 +11,12 @@ from pathlib import Path
 import fitz
 
 from blackletter import ink
-from blackletter.bl_warm import is_bl_warm, iter_label_rows, rows_are_bl_warm
+from blackletter.bl_warm import (
+    BITONAL_TRAINED_MODELS,
+    is_bl_warm,
+    iter_label_rows,
+    rows_are_bl_warm,
+)
 from blackletter.models import BBox, Detection, Label
 from blackletter.refine import refine_headnote_rects
 from blackletter.scanner import (
@@ -1370,11 +1375,17 @@ def cmd_process(args: argparse.Namespace) -> None:
     # (body/TEXT_COLUMN above all, which the column split and every rect
     # read off it depend on) collapse on 1-bit input. Detecting on the
     # bitonal copy would degrade the run silently, so refuse the pair.
-    if getattr(args, "bitonal", False) and is_bl_warm(model.names):
+    # bl_hein shares the class set but was trained on 1-bit pages, so it
+    # is told apart by weight name and let through.
+    if (
+        getattr(args, "bitonal", False)
+        and is_bl_warm(model.names)
+        and model_path.stem not in BITONAL_TRAINED_MODELS
+    ):
         print(
             "Error: --bitonal cannot be combined with bl-warm. bl-warm detects on "
             "the original PDF; its large region classes collapse on 1-bit input. "
-            "Drop --bitonal, or use --model small.pt/medium.pt/large.pt.",
+            "Drop --bitonal, or use --model small.pt/medium.pt/large.pt/bl_hein.pt.",
             file=sys.stderr,
         )
         sys.exit(1)

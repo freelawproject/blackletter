@@ -34,7 +34,7 @@ from pathlib import Path
 
 import fitz
 
-from blackletter.bl_warm import iter_label_rows
+from blackletter.bl_warm import BL_WARM_MODELS, iter_label_rows
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +69,11 @@ _HF_WEIGHTS: dict[str, tuple[str, str, str]] = {
         "freelawproject/blackletter-weights",
         "bl_warm.pt",
         "ee34c6c625dc2d2f49d389946922a5e3861af098",
+    ),
+    "bl_hein": (
+        "freelawproject/blackletter-weights",
+        "bl_hein.pt",
+        "b83b3d386d7d6e2d83e3d58b78bf56b8d4cf00d4",
     ),
 }
 
@@ -549,12 +554,12 @@ def detect(
 
     # Merge across models with label-specific strategies:
     #   CASE_CAPTION, KEY_ICON: trusted models only (large hallucinates;
-    #     of the legacy trio only medium is trusted — bl_warm is trusted
-    #     as a single model)
+    #     of the legacy trio only medium is trusted — the bl-warm family
+    #     (bl_warm, bl_hein) is trusted as a single model)
     #   CASE_SEQUENCE: all models, overlaps keep smallest box
     #   Everything else: all models, overlaps keep highest confidence
     MEDIUM_ONLY = {"CASE_CAPTION", "KEY_ICON"}
-    TRUSTED_CAPTION_MODELS = {"medium", "bl_warm"}
+    TRUSTED_CAPTION_MODELS = {"medium", *BL_WARM_MODELS}
     SMALLEST_BOX = {"CASE_SEQUENCE"}
 
     # The startswith clause is deliberate, not redundant with the set
