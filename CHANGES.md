@@ -2,6 +2,8 @@
 
 ## Coming up
 
+- Make the code pass ruff v0.16.10, which the pre-commit update switched the linter to and which flags more by default: sorted imports and `__all__`, plus 28 findings fixed by hand. No behaviour change, with two visible edges: the OCR fallbacks in `blackletter.analyze` that swallowed an engine's fault silently now log it at DEBUG with the traceback, and the ERROR line `api.generate` logs for a failed opinion no longer repeats the exception text that its traceback already carries.
+
 ## Current
 
 0.4.4 (2026-10-13)

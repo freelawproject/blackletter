@@ -29,16 +29,16 @@ if TYPE_CHECKING:
     from blackletter.validate import validate
 
 __all__ = [
-    "process",
-    "generate_files",
-    "validate",
-    "split_page_ranges",
     "bitonal_chunk",
-    "ocr_chunk",
-    "yolo_scan_chunk",
-    "merge_pdfs",
+    "generate_files",
     "merge_detections",
+    "merge_pdfs",
+    "ocr_chunk",
     "pair_and_compute_rects",
+    "process",
+    "split_page_ranges",
+    "validate",
+    "yolo_scan_chunk",
 ]
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {

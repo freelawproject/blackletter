@@ -14,7 +14,6 @@ import pytest
 
 from blackletter import api
 
-
 HF_REPO = "freelawproject/blackletter-weights"
 
 

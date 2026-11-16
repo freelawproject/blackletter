@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 from collections.abc import Callable
@@ -9,6 +10,8 @@ from multiprocessing import Pool, cpu_count
 from pathlib import Path
 
 from PIL import Image
+
+logger = logging.getLogger(__name__)
 
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 
@@ -78,7 +81,7 @@ def _scan_crop(
                         }
                     )
         except Exception:
-            pass
+            logger.debug("paddle OCR failed on a page zone", exc_info=True)
         return hits, near_misses
     import numpy as np
 
@@ -191,7 +194,7 @@ def _ocr_crop_multi(
                         "ocr": "tesseract",
                     }
     except Exception:
-        pass
+        logger.debug("tesseract failed on a page zone", exc_info=True)
 
     # 3) GLM-OCR, lazy-load only when paddle + tesseract both fail
     if glm_processor is None and glm_model is None:
@@ -210,7 +213,7 @@ def _ocr_crop_multi(
             _process_page._glm_model = glm_model
             print(f"  GLM-OCR loaded (page {page_idx})", flush=True)
         except Exception:
-            pass
+            logger.debug("GLM-OCR could not be loaded", exc_info=True)
     if glm_processor is not None and glm_model is not None:
         # GLM needs a file path; write a temp file only for this rare fallback.
         tmp_path = f"/tmp/pn_{os.getpid()}_{page_idx}_{zone_name}.png"
@@ -253,7 +256,7 @@ def _ocr_crop_multi(
                             "ocr": "glm",
                         }
         except Exception:
-            pass
+            logger.debug("GLM-OCR failed on a page zone", exc_info=True)
         finally:
             try:
                 os.unlink(tmp_path)
@@ -351,7 +354,7 @@ def _process_page(args: tuple) -> dict:
                 use_doc_unwarping=False,
                 enable_mkldnn=False,  # x86 fix
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - paddle is optional; fall through to tesseract
             _process_page._ocr = None
     if not hasattr(_process_page, "_yolo"):
         from ultralytics import YOLO

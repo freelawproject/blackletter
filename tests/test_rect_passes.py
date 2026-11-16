@@ -8,12 +8,11 @@ portal, post-processing this library's own output.
 
 from __future__ import annotations
 
+import fitz
 import pytest
 
 from blackletter.margins import _shrink_rects_for_detections
 from blackletter.models import Label
-import fitz
-
 from blackletter.process import (
     _drop_degenerate,
     _drop_rects_off_the_columns,

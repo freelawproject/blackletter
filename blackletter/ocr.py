@@ -196,7 +196,7 @@ def _downsample_pdf(
 
     results = []
     for i, (xref, img, dpi) in enumerate(work_items):
-        jpeg_bytes, quality, final_dpi = _compress_image(img, dpi, target_kb)
+        jpeg_bytes, _quality, _final_dpi = _compress_image(img, dpi, target_kb)
         out_img = Image.open(io.BytesIO(jpeg_bytes))
         results.append((xref, jpeg_bytes, out_img.width, out_img.height))
         done = i + 1
