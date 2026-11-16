@@ -150,7 +150,7 @@ class TestBitonalIsRefusedForBlWarm:
     def _stop_after_guard(self, monkeypatch):
         """Make the first call after the guard raise, so reaching it is
         the proof the guard was passed, not some unrelated failure."""
-        import blackletter.process as process
+        from blackletter import process
 
         def _raise(_args):
             raise _PastTheGuard

@@ -103,8 +103,8 @@ _EXCLUSION_TOLERANCE = 10
 
 
 def _check_excluded(
-    d: "Detection",
-    excluded: "set[tuple[int, int, int, int]] | None",
+    d: Detection,
+    excluded: set[tuple[int, int, int, int]] | None,
     tolerance: int = _EXCLUSION_TOLERANCE,
 ) -> bool:
     """Return True if detection *d* matches any entry in *excluded*.
@@ -602,7 +602,7 @@ def scan(
     :param progress_callback: Optional callable(current, total, message).
     :returns: Document with all detections populated.
     """
-    from blackletter.ocr import needs_ocr, ocr_pdf, _downsample_pdf
+    from blackletter.ocr import _downsample_pdf, needs_ocr, ocr_pdf
 
     dest_dir = output_dir if output_dir else Path(tempfile.gettempdir())
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -1877,9 +1877,14 @@ def _opinion_page_bounds(
     else:
         first_num = start_idx + first_page
 
-    if end_page is not None and end_page.page_number_end and end_page.page_number is not None:
-        last_num = end_page.page_number
-    elif end_page is not None and end_page.page_number is not None and end_page.page_number:
+    if (
+        end_page is not None
+        and end_page.page_number_end
+        and end_page.page_number is not None
+        or end_page is not None
+        and end_page.page_number is not None
+        and end_page.page_number
+    ):
         last_num = end_page.page_number
     else:
         last_num = end_idx + first_page

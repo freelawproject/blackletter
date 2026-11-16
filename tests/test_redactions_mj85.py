@@ -223,8 +223,10 @@ class TestRecompressDoesNotCorrupt:
     """Verify recompress_images doesn't destroy redacted pages."""
 
     def test_recompress_preserves_rendering(self):
-        import fitz
         import io
+
+        import fitz
+
         from blackletter.scanner import recompress_images
 
         pdf = fitz.open(str(PDF_PATH))

@@ -20,34 +20,34 @@ from blackletter.bl_warm import (
 from blackletter.models import BBox, Detection, Label
 from blackletter.refine import refine_headnote_rects
 from blackletter.scanner import (
-    clamp_to_gutters,
-    snap_document_columns,
-    scan,
-    split_opinions,
-    recompress_images,
-    _pair_opinions,
+    _NO_TIGHTEN,
+    _REDACT_BLACK,
+    _REDACT_WHITE,
     _check_excluded,
-    _outside_opinion_rects,
-    _group_detections_by_page,
-    _collect_page_number_rects,
-    _opinion_page_bounds,
-    _make_add_safe,
-    _iter_case_sequence_rects,
     _clip_headnote_rect,
-    _write_pages_meta_sidecar,
-    _margin_bounds,
+    _collect_page_number_rects,
+    _filter_key_icons_by_size,
     _find_redaction_end,
-    _headnote_fallback_rects,
-    _redaction_rects,
     _find_redaction_start,
-    _tighten_to_text,
+    _group_detections_by_page,
+    _headnote_fallback_rects,
+    _iter_case_sequence_rects,
+    _make_add_safe,
+    _margin_bounds,
+    _opinion_page_bounds,
+    _outside_opinion_rects,
+    _pair_opinions,
+    _redaction_rects,
     _text_bottom,
     _text_x_bounds,
-    _REDACT_WHITE,
-    _REDACT_BLACK,
-    _NO_TIGHTEN,
-    _filter_key_icons_by_size,
+    _tighten_to_text,
+    _write_pages_meta_sidecar,
+    clamp_to_gutters,
     label_confidence,
+    recompress_images,
+    scan,
+    snap_document_columns,
+    split_opinions,
 )
 
 logger = logging.getLogger("blackletter")
@@ -241,6 +241,7 @@ def _redact_bitonal_image(fitz_page, fitz_doc, redaction_rects):
     """
     import io
     import zlib
+
     import numpy as np
     from PIL import Image, ImageDraw
 
@@ -1310,8 +1311,7 @@ def _infer_from_filename(pdf_path: Path) -> dict:
 
     stem = _re.sub(r"[_-](redacted|ocr|compressed|dupes|bitonal|copy|fixed)\b.*", "", stem)
     for suffix in (".redacted", ".ocr", ".compressed"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
+        stem = stem.removesuffix(suffix)
 
     parts = stem.split(".")
     if len(parts) >= 4:
@@ -1516,6 +1516,7 @@ def cmd_process(args: argparse.Namespace) -> None:
         large_model_path = Path(__file__).resolve().parent / "weights" / "large.pt"
         if _primary_is_warm or large_model_path.exists():
             from PIL import Image as _PILImage
+
             from blackletter.scanner import DPI
 
             large_model = model if _primary_is_warm else YOLO(str(large_model_path))
@@ -1808,7 +1809,8 @@ def reprocess_section(
 
     # Inject manual detections (remapped to section-local page indices)
     if injected:
-        from blackletter.models import BBox, Detection, Label as _InjLabel
+        from blackletter.models import BBox, Detection
+        from blackletter.models import Label as _InjLabel
 
         injected_count = 0
         for det_dict in injected:
@@ -1933,6 +1935,7 @@ def rebuild_full_redacted_from_detections(
     that file exists.
     """
     import json as _json
+
     from blackletter.models import Detection, Document, Page
 
     detections_json_path = Path(detections_json_path)
@@ -2006,6 +2009,7 @@ def generate_files(
     """
     import json as _json
     import time as _time
+
     from blackletter.models import Detection, Document, Page
 
     _t_total = _time.time()
