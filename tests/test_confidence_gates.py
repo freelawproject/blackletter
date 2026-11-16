@@ -111,6 +111,10 @@ class TestRowsAreBlWarm:
         assert not rows_are_bl_warm([])
 
 
+class _PastTheGuard(Exception):
+    """Raised by the stubbed first call after the bitonal guard."""
+
+
 class TestBitonalIsRefusedForBlWarm:
     """bl-warm has to see the original render, not the 1-bit copy.
 
@@ -143,6 +147,16 @@ class TestBitonalIsRefusedForBlWarm:
 
         monkeypatch.setattr(ultralytics, "YOLO", _Model)
 
+    def _stop_after_guard(self, monkeypatch):
+        """Make the first call after the guard raise, so reaching it is
+        the proof the guard was passed, not some unrelated failure."""
+        import blackletter.process as process
+
+        def _raise(_args):
+            raise _PastTheGuard
+
+        monkeypatch.setattr(process, "_build_output_dir", _raise)
+
     def test_bl_warm_with_bitonal_exits(self, tmp_path, monkeypatch, capsys):
         from blackletter.process import cmd_process
 
@@ -157,18 +171,17 @@ class TestBitonalIsRefusedForBlWarm:
         from blackletter.process import cmd_process
 
         self._stub_yolo(monkeypatch, {0: "keycite", 1: "body"})
+        self._stop_after_guard(monkeypatch)
         args = self._args(tmp_path)
         args.model = tmp_path / "bl_hein.pt"
         args.model.touch()
-        with pytest.raises(Exception) as exc:
+        with pytest.raises(_PastTheGuard):
             cmd_process(args)
-        assert not isinstance(exc.value, SystemExit)
 
     def test_a_legacy_model_with_bitonal_is_left_alone(self, tmp_path, monkeypatch):
-        """It gets past the guard; the run then fails on the missing PDF."""
         from blackletter.process import cmd_process
 
         self._stub_yolo(monkeypatch, {0: "key_icon", 1: "page_header"})
-        with pytest.raises(Exception) as exc:
+        self._stop_after_guard(monkeypatch)
+        with pytest.raises(_PastTheGuard):
             cmd_process(self._args(tmp_path))
-        assert not isinstance(exc.value, SystemExit)
