@@ -175,7 +175,7 @@ def yolo_scan_chunk(
     from ultralytics import YOLO
 
     from blackletter.models import Label
-    from blackletter.scanner import _safe_detect_columns, _extract_page_number, DPI, YOLO_BATCH
+    from blackletter.scanner import DPI, YOLO_BATCH, _extract_page_number, _safe_detect_columns
 
     model = YOLO(str(model_path))
     pdf = fitz.open(str(pdf_path))
@@ -363,15 +363,15 @@ def pair_and_compute_rects(
         Dict with opinions_count, rects_count.
     """
     from blackletter.bl_warm import rows_are_bl_warm
+    from blackletter.margins import compute_margin_rects
     from blackletter.models import Detection, Document, Page
+    from blackletter.process import compute_redaction_rects
     from blackletter.scanner import (
-        snap_document_columns,
-        _pair_opinions,
         _build_opinions_data,
         _group_detections_by_page,
+        _pair_opinions,
+        snap_document_columns,
     )
-    from blackletter.process import compute_redaction_rects
-    from blackletter.margins import compute_margin_rects
 
     output_dir = Path(output_dir)
     pdf_path = Path(pdf_path)

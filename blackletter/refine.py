@@ -130,10 +130,8 @@ def refine_headnote_rects(
     result: list[tuple[int, fitz.Rect]] = []
 
     total_pages = len(by_page)
-    done_pages = 0
     print(f"    docTR: refining {len(headnote_rects)} rects on {total_pages} pages...", flush=True)
-    for page_idx, rects in by_page.items():
-        done_pages += 1
+    for done_pages, (page_idx, rects) in enumerate(by_page.items(), start=1):
         if done_pages % 10 == 0 or done_pages == total_pages:
             print(f"    docTR: {done_pages}/{total_pages} pages", flush=True)
         fitz_page = pdf[page_idx]

@@ -21,22 +21,22 @@ from blackletter.ink import (
 )
 from tests.pdf_fixtures import (
     BOTTOM_BAR,
-    FONT_SIZE,
-    LINE_LEADING,
     COLUMN_LEFT,
     COLUMN_RIGHT,
     CONTENT,
+    FONT_SIZE,
     HEADER_LINE_Y,
+    LINE_LEADING,
     PAGE_H,
     PAGE_W,
     TOUCHING_BAR,
+    _line_for_width,
     rasterize,
     write_bitonal_page,
     write_multi_page,
     write_text_page,
     write_two_column_page,
 )
-from tests.pdf_fixtures import _line_for_width
 
 # The measured box lands within a few points of CONTENT: glyphs start
 # below the box top, and the last line ends above its bottom.

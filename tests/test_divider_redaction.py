@@ -25,7 +25,6 @@ from blackletter.process import compute_redaction_rects
 from blackletter.scanner import _NO_TIGHTEN
 from tests.pdf_fixtures import PAGE_H, PAGE_W, detected_page, detection
 
-
 # The real detection from scan 2845, page_index 100: bbox [438.2, 754.5,
 # 611.0, 794.5] in the 200 dpi pixels of a 1700 px page, confidence 0.876.
 # 62.2 x 14.4 pt once scaled.

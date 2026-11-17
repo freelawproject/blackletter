@@ -10,8 +10,8 @@ from pathlib import Path
 from blackletter.api import ensure_weights
 from blackletter.models import Label
 from blackletter.scanner import (
-    scan,
     draw_detections,
+    scan,
 )
 
 logger = logging.getLogger("blackletter")

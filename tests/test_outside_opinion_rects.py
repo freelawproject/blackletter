@@ -5,7 +5,7 @@ TEXT_COLUMN detections and do not bleed into adjacent columns.
 """
 
 from blackletter.models import BBox, Detection, Label, Page
-from blackletter.scanner import _outside_opinion_rects, _column_bounds_pdf
+from blackletter.scanner import _column_bounds_pdf, _outside_opinion_rects
 
 
 def _make_page(

@@ -256,9 +256,9 @@ def _ink_is_artifact_like(
     mask, sx, sy = page_mask(fitz_page)
     height, width = mask.shape
     c0 = max(0, min(int(x0 / sx), width))
-    c1 = max(c0, min(int(round(x1 / sx)), width))
+    c1 = max(c0, min(round(x1 / sx), width))
     r0 = max(0, min(int(top / sy), height))
-    r1 = max(r0, min(int(round(bottom / sy)), height))
+    r1 = max(r0, min(round(bottom / sy), height))
     window = mask[r0:r1, c0:c1]
     if not window.size or window.shape[0] == 0:
         return True
