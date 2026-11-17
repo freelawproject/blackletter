@@ -2,6 +2,8 @@
 
 ## Coming up
 
+- Support the `bl_hein` weights, bl-warm retrained on Hein-format pages (1-bit, 300 dpi, page-cropped) with the same 18 classes. `api._HF_WEIGHTS` gains a `bl_hein` entry pinned to the commit that uploaded it, so `ensure_weights(["bl_hein"])` and `detect(pdf, out, models=["bl_hein"])` resolve it. `bl_warm.BL_WARM_MODELS` names the family (`bl_warm`, `bl_hein`): `rows_are_bl_warm` is true for rows from any of them, so `bl_hein` gets bl-warm's confidence gates rather than the legacy ones, and `api.detect` trusts the family for `CASE_CAPTION` and `KEY_ICON`. `blackletter process --bitonal` is still refused for bl-warm but allowed for `bl_hein`, which was trained on 1-bit pages (#90)
+- **Scanning, before running a Hein volume on this release:** scanning asks the family question of its database in `findings.py` and accepts only `bl_warm` in `found_by`, so it would read a `bl_hein` scan as legacy and show a 0.30–0.50 `HEADNOTE_BRACKET` or `PAGE_HEADER` that blackletter redacts as under the gate. Its check must accept every name in `bl_warm.BL_WARM_MODELS` (#90)
 - Make the code pass ruff v0.16.10, which the pre-commit update switched the linter to and which flags more by default: sorted imports and `__all__`, plus 28 findings fixed by hand. No behaviour change, with two visible edges: the OCR fallbacks in `blackletter.analyze` that swallowed an engine's fault silently now log it at DEBUG with the traceback, and the ERROR line `api.generate` logs for a failed opinion no longer repeats the exception text that its traceback already carries.
 
 ## Current

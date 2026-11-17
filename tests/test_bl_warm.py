@@ -33,6 +33,29 @@ BL_WARM_NAMES: dict[int, str] = {
     17: "blockquote",
 }
 
+# bl_hein's ``names`` dict, read from the checkpoint pinned in
+# ``api._HF_WEIGHTS``: the same 18 names under different ids.
+BL_HEIN_NAMES: dict[int, str] = {
+    0: "key_icon",
+    1: "keycite",
+    2: "headnote_bracket",
+    3: "background",
+    4: "syllabus",
+    5: "editorial",
+    6: "divider",
+    7: "caption",
+    8: "case_metadata",
+    9: "case_sequence",
+    10: "page_header",
+    11: "page_number",
+    12: "state_abbreviation",
+    13: "body",
+    14: "footnote_block",
+    15: "image",
+    16: "blockquote",
+    17: "heading",
+}
+
 
 class _Scalar:
     def __init__(self, value):
@@ -77,6 +100,28 @@ class TestNameMapping:
     def test_mapping_has_no_stale_names(self):
         stale = set(_NAME_TO_LABEL) - set(BL_WARM_NAMES.values())
         assert not stale, f"mapped names bl-warm does not emit: {sorted(stale)}"
+
+    def test_bl_hein_has_the_same_classes_under_the_same_names(self):
+        assert set(BL_HEIN_NAMES.values()) == set(BL_WARM_NAMES.values())
+        assert is_bl_warm(BL_HEIN_NAMES)
+
+    def test_bl_hein_rows_translate_by_name_not_id(self):
+        """bl_hein orders its ids differently; the adapter reads names."""
+        ids = {v: k for k, v in BL_HEIN_NAMES.items()}
+        result = _Result(
+            [
+                _Box(ids["caption"], [10, 20, 110, 40], conf=0.8),
+                _Box(ids["key_icon"], [10, 60, 30, 80], conf=0.7),
+                _Box(ids["body"], [0, 0, 100, 100], conf=0.9),
+            ],
+            names=BL_HEIN_NAMES,
+        )
+        assert list(iter_label_rows(result)) == [
+            (int(Label.CASE_CAPTION), 0.8, [10, 20, 110, 40]),
+            (int(Label.KEY_ICON), 0.7, [10, 60, 30, 80]),
+            (int(Label.TEXT_COLUMN), 0.9, [0, 0, 50.0, 100]),
+            (int(Label.TEXT_COLUMN), 0.9, [50.0, 0, 100, 100]),
+        ]
 
     def test_heading_and_blockquote_map_to_their_own_labels(self):
         assert _NAME_TO_LABEL["heading"] is Label.HEADING

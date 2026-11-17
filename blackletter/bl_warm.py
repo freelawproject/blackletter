@@ -55,6 +55,17 @@ _NAME_TO_LABEL: dict[str, Label] = {
 }
 
 
+# Weight names of the bl-warm family: bl-warm itself and its retrains,
+# which share its 18 classes, this adapter and its confidence gates
+# (:data:`blackletter.scanner.BL_WARM_LABEL_CONFIDENCE`). ``bl_hein`` is
+# bl-warm retrained on Hein-format pages (1-bit, 300 dpi, page-cropped).
+BL_WARM_MODELS: frozenset[str] = frozenset({"bl_warm", "bl_hein"})
+
+# Family members trained on 1-bit pages. bl-warm proper collapses on
+# bitonal input (see ``cmd_process``); these do not.
+BITONAL_TRAINED_MODELS: frozenset[str] = frozenset({"bl_hein"})
+
+
 def is_bl_warm(names: dict[int, str]) -> bool:
     """True when a loaded model's ``names`` dict is bl-warm's class set.
 
@@ -66,7 +77,8 @@ def is_bl_warm(names: dict[int, str]) -> bool:
 
 
 def rows_are_bl_warm(rows: list[dict]) -> bool:
-    """True when bl-warm alone produced these serialised detection rows.
+    """True when the bl-warm family alone produced these serialised
+    detection rows (any of :data:`BL_WARM_MODELS`, e.g. ``bl_hein``).
 
     Rows carry provenance either as ``model`` (the sidecar written by
     :func:`blackletter.scanner._write_detections_sidecar`) or as
@@ -75,7 +87,8 @@ def rows_are_bl_warm(rows: list[dict]) -> bool:
     legacy confidence gates.
 
     :param rows: Raw detection dicts, e.g. loaded from detections.json.
-    :returns: Whether every row with provenance came from bl-warm.
+    :returns: Whether every row with provenance came from the bl-warm
+        family.
     """
     models: set[str] = set()
     for row in rows:
@@ -84,7 +97,7 @@ def rows_are_bl_warm(rows: list[dict]) -> bool:
             models.update(entry.get("model") for entry in found_by)
         elif row.get("model"):
             models.add(row["model"])
-    return bool(models) and models == {"bl_warm"}
+    return bool(models) and models <= BL_WARM_MODELS
 
 
 def iter_label_rows(result: Any) -> Iterator[tuple[int, float, list[float]]]:
