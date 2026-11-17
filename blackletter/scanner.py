@@ -103,8 +103,8 @@ _EXCLUSION_TOLERANCE = 10
 
 
 def _check_excluded(
-    d: "Detection",
-    excluded: "set[tuple[int, int, int, int]] | None",
+    d: Detection,
+    excluded: set[tuple[int, int, int, int]] | None,
     tolerance: int = _EXCLUSION_TOLERANCE,
 ) -> bool:
     """Return True if detection *d* matches any entry in *excluded*.
@@ -312,7 +312,7 @@ def _safe_detect_columns(
     img_bgr = cv2.cvtColor(np.array(img_rgb), cv2.COLOR_RGB2BGR)
     try:
         return detect_columns(img_bgr)
-    except Exception:
+    except Exception:  # noqa: BLE001 - "safe" means any fault reads as no columns
         return 0.0, 0.0, 0.0, 0.0, 0.0
 
 
@@ -350,6 +350,7 @@ def _ocr_region(fitz_page, rect: fitz.Rect, psm: int = 7) -> str:
             ],
             capture_output=True,
             text=True,
+            check=False,
         )
         Path(tmp.name).unlink(missing_ok=True)
     return result.stdout.strip()
@@ -361,9 +362,7 @@ def _plausible(n: int, hint: int, max_digits: int = 4) -> bool:
         return False
     if n == 0:
         return False
-    if hint > 0 and abs(n - hint) > 20:
-        return False
-    return True
+    return not (hint > 0 and abs(n - hint) > 20)
 
 
 def _parse_page_range(text: str) -> tuple[int, ...] | None:
@@ -602,7 +601,7 @@ def scan(
     :param progress_callback: Optional callable(current, total, message).
     :returns: Document with all detections populated.
     """
-    from blackletter.ocr import needs_ocr, ocr_pdf, _downsample_pdf
+    from blackletter.ocr import _downsample_pdf, needs_ocr, ocr_pdf
 
     dest_dir = output_dir if output_dir else Path(tempfile.gettempdir())
     dest_dir.mkdir(parents=True, exist_ok=True)
@@ -946,9 +945,10 @@ def _correct_page_numbers(pages: list[Page]) -> None:
             expected = prev_num + prev_dist
 
             # If page has a range and either number matches, leave it alone
-            if pages[i].page_number_end is not None:
-                if pages[i].page_number == expected or pages[i].page_number_end == expected:
-                    continue
+            if pages[i].page_number_end is not None and (
+                pages[i].page_number == expected or pages[i].page_number_end == expected
+            ):
+                continue
 
             if pages[i].page_number != expected:
                 pages[i].page_number = expected
@@ -1877,9 +1877,11 @@ def _opinion_page_bounds(
     else:
         first_num = start_idx + first_page
 
-    if end_page is not None and end_page.page_number_end and end_page.page_number is not None:
-        last_num = end_page.page_number
-    elif end_page is not None and end_page.page_number is not None and end_page.page_number:
+    if (
+        end_page is not None
+        and end_page.page_number is not None
+        and (end_page.page_number_end or end_page.page_number)
+    ):
         last_num = end_page.page_number
     else:
         last_num = end_idx + first_page

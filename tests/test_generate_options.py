@@ -11,6 +11,7 @@ put on the page before the paint. Everything here is one of those.
 from __future__ import annotations
 
 import logging
+from typing import ClassVar
 
 import fitz
 import numpy as np
@@ -357,7 +358,7 @@ class TestThePictures:
     of a picture still blacks it out.
     """
 
-    IMAGE_RECT = {"x0": 200.0, "y0": 200.0, "x1": 400.0, "y1": 400.0}
+    IMAGE_RECT: ClassVar[dict[str, float]] = {"x0": 200.0, "y0": 200.0, "x1": 400.0, "y1": 400.0}
 
     #: The fixture's pages are rasterized scans, so each one already holds
     #: one image before anything is inserted.

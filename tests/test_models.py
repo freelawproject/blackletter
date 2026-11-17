@@ -2,7 +2,6 @@ from pathlib import Path
 
 from blackletter.models import BBox, Detection, Document, Label, Page
 
-
 # ── Label ────────────────────────────────────────────────────────────────
 
 

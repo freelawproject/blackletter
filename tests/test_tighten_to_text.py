@@ -6,8 +6,7 @@ we introduce per-page word caching.
 
 import fitz
 
-from blackletter.scanner import _tighten_to_text, _text_bottom, _text_x_bounds, _words_in_rect
-
+from blackletter.scanner import _text_bottom, _text_x_bounds, _tighten_to_text, _words_in_rect
 
 # ── Helpers ─────────────────────────────────────────────────────────────
 

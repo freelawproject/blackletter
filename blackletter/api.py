@@ -495,6 +495,7 @@ def detect(
     """
     from PIL import Image
     from ultralytics import YOLO
+
     from blackletter.models import Label
 
     pdf_path = Path(pdf_path)
@@ -671,9 +672,10 @@ def pair(
         outside_rects.
     """
     from blackletter.bl_warm import rows_are_bl_warm
-    from blackletter.models import Detection as BLDetection, Document, Page
-    from blackletter.scanner import _pair_opinions, snap_document_columns
     from blackletter.junk import drop_junk
+    from blackletter.models import Detection as BLDetection
+    from blackletter.models import Document, Page
+    from blackletter.scanner import _pair_opinions, snap_document_columns
 
     pdf_path = Path(pdf_path)
 
@@ -815,8 +817,8 @@ def build_redacted(
     :returns: Path to the redacted PDF.
     """
     from blackletter.bl_warm import rows_are_bl_warm
-    from blackletter.process import _build_redacted_from_rects
     from blackletter.models import Document, Page
+    from blackletter.process import _build_redacted_from_rects
 
     pdf_path = Path(pdf_path)
     output_dir = Path(output_dir)
@@ -854,8 +856,8 @@ def build_redacted(
                 )
             )
 
-    from blackletter.scanner import snap_document_columns
     from blackletter.junk import drop_junk
+    from blackletter.scanner import snap_document_columns
 
     document = Document(
         pdf_path=pdf_path, pages=pages, ocr_applied=True, bl_warm=rows_are_bl_warm(det_data)
@@ -1384,13 +1386,12 @@ def generate(
                 # gets the whole batch minus this file, and the traceback
                 # exists nowhere else, since nothing is raised.
                 logger.exception(
-                    "generate %s: opinion %d (%s), pages %s-%s failed: %s",
+                    "generate %s: opinion %d (%s), pages %s-%s failed",
                     pdf_path.name,
                     i,
                     filename,
                     op.get("caption_page"),
                     op.get("end_page"),
-                    exc,
                 )
                 # A fault inside ``save`` leaves a truncated file that looks
                 # like a deliverable. Only the files this call writes: an

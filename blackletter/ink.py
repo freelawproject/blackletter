@@ -272,9 +272,9 @@ def ink_bbox(
     x0, y0, x1, y1 = region.x0, region.y0, region.x1, region.y1
 
     c0 = max(0, min(int(x0 / sx), width))
-    c1 = max(c0, min(int(round(x1 / sx)), width))
+    c1 = max(c0, min(round(x1 / sx), width))
     r0 = max(0, min(int(y0 / sy), height))
-    r1 = max(r0, min(int(round(y1 / sy)), height))
+    r1 = max(r0, min(round(y1 / sy), height))
     window = mask[r0:r1, c0:c1]
     if not window.size:
         return None
@@ -333,7 +333,7 @@ def _outside_before(edge: float, scale: float) -> int:
     :param scale: Points per pixel line along that axis.
     :return: The pixel index.
     """
-    return int(math.floor(edge / scale)) - 1
+    return math.floor(edge / scale) - 1
 
 
 def _outside_after(edge: float, scale: float) -> int:
@@ -343,7 +343,7 @@ def _outside_after(edge: float, scale: float) -> int:
     :param scale: Points per pixel line along that axis.
     :return: The pixel index.
     """
-    return int(math.ceil(edge / scale))
+    return math.ceil(edge / scale)
 
 
 def _grow_edge(
@@ -461,9 +461,9 @@ def grow_to_ink(
     lim_x0, lim_y0, lim_x1, lim_y1 = box if box else (0.0, 0.0, width * sx, height * sy)
 
     c0 = max(0, min(int(region.x0 / sx), width - 1))
-    c1 = max(c0 + 1, min(int(round(region.x1 / sx)), width))
+    c1 = max(c0 + 1, min(round(region.x1 / sx), width))
     r0 = max(0, min(int(region.y0 / sy), height - 1))
-    r1 = max(r0 + 1, min(int(round(region.y1 / sy)), height))
+    r1 = max(r0 + 1, min(round(region.y1 / sy), height))
 
     # Columns first, over the rect's own rows, then rows over the widened
     # span, so a clipped character contributes to both.
